@@ -200,6 +200,36 @@ struct Rig {
         #expect(r.engine.phase.isCountdown)
     }
 
+    @Test func sleepEndsPanic() {
+        var r = Rig { $0.graceSeconds = 0 }
+        r.hold(60, for: 7)
+        r.move(from: 60, to: 20, over: 0.5)
+        #expect(r.engine.phase.active?.isPanicking == true)
+        r.cmd(.systemWillSleep)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        #expect(r.engine.phase.active?.locked == true)
+    }
+
+    @Test func restoreLockedEntersLocked() {
+        var r = Rig()
+        r.hold(100, for: 1)
+        r.cmd(.restoreLocked)
+        #expect(r.engine.phase.active?.locked == true)
+        r.cmd(.turnOff)
+        #expect(r.engine.phase.isActive)
+        r.cmd(.unlocked)
+        #expect(r.engine.phase == .idle)
+    }
+
+    @Test func staleSamplesDropWhenSensorDisappears() {
+        var r = Rig { $0.graceSeconds = 0 }
+        r.hold(60, for: 7)
+        // Sensor vanishes mid-close: no panic from stale samples afterwards.
+        for _ in 0..<60 { r.t += 1.0 / 30; _ = r.engine.update(now: r.t, angle: nil, agentsRunning: r.agents) }
+        #expect(r.engine.sampler.samples.isEmpty)
+        #expect(r.engine.phase.active?.isPanicking == false)
+    }
+
     @Test func settingsDecodeTolerantly() throws {
         let json = #"{"thresholdAngle": 60, "unknownKey": 5, "faceID": "orbit"}"#.data(using: .utf8)!
         let s = try JSONDecoder().decode(ModeSettings.self, from: json)

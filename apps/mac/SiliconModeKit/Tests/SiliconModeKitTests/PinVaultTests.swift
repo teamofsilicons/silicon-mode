@@ -13,6 +13,16 @@ import Foundation
         #expect(v.verify("482913") == .ok) // success resets failures
     }
 
+    @Test func readFailureIsNeverSuccess() throws {
+        final class FailingStore: PinStore, @unchecked Sendable {
+            func load() throws -> PinVault.Record? { throw PinError.storage(-25308) } // errSecInteractionNotAllowed
+            func save(_ r: PinVault.Record) throws {}
+            func delete() throws {}
+        }
+        let v = PinVault(store: FailingStore())
+        #expect(v.verify("123456") == .unavailable)
+    }
+
     @Test func rejectsBadFormat() {
         let v = PinVault(store: MemoryPinStore())
         #expect(throws: PinError.self) { try v.set(pin: "12345") }

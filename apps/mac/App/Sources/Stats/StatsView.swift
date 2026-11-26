@@ -331,7 +331,7 @@ enum StatsWindow {
                 window = nil
                 if let o = closeObserver { NotificationCenter.default.removeObserver(o) }
                 closeObserver = nil
-                if NSApp.windows.filter({ $0.isVisible && $0.styleMask.contains(.titled) }).isEmpty {
+                if NSApp.windows.filter({ $0 !== w && $0.isVisible && $0.styleMask.contains(.titled) }).isEmpty {
                     NSApp.setActivationPolicy(.accessory)
                 }
             }

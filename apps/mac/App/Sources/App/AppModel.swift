@@ -80,6 +80,7 @@ final class AppModel {
     private var agentTask: Task<Void, Never>?
     private var started = false
     private var readFailures = 0
+    private var probeCountdown = 90
 
     var needsOnboarding: Bool { !pinVault.isSet }
 
@@ -106,8 +107,13 @@ final class AppModel {
 
         // Hook server (Claude Code / Codex hooks → real-time state + answerable prompts).
         let policy = holdPolicySnapshot
+        let disabledSnap = disabledProvidersSnapshot
+        disabledSnap.value = Set(settings.disabledProviders)
         hookServer.holdDuration = { agent in
             // Called on the hook server's queue; reads a snapshot published from the main actor.
+            // A provider the user switched off is neither shown nor answerable: never hold it.
+            let provider = agent == "claude-code-headless" ? "claude-code" : agent
+            if disabledSnap.value.contains(provider) { return 0 }
             let p = policy.value
             // Claude Code answers its own dialog in parallel, so holding is always safe there.
             return agent == "claude-code" ? max(p, 6 * 3600) : p
@@ -138,7 +144,17 @@ final class AppModel {
             MainActor.assumeIsolated { AppModel.shared.systemDidWake() }
         }
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { AppModel.shared.handle(.systemWillSleep) }
+            MainActor.assumeIsolated {
+                AppModel.shared.handle(.systemWillSleep)
+                AppModel.shared.sounds.stopPanic(immediate: true)
+            }
+        }
+
+        // Killed or crashed while locked (same boot)? Come straight back locked.
+        if LockMarker.isPresentForThisBoot(), pinVault.mayBeSet {
+            handle(.restoreLocked)
+        } else {
+            LockMarker.clear()
         }
 
         // ⌃⌥S
@@ -154,10 +170,19 @@ final class AppModel {
     // MARK: Ticks
 
     private func tick() {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = MonotonicClock.now()
         var reading: Double?
         if let sim = simulatedAngle {
             reading = sim
+        } else if sensorAvailability != .available {
+            // Keep looking for the sensor (one failed probe must not disable lid features).
+            probeCountdown -= 1
+            if probeCountdown <= 0 {
+                probeCountdown = 90
+                sensor.probe()
+                sensorAvailability = sensor.availability
+                readFailures = 0
+            }
         } else if sensorAvailability == .available {
             reading = sensor.readAngle()
             if reading == nil {
@@ -215,17 +240,23 @@ final class AppModel {
         let r = pinVault.verify(pin)
         switch r {
         case .ok: handle(.unlocked)
-        case .wrong, .throttled: sounds.play(.wrongPin)
-        case .notSet: handle(.unlocked) // no PIN configured → nothing to protect
+        case .wrong, .throttled, .unavailable: sounds.play(.wrongPin)
+        case .notSet:
+            // No PIN configured → nothing to protect, unless one existed when this session began
+            // (it can't silently vanish mid-session; fail closed).
+            if pinRequiredForSession { sounds.play(.wrongPin) } else { handle(.unlocked) }
         }
         return r
     }
+
+    /// A PIN existed (or couldn't be ruled out) when Silicon Mode was entered.
+    private(set) var pinRequiredForSession = false
 
     /// Called by the Touch ID UI after a successful LocalAuthentication evaluation.
     func unlockedWithBiometrics() { handle(.unlocked) }
 
     func pauseAutoEntry(for duration: TimeInterval?) {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = MonotonicClock.now()
         if let d = duration {
             autoPausedUntil = Date().addingTimeInterval(d)
             handle(.pauseAutoEntry(until: now + d))
@@ -251,7 +282,7 @@ final class AppModel {
     }
 
     private func handle(_ c: ModeEngine.Command) {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = MonotonicClock.now()
         apply(engine.handle(c, now: now, agentsRunning: counts.running))
         syncFromEngine(now: now)
     }
@@ -270,6 +301,7 @@ final class AppModel {
                 if settings.uiSoundsEnabled { sounds.play(.dismiss) }
             case .entered:
                 enteredAt = Date()
+                pinRequiredForSession = pinVault.mayBeSet
                 unlockPresented = false
                 overlay.hideCountdown()
                 overlay.enter()
@@ -277,8 +309,12 @@ final class AppModel {
                 kiosk.engage()
                 if settings.uiSoundsEnabled { sounds.play(.enter) }
             case .locked:
-                break
+                LockMarker.write()
+                LockGuard.start()
             case .exited:
+                LockMarker.clear()
+                LockGuard.stop()
+                pinRequiredForSession = false
                 enteredAt = nil
                 unlockPresented = false
                 sounds.stopPanic()
@@ -311,6 +347,7 @@ final class AppModel {
         if !settings.panicSoundEnabled { sounds.stopPanic() }
         if settings.disabledProviders != old.disabledProviders {
             let d = Set(settings.disabledProviders)
+            disabledProvidersSnapshot.value = d
             Task { await hub.setDisabled(d); await refreshAgents() }
         }
         if settings.panicVolume != old.panicVolume { sounds.setPanicVolume(settings.panicVolume) }
@@ -328,6 +365,7 @@ final class AppModel {
 
     /// Thread-safe snapshot the hook server reads to decide how long to hold a prompt.
     nonisolated let holdPolicySnapshot = LockedValue<TimeInterval>(0)
+    nonisolated let disabledProvidersSnapshot = LockedValue<Set<String>>([])
 
     private func updateHoldPolicy() {
         // In Silicon Mode the human is away: hold prompts so they can be answered from the
@@ -399,4 +437,76 @@ enum Flags {
     static let noKiosk = CommandLine.arguments.contains("--no-kiosk")
     /// Debug builds outside /Applications never register as login items.
     static var isDevBuild: Bool { !Bundle.main.bundlePath.hasPrefix("/Applications/") }
+}
+
+/// Monotonic seconds that keep counting while the Mac sleeps (CLOCK_MONOTONIC on Darwin), so the
+/// grace minute and auto-entry pauses are measured in real elapsed time.
+enum MonotonicClock {
+    static func now() -> Double { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1e9 }
+}
+
+/// Persistent "Silicon Mode is locked" marker (~/.silicon-mode/run/locked), tagged with the boot
+/// time so a killed/crashed app relaunches locked on the same boot, but a reboot starts fresh.
+enum LockMarker {
+    static var url: URL { HookWire.runtimeDirectory.appendingPathComponent("run/locked") }
+
+    static func bootTime() -> Int {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        sysctlbyname("kern.boottime", &tv, &size, nil, 0)
+        return Int(tv.tv_sec)
+    }
+
+    static func write() {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data("\(bootTime())".utf8).write(to: url, options: .atomic)
+    }
+
+    static func clear() { try? FileManager.default.removeItem(at: url) }
+
+    static func isPresentForThisBoot() -> Bool {
+        guard let s = try? String(contentsOf: url, encoding: .utf8), let t = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return abs(t - bootTime()) <= 2
+    }
+}
+
+/// While locked, a tiny guard process (this executable run with --guard) watches the app and
+/// relaunches it if it is killed, so the lock can't be ended by killing the process.
+@MainActor
+enum LockGuard {
+    private static var process: Process?
+
+    static func start() {
+        guard process == nil, let exe = Bundle.main.executableURL else { return }
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = ["--guard", "\(getpid())", Bundle.main.bundlePath]
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); process = p } catch { NSLog("SiliconMode: lock guard failed to start: \(error)") }
+    }
+
+    static func stop() {
+        process?.terminate()
+        process = nil
+    }
+
+    /// Entry point of the guard process. Never returns.
+    nonisolated static func runGuard(arguments: [String]) -> Never {
+        guard let i = arguments.firstIndex(of: "--guard"), i + 2 < arguments.count, let pid = Int32(arguments[i + 1]) else { exit(0) }
+        let appPath = arguments[i + 2]
+        while true {
+            if !LockMarker.isPresentForThisBoot() { exit(0) }           // unlocked normally
+            if kill(pid, 0) != 0 && errno == ESRCH {                    // app gone while locked
+                let open = Process()
+                open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                open.arguments = ["-n", appPath]
+                try? open.run()
+                open.waitUntilExit()
+                exit(0)
+            }
+            usleep(400_000)
+        }
+    }
 }

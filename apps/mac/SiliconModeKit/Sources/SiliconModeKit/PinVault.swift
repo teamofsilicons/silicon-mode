@@ -16,6 +16,8 @@ public final class PinVault: @unchecked Sendable {
         case wrong(attemptsLeft: Int)
         case throttled(retryAfter: TimeInterval)
         case notSet
+        /// The stored PIN couldn't be read (keychain locked, access denied…). Never a success.
+        case unavailable
     }
 
     public let service: String
@@ -37,6 +39,11 @@ public final class PinVault: @unchecked Sendable {
 
     public var isSet: Bool { (try? store.load()) != nil }
 
+    /// True when a PIN is stored *or* the store can't be read right now (fail closed).
+    public var mayBeSet: Bool {
+        do { return try store.load() != nil } catch { return true }
+    }
+
     public static func isValidFormat(_ pin: String) -> Bool {
         pin.count == pinLength && pin.allSatisfy { $0.isASCII && $0.isNumber }
     }
@@ -57,7 +64,9 @@ public final class PinVault: @unchecked Sendable {
     public func verify(_ pin: String, now: Date = Date()) -> VerifyResult {
         lock.lock(); defer { lock.unlock() }
         if let until = lockedUntil, now < until { return .throttled(retryAfter: until.timeIntervalSince(now)) }
-        guard let rec = try? store.load() else { return .notSet }
+        let stored: Record?
+        do { stored = try store.load() } catch { return .unavailable }
+        guard let rec = stored else { return .notSet }
         guard Self.isValidFormat(pin), let h = try? Self.derive(pin: pin, salt: rec.salt, iterations: rec.iterations),
               Self.constantTimeEqual(h, rec.hash) else {
             failures += 1

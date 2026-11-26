@@ -68,6 +68,8 @@ final class KioskLock {
     private(set) var engaged = false
     private var previous: NSApplication.PresentationOptions = []
     private var activeObserver: NSObjectProtocol?
+    private var resignObserver: NSObjectProtocol?
+    private var appActivationObserver: NSObjectProtocol?
     private var retryTask: Task<Void, Never>?
 
     static let lockOptions: NSApplication.PresentationOptions = [
@@ -95,9 +97,22 @@ final class KioskLock {
         }
         bringForward()
         applyIfEngaged()
+        // Another app taking activation (an agent opening a browser, the Simulator…) would give
+        // ⌘-Tab / Force Quit / the menu bar back: take activation straight back, and keep a
+        // watchdog running for as long as the lock is engaged.
+        resignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+                                                                object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppModel.shared.kiosk.reassert() }
+        }
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            MainActor.assumeIsolated { AppModel.shared.kiosk.reassert() }
+        }
         retryTask = Task { @MainActor [weak self] in
-            for delay in [0.15, 0.4, 0.8, 1.5, 3.0, 6.0] {
-                try? await Task.sleep(for: .seconds(delay))
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
                 guard let self, self.engaged else { return }
                 if !NSApp.isActive { self.bringForward() }
                 self.applyIfEngaged()
@@ -134,6 +149,10 @@ final class KioskLock {
         retryTask = nil
         if let o = activeObserver { NotificationCenter.default.removeObserver(o) }
         activeObserver = nil
+        if let o = resignObserver { NotificationCenter.default.removeObserver(o) }
+        resignObserver = nil
+        if let o = appActivationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+        appActivationObserver = nil
         NSApp.presentationOptions = previous
         // Back to a menu-bar-only app unless a normal window (Settings, Stats, onboarding) is open.
         let titledOpen = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) }

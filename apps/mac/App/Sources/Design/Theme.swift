@@ -101,6 +101,8 @@ enum Theme {
     /// Allo Variable with the Silicon Accounts configuration: ROND 20, optical size follows the
     /// point size (14 text … 32 display), weight on the wght axis.
     static func ctAllo(_ size: CGFloat, weight: CGFloat = 400, roundness: CGFloat = 20) -> CTFont {
+        // Quantize so animated sizes (faces easing text) don't mint a new CTFont every frame.
+        let size = (size * 4).rounded() / 4
         let key = "\(size)-\(weight)-\(roundness)"
         if let f = AlloCache.shared.get(key) { return f }
         func tag(_ s: String) -> Int { s.utf8.reduce(0) { ($0 << 8) | Int($1) } }
@@ -208,5 +210,10 @@ final class AlloCache: @unchecked Sendable {
     private let lock = NSLock()
     private var fonts: [String: CTFont] = [:]
     func get(_ k: String) -> CTFont? { lock.lock(); defer { lock.unlock() }; return fonts[k] }
-    func set(_ k: String, _ f: CTFont) { lock.lock(); fonts[k] = f; lock.unlock() }
+    func set(_ k: String, _ f: CTFont) {
+        lock.lock()
+        if fonts.count >= 512 { fonts.removeAll(keepingCapacity: true) }   // bounded
+        fonts[k] = f
+        lock.unlock()
+    }
 }

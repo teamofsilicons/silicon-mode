@@ -48,6 +48,8 @@ public struct ModeEngine: Sendable {
         case systemWillSleep
         /// Temporarily stop auto-entry until `until` (monotonic seconds), or nil to resume.
         case pauseAutoEntry(until: Double?)
+        /// Re-enter an already locked session (the app was killed or crashed while locked).
+        case restoreLocked
     }
 
     public enum CancelReason: Equatable, Sendable { case userDeclined, lidRaised, agentsStopped, disabled, sleep }
@@ -131,7 +133,12 @@ public struct ModeEngine: Sendable {
     public mutating func update(now: Double, angle: Double?, agentsRunning: Int) -> [ModeEvent] {
         lastNow = now
         var events: [ModeEvent] = []
-        if let angle { sampler.add(t: now, angle: angle) }
+        if let angle {
+            sampler.add(t: now, angle: angle)
+        } else if let last = sampler.samples.last, now - last.t > 1.0 {
+            // Sensor went away: stale samples must not start or prolong a panic.
+            sampler.reset()
+        }
         let threshold = settings.thresholdAngle
         let a = angle
 
@@ -230,7 +237,27 @@ public struct ModeEngine: Sendable {
                 phase = .idle
                 return [.countdownCancelled(.sleep)]
             }
+            // End any panic now: otherwise the alarm resumes when the Mac is opened later.
+            if var act = phase.active, act.panicSince != nil {
+                act.panicSince = nil
+                phase = .active(act)
+                return [.panicEnded(.settled)]
+            }
             return []
+        case .restoreLocked:
+            if case .active(var act) = phase {
+                guard !act.locked else { return [] }
+                act.locked = true
+                phase = .active(act)
+                return [.locked]
+            }
+            var ev = enter(now: now, manual: true)
+            if case .active(var act) = phase, !act.locked {
+                act.locked = true
+                phase = .active(act)
+                ev.append(.locked)
+            }
+            return ev
         case .pauseAutoEntry(let until):
             pausedUntil = until
             if until != nil, phase.isCountdown {

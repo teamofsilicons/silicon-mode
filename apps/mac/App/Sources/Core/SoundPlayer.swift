@@ -148,13 +148,14 @@ final class SoundPlayer {
         panicGain = gain
     }
 
-    /// Fade the alarm (or a preview) out over 250 ms.
-    func stopPanic() {
+    /// Fade the alarm (or a preview) out over 250 ms — or at once (e.g. right before sleep, so
+    /// nothing can resume it on wake).
+    func stopPanic(immediate: Bool = false) {
         previewTask?.cancel()
         guard panicMode != .off else { return }
         panicMode = .off
         guard let g = graph else { return }
-        g.voice.stop(fade: Self.panicFadeOut, from: panicGain)
+        g.voice.stop(fade: immediate ? 0.005 : Self.panicFadeOut, from: panicGain)
         scheduleIdleCheck()
     }
 

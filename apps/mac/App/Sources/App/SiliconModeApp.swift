@@ -23,6 +23,9 @@ enum WindowID {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Writing to a socket whose peer died (a hook helper, the cloud) must not kill the app.
+        signal(SIGPIPE, SIG_IGN)
+        if CommandLine.arguments.contains("--guard") { LockGuard.runGuard(arguments: CommandLine.arguments) }
         MainActor.assumeIsolated {
             if SnapshotHarness.runIfRequested() { exit(0) }
             let model = AppModel.shared

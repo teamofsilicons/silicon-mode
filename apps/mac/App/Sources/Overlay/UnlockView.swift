@@ -470,10 +470,18 @@ struct UnlockView: View {
             try? await Task.sleep(for: .milliseconds(120))
             let result = await Task.detached(priority: .userInitiated) { vault.verify(entered) }.value
             switch result {
+            case .unavailable, .notSet where model.pinRequiredForSession:
+                // The vault couldn't be read (keychain locked / access denied): never a success.
+                if model.settings.uiSoundsEnabled { model.sounds.play(.wrongPin) }
+                status = .touchIDUnavailable("Couldn't read your PIN. Use Touch ID.")
+                shake += 1
+                withAnimation(Theme.Motion.moderate) { pin = "" }
             case .ok, .notSet:
                 await playSuccess()
                 switch model.unlock(pin: entered) {
-                case .ok, .notSet:
+                case .ok:
+                    break
+                case .notSet where !model.pinRequiredForSession:
                     break
                 default:
                     // The PIN changed underneath us (or the vault failed): bring the card back.

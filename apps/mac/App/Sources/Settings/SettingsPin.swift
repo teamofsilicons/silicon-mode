@@ -86,6 +86,7 @@ final class SettingsPinFlow {
                 let r = await Task.detached { vault.verify(pin) }.value
                 switch r {
                 case .ok, .notSet: advance(.new)
+                case .unavailable: fail("Couldn't read your current PIN from the Keychain. Try again.")
                 case .wrong(let left): fail(left == 1 ? "Wrong PIN. 1 try left before a short wait." : "Wrong PIN. \(left) tries left.")
                 case .throttled(let s): fail("Too many tries. Wait \(Int(s.rounded())) s and try again.")
                 }
