@@ -131,7 +131,9 @@ struct LogsPiece: View {
 // MARK: - Tab strip
 
 /// Capsule tabs: avatar, short title, state glyph. The selected tab is a glass capsule that morphs
-/// to the tab you pick; the others are quiet labels that highlight under the pointer.
+/// to the tab you pick; the others are quiet labels that highlight under the pointer. Like Safari's
+/// compact tabs, they shrink to share the strip (titles truncate, the selected one keeps the most)
+/// rather than scroll: a scroll view here would add focus bookkeeping SwiftUI redoes on every change.
 struct LogTabStrip: View {
     let sessions: [AgentSession]
     let selectedID: String?
@@ -151,28 +153,10 @@ struct LogTabStrip: View {
                 HUDSectionLabel(title: "Activity", symbol: "waveform")
                     .padding(.leading, 8)
                 Spacer(minLength: 0)
-            } else if HUDRender.isSnapshot {
-                // No scroll view offscreen: start one tab before the selected one, as the live
-                // strip scrolls the selected tab into view.
-                let i = sessions.firstIndex { $0.id == selectedID } ?? 0
-                HStack(spacing: 2) { tabs(Array(sessions.dropFirst(max(0, i - 1)))) }
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    .clipped()
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 2) { tabs(sessions) }
-                            .hudGlassContainer(spacing: 2)
-                    }
-                    .scrollIndicators(.never)
-                    .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                    .scrollEdgeEffectStyle(.soft, for: .horizontal)
-                    .onChange(of: selectedID) { _, id in
-                        guard let id else { return }
-                        withAnimation(Theme.Motion.moderate) { proxy.scrollTo(id, anchor: .center) }
-                    }
-                    .onAppear { if let selectedID { proxy.scrollTo(selectedID, anchor: .center) } }
-                }
+                HStack(spacing: 2) { tabs(sessions) }
+                    .hudGlassContainer(spacing: 2)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
             toggle
         }
@@ -187,7 +171,8 @@ struct LogTabStrip: View {
                 LogTab(session: s, selected: s.id == selectedID, namespace: ns, interactive: hovering)
             }
             .buttonStyle(HUDPressStyle())
-            .id(s.id)
+            .focusable(false)
+            .layoutPriority(s.id == selectedID ? 1 : 0)
         }
     }
 
@@ -217,10 +202,10 @@ struct LogTab: View {
                 .font(.subheadline.weight(selected ? .semibold : .medium))
                 .foregroundStyle(selected ? .primary : .secondary)
                 .lineLimit(1)
-                .fixedSize()
+                .truncationMode(.tail)
             HUDStateGlyph(state: session.state, size: 11)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .frame(height: Self.height)
         .background {
             if !selected && hovering {
@@ -265,26 +250,16 @@ private struct SelectedTabGlass: ViewModifier {
 
 // MARK: - Body
 
-/// Every line of one agent, oldest first, following the tail while scrolled to the bottom.
+/// Every line of one agent, oldest first, following the tail while scrolled to the bottom. Live it
+/// is a native text view (`LogTextView`); snapshots draw the last lines flat.
 private struct LogBody: View {
     @Environment(AppModel.self) private var model
     let session: AgentSession
     var preview: FurnitureSource?
 
-    @State private var position = ScrollPosition(edge: .bottom)
     @State private var following = true
     @State private var unseen = 0
-    /// The user is scrolling (tracking, dragging or flinging). Only then does the scroll position
-    /// decide whether to follow the tail: content growing or a programmatic jump never does.
-    @State private var userScrolling = false
-
-    static func atBottom(_ g: ScrollGeometry) -> Bool { g.visibleRect.maxY >= g.contentSize.height - 8 }
-
-    static func isUser(_ p: ScrollPhase) -> Bool { p == .tracking || p == .interacting || p == .decelerating }
-
-    /// The bottom corners follow the panel's.
-    private static let clip = UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
-                                                     bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous)
+    @State private var jump = 0
 
     var body: some View {
         let lines = events
@@ -293,7 +268,17 @@ private struct LogBody: View {
         } else if HUDRender.isSnapshot {
             flat(lines)
         } else {
-            scroller(lines)
+            LogTextView(events: lines, following: $following, unseen: $unseen, jump: jump)
+                .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
+                                                  bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous))
+                .overlay(alignment: .bottom) {
+                    if !following && unseen > 0 {
+                        latestButton
+                            .padding(.bottom, 12)
+                            .transition(.opacity.combined(with: .offset(y: 8)))
+                    }
+                }
+                .animation(Theme.Motion.moderate, value: !following && unseen > 0)
         }
     }
 
@@ -306,70 +291,19 @@ private struct LogBody: View {
         return logged.isEmpty ? session.recentEvents : logged
     }
 
-    private func scroller(_ lines: [AgentEvent]) -> some View {
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: LogLineRow.spacing) {
-                ForEach(lines) { LogLineRow(event: $0) }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, LogsPiece.bodyPadding / 2)
-        }
-        .scrollPosition($position)
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .scrollIndicators(.automatic)
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .clipShape(Self.clip)
-        .onScrollPhaseChange { old, new, context in
-            let user = Self.isUser(new)
-            if user != userScrolling { userScrolling = user }
-            // A scroll the user made came to rest: follow again only if it rests at the bottom.
-            if Self.isUser(old), !user { settle(atBottom: Self.atBottom(context.geometry)) }
-        }
-        .onScrollGeometryChange(for: Bool.self, of: Self.atBottom) { _, bottom in
-            // Only the user's own scrolling pauses or resumes following.
-            if userScrolling { settle(atBottom: bottom) }
-        }
-        .onChange(of: lines.count) { old, new in
-            if !following, new > old { unseen += new - old }
-        }
-        .onChange(of: lines.last?.id) { _, _ in
-            // New lines (data, never geometry) move the view to the tail while following.
-            if following {
-                position.scrollTo(edge: .bottom)
-            } else if unseen == 0 {
-                unseen = 1
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if !following && unseen > 0 {
-                latestButton
-                    .padding(.bottom, 12)
-                    .transition(.opacity.combined(with: .offset(y: 8)))
-            }
-        }
-        .animation(Theme.Motion.moderate, value: !following && unseen > 0)
-    }
-
-    private func settle(atBottom bottom: Bool) {
-        if bottom != following { following = bottom }
-        if bottom, unseen != 0 { unseen = 0 }
-    }
-
     private var latestButton: some View {
         Button {
-            following = true
-            unseen = 0
-            withAnimation(.smooth(duration: 0.4)) { position.scrollTo(edge: .bottom) }
+            jump &+= 1
         } label: {
             Label("Latest", systemImage: "arrow.down")
                 .font(.subheadline.weight(.semibold))
         }
         .buttonStyle(.glass)
-        .controlSize(.regular)
+        .focusable(false)
         .accessibilityLabel("Jump to the latest lines")
     }
 
-    /// Snapshots can't render a scroll view: the last lines, bottom-aligned, faded at the top.
+    /// Snapshots can't render the text view: the last lines, bottom-aligned, faded at the top.
     private func flat(_ lines: [AgentEvent]) -> some View {
         VStack(alignment: .leading, spacing: LogLineRow.spacing) {
             ForEach(lines.suffix(40)) { LogLineRow(event: $0) }
@@ -398,8 +332,9 @@ private struct LogEmptyNote: View {
     }
 }
 
-/// One log line: time, the kind as a symbol, and the text (wrapping up to three lines). Commands
-/// and file paths are set in SF Mono; everything else in SF Pro.
+/// One log line as SwiftUI (snapshots; live lines are paragraphs of `LogTextView` with the same
+/// look): time, the kind as a symbol, and the text (wrapping up to three lines). Commands and file
+/// paths are set in SF Mono; everything else in SF Pro.
 struct LogLineRow: View {
     let event: AgentEvent
 
@@ -555,6 +490,7 @@ struct HUDCircleButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(HUDPressStyle())
+        .focusable(false)
         .hudGlass(in: Circle(), interactive: hovering)
         .onHover { h in if !HUDRender.isSnapshot { withAnimation(Theme.Motion.fast) { hovering = h } } }
     }

@@ -214,6 +214,7 @@ struct QuestionCard: View {
         }
         .optionStyle(o.style)
         .controlSize(.large)
+        .focusable(false)
     }
 
     private func optionRow(_ o: AgentQuestion.Option) -> some View {
@@ -249,6 +250,7 @@ struct QuestionCard: View {
             .contentShape(RoundedRectangle(cornerRadius: Self.innerRadius, style: .continuous))
         }
         .buttonStyle(QuestionPressStyle())
+        .focusable(false)
     }
 
     private var multiSelectOptions: some View {
@@ -284,6 +286,7 @@ struct QuestionCard: View {
                     .contentShape(RoundedRectangle(cornerRadius: Self.innerRadius, style: .continuous))
                 }
                 .buttonStyle(QuestionPressStyle())
+                .focusable(false)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
             HStack {
@@ -304,6 +307,7 @@ struct QuestionCard: View {
                 }
                 .prominentStyle()
                 .controlSize(.large)
+                .focusable(false)
                 .disabled(selected.isEmpty)
             }
             .padding(.top, 4)
@@ -362,6 +366,7 @@ struct QuestionCard: View {
                 .buttonStyle(.glassProminent)
                 .buttonBorderShape(.circle)
                 .tint(.accentColor)
+                .focusable(false)
                 .disabled(!canReply)
                 .animation(Theme.Motion.fast, value: canReply)
                 .accessibilityLabel("Send reply")

@@ -103,6 +103,7 @@ private struct FurnitureToggle: View {
                 .contentShape(Circle())
         }
         .buttonStyle(ChromePressStyle())
+        .focusable(false)
         .chromeGlass(in: Circle(), hovering: hovering)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(hidden ? "Show face furniture" : "Hide face furniture")
@@ -133,6 +134,7 @@ private struct NeedYouPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(ChromePressStyle())
+        .focusable(false)
         .chromeGlass(in: Capsule(), tint: HUDTint.needsYou.opacity(0.22), hovering: hovering)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(peeking ? "Hide the questions" : "Show the questions")
@@ -231,6 +233,7 @@ struct SiliconModeControl: View {
                         .contentShape(Capsule())
                 }
                 .buttonStyle(ChromePressStyle())
+                .focusable(false)
                 .foregroundStyle(.white)
                 .chromeGlass(in: Capsule(), tint: Color.accentColor.opacity(hovering ? 0.75 : 0.6), hovering: hovering)
                 .glassEffectID("control", in: ns)
@@ -254,6 +257,7 @@ struct SiliconModeControl: View {
                     .contentShape(Capsule())
                 }
                 .buttonStyle(ChromePressStyle())
+                .focusable(false)
                 .chromeGlass(in: Capsule(), hovering: hovering)
                 .glassEffectID("control", in: ns)
             }

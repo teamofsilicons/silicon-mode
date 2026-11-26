@@ -255,6 +255,7 @@ struct AgentsPieceList: View {
             .contentShape(Capsule())
         }
         .buttonStyle(HUDPressStyle())
+        .focusable(false)
         .hudChip()
         .transition(.opacity)
         .help("Show the agent list")
