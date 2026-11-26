@@ -24,9 +24,9 @@ final class FakeHelper {
 
     deinit { close(fd) }
 
-    func send(agent: String = "claude-code", event: String?, payload: JSONObject, ppid: Int32 = 0) {
+    func send(agent: String = "claude-code", event: String?, payload: JSONObject, ppid: Int32 = 0, env: [String: String] = [:]) {
         let req = HookWire.Request(agent: agent, event: event, payload: CoreJSON.string(payload) ?? "{}", ppid: ppid,
-                                   cwd: "/tmp", env: [:])
+                                   cwd: "/tmp", env: env)
         var line = try! JSONEncoder().encode(req)
         line.append(0x0A)
         _ = line.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
@@ -285,17 +285,179 @@ final class FakeHelper {
     @Test func registryFlipReleasesClaudePrompts() throws {
         let (server, path) = try makeServer()
         defer { server.stop() }
-        let reg = server.claudeRegistryDirectory + "/4242.json"
-        try Data(#"{"pid":4242,"status":"waiting","waitingFor":"permission prompt"}"#.utf8).write(to: URL(fileURLWithPath: reg))
+        // The "agent" is this (live) test process: a dead pid would be released as orphaned.
+        let me = getpid()
+        let reg = server.claudeRegistryDirectory + "/\(me).json"
+        try Data(#"{"pid":\#(me),"status":"waiting","waitingFor":"permission prompt"}"#.utf8).write(to: URL(fileURLWithPath: reg))
         let h = try #require(FakeHelper(socketPath: path))
-        h.send(event: "PermissionRequest", payload: permissionPayload(), ppid: 4242)
+        h.send(event: "PermissionRequest", payload: permissionPayload(), ppid: me)
         #expect(waitFor { !server.heldQuestionIDs.isEmpty })
         usleep(1_300_000) // a tick sees "waiting"
         #expect(h.isPending())
-        try Data(#"{"pid":4242,"status":"busy"}"#.utf8).write(to: URL(fileURLWithPath: reg))
+        try Data(#"{"pid":\#(me),"status":"busy"}"#.utf8).write(to: URL(fileURLWithPath: reg))
         let r = try #require(h.response(timeout: 3)) // next tick: answered in the terminal → released
         #expect(r.stdout == nil)
         #expect(server.heldQuestionIDs.isEmpty)
+    }
+
+    /// The app's policy (AppModel): an interactive Claude prompt is always held for hours, everything
+    /// else only as long as Silicon Mode / the menu-bar setting says (0 here).
+    static let appPolicy: @Sendable (String) -> TimeInterval = { $0 == "claude-code" ? 6 * 3600 : 0 }
+    static let terminal = ["CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"]
+
+    @Test func holdPolicyTellsDialogSessionsFromHeadlessOnes() {
+        func policy(_ env: [String: String], agent: String = "claude-code", payload: JSONObject = [:]) -> HookServer.HoldPolicy {
+            HookServer.holdPolicy(agent: agent, env: env, payload: payload)
+        }
+        let headless = HookServer.claudeHeadlessPolicy
+        #expect(policy(Self.terminal) == .init(key: "claude-code"))
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "claude-desktop", "CLAUDE_CODE_SESSION_ATTENDED": "1"]).key == "claude-code")
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "claude-vscode"]).key == "claude-code") // older Claude: no ATTENDED
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "CLAUDE_CODE_SESSION_ATTENDED": "0"]).key == headless) // claude -p
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "sdk-ts"]).key == headless)                 // Agent SDK host
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "0"]).key == headless) // bg session, teammate
+        #expect(policy([:]).key == headless) // unknown: never risk the long hold
+        #expect(policy(Self.terminal, payload: ["agent_id": "a5f2c"]) == .init(key: headless, awaitsDialog: true))
+        #expect(policy(["CLAUDE_CODE_ENTRYPOINT": "sdk-cli"], payload: ["agent_id": "a5f2c"]) == .init(key: headless))
+        #expect(policy([:], agent: "codex") == .init(key: "codex"))
+        #expect(HookServer.providerID(forHoldPolicy: headless) == "claude-code")
+        #expect(HookServer.providerID(forHoldPolicy: "codex") == "codex")
+    }
+
+    @Test func headlessClaudeRunsAreNotHeldByTheTerminalFloor() throws {
+        let (server, path) = try makeServer()
+        defer { server.stop() }
+        server.holdDuration = Self.appPolicy
+        // `claude -p`: the hook is the only decider, so it must pass through at once …
+        let h = try #require(FakeHelper(socketPath: path))
+        h.send(event: "PermissionRequest", payload: permissionPayload(),
+               env: ["CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "CLAUDE_CODE_SESSION_ATTENDED": "0"])
+        let r = try #require(h.response(timeout: 1))
+        #expect(r.stdout == nil && r.exitCode == 0)
+        #expect(server.heldQuestionIDs.isEmpty)
+        // … and Claude denies it right away, so nothing is left waiting.
+        let st = try #require(server.state(agent: "claude-code", sessionID: sid))
+        #expect(st.pending.isEmpty)
+        #expect(st.state == .working)
+
+        // The same prompt from a terminal session is held: Claude's dialog runs alongside.
+        let h2 = try #require(FakeHelper(socketPath: path))
+        h2.send(event: "PermissionRequest", payload: permissionPayload(), env: Self.terminal)
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        #expect(h2.isPending(wait: 1.2))
+        #expect(server.state(agent: "claude-code", sessionID: sid)?.pending.first?.answerable == true)
+    }
+
+    @Test func policyChangesReleaseAlreadyHeldPrompts() throws {
+        let (server, path) = try makeServer()
+        defer { server.stop() }
+        let hold = Locked<TimeInterval>(3600)
+        server.holdDuration = { _ in hold.current }
+        let h = try #require(FakeHelper(socketPath: path))
+        h.send(agent: "codex", event: "PermissionRequest", payload: permissionPayload())
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        #expect(h.isPending(wait: 1.2))
+        hold.withLock { $0 = 0 } // Silicon Mode ended, or the provider was turned off
+        let r = try #require(h.response(timeout: 3))
+        #expect(r.stdout == nil)
+        #expect(server.heldQuestionIDs.isEmpty)
+    }
+
+    @Test func subagentPromptsGetTheLongHoldOnlyOnceClaudesDialogIsSeen() throws {
+        let (server, path) = try makeServer()
+        defer { server.stop() }
+        server.holdDuration = Self.appPolicy
+        server.dialogGrace = 1
+        let me = getpid()
+        let reg = server.claudeRegistryDirectory + "/\(me).json"
+        var payload = permissionPayload()
+        payload["agent_id"] = "a5f2c"
+        payload["agent_type"] = "general-purpose"
+
+        // A background subagent: no dialog opens, so after the grace it passes through (Claude denies).
+        try Data(#"{"pid":\#(me),"status":"busy"}"#.utf8).write(to: URL(fileURLWithPath: reg))
+        let h = try #require(FakeHelper(socketPath: path))
+        let sent = Date()
+        h.send(event: "PermissionRequest", payload: payload, ppid: me, env: Self.terminal)
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        let r = try #require(h.response(timeout: 4))
+        #expect(r.stdout == nil)
+        #expect(Date().timeIntervalSince(sent) >= 0.9)
+        #expect(server.heldQuestionIDs.isEmpty)
+
+        // A foreground subagent: Claude shows its dialog, so it is held like any terminal prompt …
+        try Data(#"{"pid":\#(me),"status":"waiting","waitingFor":"permission prompt"}"#.utf8).write(to: URL(fileURLWithPath: reg))
+        let h2 = try #require(FakeHelper(socketPath: path))
+        h2.send(event: "PermissionRequest", payload: payload, ppid: me, env: Self.terminal)
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        usleep(2_600_000) // well past the grace
+        #expect(h2.isPending())
+        #expect(server.state(agent: "claude-code", sessionID: sid)?.pending.first?.answerable == true)
+        // … until it is answered in the terminal.
+        try Data(#"{"pid":\#(me),"status":"busy"}"#.utf8).write(to: URL(fileURLWithPath: reg))
+        #expect(h2.response(timeout: 3)?.stdout == nil)
+        #expect(server.heldQuestionIDs.isEmpty)
+    }
+
+    @Test func subagentPromptsIgnoreSiblingProgressInTheMainTranscript() throws {
+        let (server, path) = try makeServer()
+        defer { server.stop() }
+        var payload = permissionPayload(input: ["command": "make"])
+        payload["agent_id"] = "a5f2c"
+        let h = try #require(FakeHelper(socketPath: path))
+        h.send(event: "PermissionRequest", payload: payload)
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        // A sibling subagent finished and the main thread ran its own `make`: the main transcript
+        // moved on with only the other Task still open. None of that is this subagent's call …
+        server.reconcile(agent: "claude-code", sessionID: sid,
+                         progress: .init(boundary: nil,
+                                         resolvedTools: [("Bash", CoreJSON.canonical(["command": "make"]), Date().addingTimeInterval(1))],
+                                         lastRecordAt: Date().addingTimeInterval(3), openTools: [("Task", "{}")]))
+        #expect(h.isPending())
+        #expect(server.heldQuestionIDs.count == 1)
+        // … but a main-thread turn boundary (interrupt, new prompt) still ends it.
+        server.reconcile(agent: "claude-code", sessionID: sid, progress: .init(boundary: Date().addingTimeInterval(2)))
+        #expect(h.response()?.stdout == nil)
+        #expect(server.heldQuestionIDs.isEmpty)
+    }
+
+    @Test func heldPromptsOfADeadAgentAreReleased() throws {
+        let (server, path) = try makeServer()
+        defer { server.stop() }
+        let agent = Process()
+        agent.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        agent.arguments = ["60"]
+        try agent.run()
+        defer { if agent.isRunning { agent.terminate() } }
+        let h = try #require(FakeHelper(socketPath: path))
+        h.send(event: "PermissionRequest", payload: permissionPayload(), ppid: agent.processIdentifier, env: Self.terminal)
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        #expect(h.isPending(wait: 1.2)) // alive: still held
+        // Killed outright: no SessionEnd, and its (orphaned) helper never disconnects.
+        kill(agent.processIdentifier, SIGKILL)
+        agent.waitUntilExit()
+        let r = try #require(h.response(timeout: 3))
+        #expect(r.stdout == nil)
+        #expect(server.heldQuestionIDs.isEmpty)
+        let st = try #require(server.state(agent: "claude-code", sessionID: sid))
+        #expect(st.pending.isEmpty)
+        #expect(st.state == .idle)
+    }
+
+    @Test func processStateSeesExitAndPidReuse() throws {
+        guard case .running(let start?) = HookServer.processState(getpid()) else {
+            Issue.record("own process not found")
+            return
+        }
+        #expect(HookServer.isRunning(getpid(), startedAt: start))
+        #expect(HookServer.isRunning(getpid(), startedAt: nil))
+        #expect(!HookServer.isRunning(getpid(), startedAt: start - 1_000_000)) // another process had this pid
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try p.run()
+        p.waitUntilExit()
+        #expect(HookServer.processState(p.processIdentifier) == .gone)
+        #expect(!HookServer.isRunning(p.processIdentifier, startedAt: nil))
     }
 
     @Test func secondServerOnSameSocketIsRefusedAndStaleSocketsAreReplaced() throws {

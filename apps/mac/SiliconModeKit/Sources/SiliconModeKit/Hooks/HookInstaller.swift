@@ -7,14 +7,18 @@ import Darwin
 ///
 /// - Claude Code: `~/.claude/settings.json` → `hooks.<Event>[]` gets one matcher group per event
 ///   whose single handler runs `silicon-mode-hook claude-code <Event>`. `PermissionRequest` is
-///   synchronous with a long timeout (the app decides how long to hold it; Claude shows its own
-///   dialog in parallel). Observation events are `async`.
+///   synchronous with a long timeout; the app decides how long to hold it (`HookServer`): long in
+///   attended terminal / desktop / VS Code sessions, where Claude shows its own dialog in
+///   parallel, and only while someone may answer from Silicon Mode in headless runs (`claude -p`,
+///   the Agent SDK, background agents), where the hook is the only decider. Observation events
+///   are `async`.
 /// - Codex: `~/.codex/hooks.json` (same format). Codex skips new hooks until the user trusts them
 ///   once in `/hooks` (`Target.note`); we never write `trusted_hash` ourselves. The command
 ///   strings never change, so trust survives app updates.
-/// - The file keeps its key order and indentation; a one-time backup
-///   (`<file>.silicon-mode-backup`) is written before the first change; uninstall removes only
-///   handlers whose command mentions `silicon-mode-hook`.
+/// - The file keeps its key order, indentation and permission bits (a symlinked file is edited at
+///   its real location); a one-time backup (`<file>.silicon-mode-backup`) is written before the
+///   first change; a file that exists but can't be read or parsed is never touched; uninstall
+///   removes only handlers whose command mentions `silicon-mode-hook`.
 public enum HookInstaller {
     public enum Status: Equatable, Sendable { case notInstalled, installed, agentMissing, needsUpdate }
 
@@ -84,6 +88,8 @@ public enum HookInstaller {
         status(target, helperPath: HookWire.installedHelperPath)
     }
 
+    /// A config that exists but can't be read or parsed reports `.notInstalled` (install refuses to
+    /// touch it); `configProblem(_:)` says why.
     public static func status(_ target: Target, helperPath: String) -> Status {
         guard CoreFS.isDirectory(target.agentDirectory) else { return .agentMissing }
         guard let data = FileManager.default.contents(atPath: target.configPath),
@@ -197,49 +203,134 @@ public enum HookInstaller {
     }
 
     /// Read-modify-write with a one-time backup, preserved formatting and an atomic replace.
+    ///
+    /// A symlinked config (dotfile managers) is followed to its final target, which is replaced in
+    /// place with its permission bits kept (settings.json can hold secrets in `env`, and Claude
+    /// keeps it 0600). Only a missing file counts as empty: one that exists but can't be read is
+    /// left untouched rather than replaced by a hooks-only file.
     static func edit(_ target: Target, _ change: (inout OrderedJSON) throws -> Void) throws {
         let fm = FileManager.default
         let path = target.configPath
-        let original = fm.contents(atPath: path)
-        var root: OrderedJSON
-        var style = OrderedJSON.Style()
-        if let original, !original.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) {
-            do { root = try OrderedJSON.parse(original) } catch {
-                throw InstallError(message: "\((path as NSString).lastPathComponent) isn't valid JSON; leaving it untouched.")
-            }
-            guard case .object = root else { throw InstallError(message: "\(path) isn't a JSON object; leaving it untouched.") }
-            style = OrderedJSON.Style.detect(original)
-        } else {
-            root = .object([])
-        }
+        let config = try load(target)
+        let (dest, original) = (config.dest, config.original)
+        var root = config.root
         try change(&root)
-        let out = Data(root.serialized(style).utf8)
+        let out = Data(root.serialized(config.style).utf8)
         if let original, out == original { return }
 
-        let dir = (path as NSString).deletingLastPathComponent
-        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         if let original {
             let backup = path + ".silicon-mode-backup"
             if !fm.fileExists(atPath: backup) {
-                guard fm.createFile(atPath: backup, contents: original, attributes: [.posixPermissions: 0o600]) else {
-                    throw InstallError(message: "Couldn't write a backup of \(path).")
+                switch writeNewFile(backup, original, mode: 0o600) {
+                case 0, EEXIST: break // EEXIST: a (dangling) link is already there; never overwrite it
+                default: throw InstallError(message: "Couldn't write a backup of \(path).")
                 }
             }
         }
-        let mode = (try? fm.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.int16Value ?? 0o644
-        let tmp = dir + "/.\((path as NSString).lastPathComponent).silicon-mode.\(getpid()).tmp"
-        guard fm.createFile(atPath: tmp, contents: out, attributes: [.posixPermissions: NSNumber(value: mode)]) else {
-            throw InstallError(message: "Couldn't write \(tmp).")
+        // Keep the real file's permissions; a new file gets 0600 like Claude's own.
+        var st = stat()
+        let mode: mode_t = stat(dest, &st) == 0 ? st.st_mode & 0o777 : 0o600
+        // The temp file sits next to the target so the rename stays on one volume.
+        let destDir = (dest as NSString).deletingLastPathComponent
+        try fm.createDirectory(atPath: destDir, withIntermediateDirectories: true)
+        let tmp = destDir + "/.\((dest as NSString).lastPathComponent).silicon-mode.\(getpid()).\(UInt32.random(in: 0...UInt32.max)).tmp"
+        let rc = writeNewFile(tmp, out, mode: mode)
+        guard rc == 0 else {
+            throw InstallError(message: "Couldn't write \(tmp) (\(String(cString: strerror(rc)))).")
         }
-        // Resolve a symlinked settings file (dotfile managers) and replace its target.
-        let dest = (try? fm.destinationOfSymbolicLink(atPath: path)).map { link -> String in
-            link.hasPrefix("/") ? link : (dir as NSString).appendingPathComponent(link)
-        } ?? path
         guard rename(tmp, dest) == 0 else {
             let e = errno
             unlink(tmp)
             throw InstallError(message: "Couldn't update \(path) (\(String(cString: strerror(e)))).")
         }
+    }
+
+    /// A config as read for editing: `dest` is the real file behind any symlinks, `original` its
+    /// bytes (nil = the file doesn't exist yet).
+    struct LoadedConfig {
+        var dest: String
+        var original: Data?
+        var root: OrderedJSON
+        var style: OrderedJSON.Style
+    }
+
+    /// Reads and parses a target's config; throws (with a user-facing message) when the file exists
+    /// but can't be read, isn't a JSON object, or is a symlink loop.
+    static func load(_ target: Target) throws -> LoadedConfig {
+        let path = target.configPath
+        let name = (path as NSString).lastPathComponent
+        let dest = try finalTarget(of: path)
+        let original: Data?
+        do {
+            original = try Data(contentsOf: URL(fileURLWithPath: dest))
+        } catch let e as CocoaError where e.code == .fileReadNoSuchFile {
+            original = nil
+        } catch {
+            throw InstallError(message: "Can't read \(name) (\(reason(error))); leaving it untouched.")
+        }
+        guard let original, !original.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) else {
+            return LoadedConfig(dest: dest, original: original, root: .object([]), style: OrderedJSON.Style())
+        }
+        let root: OrderedJSON
+        do { root = try OrderedJSON.parse(original) } catch {
+            throw InstallError(message: "\(name) isn't valid JSON; leaving it untouched.")
+        }
+        guard case .object = root else { throw InstallError(message: "\(path) isn't a JSON object; leaving it untouched.") }
+        return LoadedConfig(dest: dest, original: original, root: root, style: OrderedJSON.Style.detect(original))
+    }
+
+    /// Why Connect / Disconnect would refuse to touch the target's config (it exists but can't be
+    /// read, isn't a JSON object, or is a symlink loop), or nil. `status` reports such a config as
+    /// `.notInstalled`; show this instead of offering Connect.
+    public static func configProblem(_ target: Target) -> String? {
+        guard CoreFS.isDirectory(target.agentDirectory) else { return nil }
+        do { _ = try load(target); return nil } catch {
+            return (error as? InstallError)?.message ?? error.localizedDescription
+        }
+    }
+
+    /// The file a config path finally refers to: every symlink in the chain is followed (relative
+    /// links resolve against their own directory), so `rename` replaces the real file rather than
+    /// an intermediate link. A dangling chain yields the missing file it points at.
+    static func finalTarget(of path: String) throws -> String {
+        var p = path
+        for _ in 0..<32 {
+            guard let link = try? FileManager.default.destinationOfSymbolicLink(atPath: p) else { return p }
+            p = link.hasPrefix("/") ? link : ((p as NSString).deletingLastPathComponent as NSString).appendingPathComponent(link)
+        }
+        throw InstallError(message: "\((path as NSString).lastPathComponent) is a symlink loop; leaving it untouched.")
+    }
+
+    /// Creates `path` (which must not exist) holding `data`, private until complete, then `mode`.
+    /// Returns 0 or an errno.
+    private static func writeNewFile(_ path: String, _ data: Data, mode: mode_t) -> Int32 {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return errno }
+        var err: Int32 = 0
+        data.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 { err = n < 0 ? errno : EIO; return }
+                off += n
+            }
+        }
+        if err == 0, fchmod(fd, mode) != 0 { err = errno }
+        if err == 0, fsync(fd) != 0 { err = errno }
+        close(fd)
+        if err != 0 { unlink(path) }
+        return err
+    }
+
+    /// Short reason for a read failure ("Permission denied").
+    private static func reason(_ error: Error) -> String {
+        let ns = error as NSError
+        if let posix = ns.userInfo[NSUnderlyingErrorKey] as? NSError, posix.domain == NSPOSIXErrorDomain {
+            return String(cString: strerror(Int32(posix.code)))
+        }
+        return ns.localizedDescription
     }
 }
 

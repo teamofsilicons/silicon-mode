@@ -140,6 +140,86 @@ import Foundation
         #expect(throws: HookInstaller.InstallError.self) { try HookInstaller.install(c, helperPath: helper(home)) }
     }
 
+    func mode(_ path: String) -> mode_t {
+        var st = stat()
+        return lstat(path, &st) == 0 ? st.st_mode & 0o7777 : 0
+    }
+
+    func isLink(_ path: String) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) != nil
+    }
+
+    @Test func symlinkedConfigKeepsItsRealFileAndPermissions() throws {
+        // A dotfile manager: ~/.claude/settings.json → ../dotfiles/claude.json → settings.json (0600).
+        let home = try home(withClaude: nil)
+        let dot = home + "/dotfiles"
+        try FileManager.default.createDirectory(atPath: dot, withIntermediateDirectories: true)
+        let real = dot + "/settings.json"
+        try Data(Self.userSettings.utf8).write(to: URL(fileURLWithPath: real))
+        chmod(real, 0o600)
+        try FileManager.default.createSymbolicLink(atPath: dot + "/claude.json", withDestinationPath: "settings.json")
+        let t = target("claude-code", home)
+        try FileManager.default.createSymbolicLink(atPath: t.configPath, withDestinationPath: "../dotfiles/claude.json")
+
+        try HookInstaller.install(t, helperPath: helper(home))
+        #expect(HookInstaller.status(t, helperPath: helper(home)) == .installed)
+        // Both links survive; the real file was replaced in place and is still private.
+        #expect(isLink(t.configPath) && isLink(dot + "/claude.json"))
+        #expect(!isLink(real))
+        #expect(mode(real) == 0o600)
+        #expect(read(real).contains("silicon-mode-hook claude-code PermissionRequest"))
+        #expect(read(t.configPath + ".silicon-mode-backup") == Self.userSettings)
+        #expect(mode(t.configPath + ".silicon-mode-backup") == 0o600)
+        // No temp files left behind.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dot).sorted() == ["claude.json", "settings.json"])
+
+        try HookInstaller.uninstall(t)
+        #expect(isLink(t.configPath) && isLink(dot + "/claude.json"))
+        #expect(read(real) == Self.userSettings)
+        #expect(mode(real) == 0o600)
+
+        // A shared (0644) file stays 0644; a new file is created private.
+        chmod(real, 0o644)
+        try HookInstaller.install(t, helperPath: helper(home))
+        #expect(mode(real) == 0o644)
+        let fresh = try self.home(withClaude: nil)
+        let ft = target("claude-code", fresh)
+        try HookInstaller.install(ft, helperPath: helper(fresh))
+        #expect(mode(ft.configPath) == 0o600)
+    }
+
+    @Test func danglingSymlinkCreatesItsTargetAndLoopsAreRefused() throws {
+        let home = try home(withClaude: nil)
+        let t = target("claude-code", home)
+        try FileManager.default.createSymbolicLink(atPath: t.configPath, withDestinationPath: home + "/dotfiles/claude/settings.json")
+        try HookInstaller.install(t, helperPath: helper(home))
+        #expect(isLink(t.configPath))
+        #expect(HookInstaller.status(t, helperPath: helper(home)) == .installed)
+        #expect(mode(home + "/dotfiles/claude/settings.json") == 0o600)
+
+        let loop = try self.home(withClaude: nil)
+        let lt = target("claude-code", loop)
+        try FileManager.default.createSymbolicLink(atPath: lt.configPath, withDestinationPath: "settings.json")
+        #expect(throws: HookInstaller.InstallError.self) { try HookInstaller.install(lt, helperPath: helper(loop)) }
+        #expect(HookInstaller.configProblem(lt) != nil)
+    }
+
+    @Test func unreadableConfigIsNeverReplaced() throws {
+        let home = try home(withClaude: Self.userSettings)
+        let t = target("claude-code", home)
+        #expect(HookInstaller.configProblem(t) == nil)
+        chmod(t.configPath, 0o000) // e.g. left root-owned 0600 by a `sudo claude` run
+        defer { chmod(t.configPath, 0o600) }
+        guard FileManager.default.contents(atPath: t.configPath) == nil else { return } // running as root
+        let problem = try #require(HookInstaller.configProblem(t))
+        #expect(problem.contains("Can't read settings.json"))
+        #expect(throws: HookInstaller.InstallError.self) { try HookInstaller.install(t, helperPath: helper(home)) }
+        #expect(throws: HookInstaller.InstallError.self) { try HookInstaller.uninstall(t) }
+        chmod(t.configPath, 0o600)
+        #expect(read(t.configPath) == Self.userSettings)
+        #expect(!FileManager.default.fileExists(atPath: t.configPath + ".silicon-mode-backup"))
+    }
+
     @Test func codexHooksFile() throws {
         let home = try home(withClaude: nil)
         let c = target("codex", home)
