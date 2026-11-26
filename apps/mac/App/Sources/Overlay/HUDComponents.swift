@@ -66,6 +66,9 @@ enum HUDTint {
     /// Dims a text panel's glass so its lines stay legible over a bright or busy face (Notification
     /// Center's platters do the same in dark mode).
     static let panelDim = Color.black.opacity(0.3)
+    /// Question and permission cards: a denser dim, like a notification platter or a popover, so the
+    /// card you have to read and answer holds up over the brightest faces.
+    static let cardDim = Color.black.opacity(0.45)
 
     static func state(_ s: AgentState) -> Color {
         switch s {
@@ -92,14 +95,18 @@ enum HUDTint {
 // MARK: - Glass
 
 extension View {
-    /// A furniture panel: Liquid Glass in a continuous rounded rect. It also becomes the container
-    /// shape, so `ConcentricRectangle`s inside follow its corners. Offscreen (snapshots) glass
-    /// draws nothing, so there it falls back to a flat stand-in.
-    func hudPanel(radius: CGFloat = HUDMetrics.panelRadius, tint: Color? = nil, interactive: Bool = false) -> some View {
+    /// A furniture panel: neutral Liquid Glass in a continuous rounded rect, always dimmed (`dim`) so
+    /// its text stays legible over any face. `tint` is an accent wash laid over the dim, never in
+    /// place of it. The panel also becomes the container shape, so `ConcentricRectangle`s inside
+    /// follow its corners. Offscreen (snapshots) glass draws nothing, so there it falls back to a
+    /// flat stand-in.
+    func hudPanel(radius: CGFloat = HUDMetrics.panelRadius, tint: Color? = nil, dim: Color = HUDTint.panelDim,
+                  interactive: Bool = false) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return self
+            .background { if let tint { shape.fill(tint) } }
             .containerShape(shape)
-            .hudGlass(in: shape, tint: tint ?? HUDTint.panelDim, interactive: interactive)
+            .hudGlass(in: shape, tint: dim, interactive: interactive)
     }
 
     /// Capsule variant (chips, pills).
@@ -153,6 +160,28 @@ private struct HUDGlassStandIn<S: Shape>: View {
         }
         .compositingGroup()
         .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
+    }
+}
+
+/// A surface inside a panel: option rows, the reply field, a command or path. A scrim holds back
+/// whatever of the face still reaches through the glass, so an avatar or a bright light behind the
+/// card can't wash out the text, and a faint lift on top makes controls read as raised (a well for
+/// code stays recessed). `highlight` tints it (a selected or default row).
+struct HUDInset<S: InsettableShape>: View {
+    enum Style { case raised, recessed }
+    let shape: S
+    var style: Style = .raised
+    var highlight: Color? = nil
+
+    var body: some View {
+        ZStack {
+            shape.fill(Color.black.opacity(style == .raised ? 0.24 : 0.3))
+            shape.fill(Color.white.opacity(style == .raised ? 0.075 : 0.03))
+            if let highlight { shape.fill(highlight) }
+            // A well's hairline edge keeps it visible on a dark face, where its fill can't be.
+            if style == .recessed { shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1) }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -306,7 +335,8 @@ struct HUDSectionLabel: View {
             if let count {
                 Text("\(count)")
                     .monospacedDigit()
-                    .contentTransition(.numericText(value: Double(count)))
+                    // Not numericText: its roll caches a glyph bitmap per intermediate frame.
+                    .contentTransition(.opacity)
                     .foregroundStyle(.secondary)
             }
         }

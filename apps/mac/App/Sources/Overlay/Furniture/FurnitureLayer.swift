@@ -34,6 +34,7 @@ struct FurnitureLayer: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .animation(Theme.Motion.slow, value: plan.placedIDs + questions.map(\.id))
         }
         .animation(Theme.Motion.slow, value: pieces.map(\.id))
         .environment(\.colorScheme, .dark)
