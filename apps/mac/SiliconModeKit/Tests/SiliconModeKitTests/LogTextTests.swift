@@ -99,7 +99,19 @@ import Foundation
 
     @Test func strayMarkersFromACutGo() {
         // An earlier cut can leave half a span behind.
-        #expect(EventText.plain(markdown: "Spotify is **paused on `aas") == "Spotify is paused on aas")
+        let p = { EventText.plain(markdown: $0) }
+        #expect(p("Spotify is **paused on `aas") == "Spotify is paused on aas")
+        #expect(p("It was done**. Then `npm test, then more") == "It was done. Then npm test, then more")
+        #expect(p("(**Note: the rest was cut") == "(Note: the rest was cut")
+    }
+
+    @Test func proseStarsAndTicksStay() {
+        // Not half a span: markers with prose, a space or a slash on both sides.
+        let p = { EventText.plain(markdown: $0) }
+        #expect(p("Search **/*.ts files") == "Search **/*.ts files")
+        #expect(p("2 ** 10 is 1024, and so is 2**10") == "2 ** 10 is 1024, and so is 2**10")
+        #expect(p("Globbed src/** and lib/**") == "Globbed src/** and lib/**")
+        #expect(p("A lone ` tick") == "A lone ` tick")
     }
 
     @Test func stopsReadingAtTheLimit() {
@@ -109,11 +121,37 @@ import Foundation
         #expect(out.hasPrefix("Paragraph 0 is here. Paragraph 1 is here."))
     }
 
+    @Test func stopsReadingInsideOneLongParagraph() {
+        // One paragraph of many lines, and one huge line: neither is gathered whole.
+        let lines = (0..<100_000).map { "line \($0) of **one** paragraph" }.joined(separator: "\n")
+        let a = EventText.plain(markdown: lines, limit: 200)
+        #expect(a.hasPrefix("line 0 of one paragraph line 1 of one paragraph"))
+        #expect(a.count < 600)
+        let huge = String(repeating: "word *and* ", count: 200_000)
+        let b = EventText.plain(markdown: huge, limit: 300)
+        #expect(b.hasPrefix("word and word and"))
+        #expect(b.count < 700)
+        #expect(CoreText.firstSentence(huge, max: 40).count <= 40)
+    }
+
     @Test func saidLinesUseThePlainFirstSentence() {
         #expect(CoreText.firstSentence("**Playback:** Spotify is paused on *aas paas*. More later.", max: 72)
                 == "Playback: Spotify is paused on aas paas.")
         #expect(CoreText.firstSentence("Use [the guide](https://x.dev/g) first. Then more.") == "Use the guide first.")
         #expect(CoreText.firstSentence("**Done**\n\nAll 42 tests pass. Shipping next.") == "All 42 tests pass.")
+    }
+
+    @Test func aListIntroBringsItsItems() {
+        // "Said: Five fix tracks are running, each with a reviewer:" read unfinished.
+        let msg = "Five fix tracks are running, each with a reviewer:\n\n- **logs**\n- cards\n- chrome\n\nI'll report back."
+        #expect(CoreText.firstSentence(msg, max: 120) == "Five fix tracks are running, each with a reviewer: logs; cards; chrome")
+        let short = CoreText.firstSentence(msg, max: 60)
+        #expect(short.count <= 60 && short.hasPrefix("Five fix tracks are running, each with a reviewer: logs") && short.hasSuffix("…"))
+        // A colon with no list after it stays as it is.
+        #expect(CoreText.firstSentence("Here is the plan:\n\nMove the refresh first.", max: 80) == "Here is the plan:")
+        // Items that end a sentence end it.
+        #expect(CoreText.firstSentence("Two fixes:\n1. Moved the refresh.\n2. Added a test.", max: 80)
+                == "Two fixes: Moved the refresh.")
     }
 
     @Test func eventListReadsAssistantMarkdownOnly() {
@@ -153,6 +191,27 @@ import Foundation
         var b3 = b2; b3.startedAt = t0.addingTimeInterval(500)
         tabs.update([c, a2, b3])
         #expect(tabs.order == ["p:b", "p:a", "p:c"])
+    }
+
+    @Test func newcomersOpenAtTheEndEvenWhenTheyStartedEarlier() {
+        var tabs = ModeLogTabs()
+        // The first agents seen stand in the order they started.
+        let a = s("a", .working, started: 20, updated: 50), b = s("b", .working, started: 10, updated: 60)
+        tabs.update([a, b])
+        #expect(tabs.order == ["p:b", "p:a"])
+        // A resumed session that started long ago opens a tab at the end, not in front.
+        let old = s("old", .working, started: -5_000, updated: 70)
+        let older = s("older", .working, started: -9_000, updated: 70)
+        tabs.update([old, a, older, b])
+        #expect(tabs.order == ["p:b", "p:a", "p:older", "p:old"])
+        #expect(tabs.ordered([old, older, a, b]).map(\.id) == ["p:b", "p:a", "p:older", "p:old"])
+        // Not yet seen by update: after the open tabs too.
+        let fresh = s("fresh", .working, started: -1, updated: 80)
+        #expect(tabs.ordered([fresh, old, older, a, b]).map(\.id) == ["p:b", "p:a", "p:older", "p:old", "p:fresh"])
+        // One that leaves and comes back reopens at the end.
+        tabs.update([old, older, b])
+        tabs.update([old, a, older, b])
+        #expect(tabs.order == ["p:b", "p:older", "p:old", "p:a"])
     }
 
     @Test func firstSelectionPrefersWhoNeedsYou() {

@@ -2,11 +2,12 @@ import Foundation
 
 /// The order and the selection of the log tabs while Silicon Mode is on (one tab per agent shown).
 ///
-/// - Order: by when each session started, oldest first, so a new agent opens a tab at the
-///   trailing end, like a browser tab, and the tabs already there never move. The start time is
-///   read the first time a session is seen and kept (a provider revising it can't move a tab);
-///   a session without one counts as starting then. State changes never reorder tabs (the agent
-///   list is the place sorted by urgency).
+/// - Order: like browser tabs, a new agent opens a tab at the trailing end and the tabs already
+///   there never move: not for state changes (the agent list is the place sorted by urgency), not
+///   for a provider revising a start time, and not for a session that started long ago and shows
+///   up only now (a resumed one). Agents that show up together (the first agents seen) stand in
+///   the order they started, oldest first; a session without a start time counts as starting
+///   when first seen. A session that leaves and comes back reopens at the end.
 /// - Selection: the user's last pick stays selected. An agent that starts needing you is selected,
 ///   once per need: not again while that need lasts (the user may have moved on), and never away
 ///   from a selected agent that needs you too. When the selected agent leaves, the tab that takes
@@ -33,9 +34,11 @@ public struct ModeLogTabs: Sendable, Equatable {
 
     public init() {}
 
-    /// The sessions in tab order. Sessions not yet seen by `update` sort by their own start time.
+    /// The sessions in tab order. Sessions not yet seen by `update` go after the others, by their
+    /// own start time.
     public func ordered(_ sessions: [AgentSession]) -> [AgentSession] {
-        sessions.enumerated().map { (s: $0.element, k: key($0.element, offset: $0.offset)) }
+        let latest = latestStart
+        return sessions.enumerated().map { (s: $0.element, k: key($0.element, offset: $0.offset, after: latest)) }
             .sorted { a, b in
                 if a.k.start != b.k.start { return a.k.start < b.k.start }
                 if a.k.arrival != b.k.arrival { return a.k.arrival < b.k.arrival }
@@ -56,11 +59,18 @@ public struct ModeLogTabs: Sendable, Equatable {
     public mutating func update(_ sessions: [AgentSession], now: Date = Date()) -> Bool {
         let before = (order, selected)
         let present = Set(sessions.map(\.id))
-        for s in sessions where keys[s.id] == nil {
-            keys[s.id] = Key(start: s.startedAt ?? now, arrival: nextArrival)
+        keys = keys.filter { present.contains($0.key) }
+        // Newcomers open after every tab already there (in the order they started, among
+        // themselves), even one whose session started earlier.
+        let latest = latestStart
+        var newcomers: [(id: String, start: Date)] = []
+        for s in sessions where keys[s.id] == nil { newcomers.append((s.id, s.startedAt ?? now)) }
+        newcomers.sort { a, b in a.start != b.start ? a.start < b.start : a.id < b.id }
+        for n in newcomers {
+            let start = latest.map { Swift.max($0, n.start) } ?? n.start
+            keys[n.id] = Key(start: start, arrival: nextArrival)
             nextArrival += 1
         }
-        keys = keys.filter { present.contains($0.key) }
         let oldOrder = order
         order = ordered(sessions).map(\.id)
 
@@ -92,8 +102,13 @@ public struct ModeLogTabs: Sendable, Equatable {
 
     // MARK: Helpers
 
-    private func key(_ s: AgentSession, offset: Int) -> Key {
-        keys[s.id] ?? Key(start: s.startedAt ?? .distantFuture, arrival: Int.max / 2 + offset)
+    /// The latest start among the tabs open now.
+    private var latestStart: Date? { keys.values.lazy.map(\.start).max() }
+
+    private func key(_ s: AgentSession, offset: Int, after latest: Date?) -> Key {
+        if let k = keys[s.id] { return k }
+        let start = s.startedAt ?? .distantFuture
+        return Key(start: latest.map { Swift.max($0, start) } ?? start, arrival: Int.max / 2 + offset)
     }
 
     /// The agent that most recently started needing you, else the most recently active one.

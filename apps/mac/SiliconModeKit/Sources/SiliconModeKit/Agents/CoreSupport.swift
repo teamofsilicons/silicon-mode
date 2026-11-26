@@ -259,11 +259,17 @@ enum CoreText {
     }
 
     /// The first block of prose of a Markdown message as plain text (`EventText.plain`): skips
-    /// code fences, and a heading ("## Summary", a "**Done**" line) when prose follows it.
+    /// code fences, and a heading ("## Summary", a "**Done**" line) when prose follows it. A line
+    /// that introduces a list ("Five tracks are running:") brings its items along, so it doesn't
+    /// read unfinished ("Five tracks are running: logs; cards; chrome").
     static func firstProseLine(_ s: String, max: Int = 400) -> String {
         let blocks = EventText.plainBlocks(s, limit: max)
-        if let b = blocks.first(where: { $0.kind != .heading }) ?? blocks.first { return EventText.clip(b.text, max: max) }
-        return firstLine(s, max: max)
+        guard let i = blocks.firstIndex(where: { $0.kind != .heading }) ?? blocks.indices.first else {
+            return firstLine(s, max: max)
+        }
+        let items = blocks[(i + 1)...].prefix { $0.kind == .item }
+        guard blocks[i].text.hasSuffix(":"), !items.isEmpty else { return EventText.clip(blocks[i].text, max: max) }
+        return EventText.clip(EventText.joined(blocks[i...(i + items.count)]), max: max)
     }
 
     /// First sentence (or line) of prose, clipped.

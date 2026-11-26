@@ -21,13 +21,20 @@ extension EventText {
     ///   that introduces a list is followed by ": ", list items by "; ", unless they already end
     ///   in punctuation. Quote markers, rules and table rulers go.
     /// - Fenced code is left out (a message that is only code keeps the code).
-    /// - Stops reading once about `limit` characters of text are collected.
+    /// - Stops reading once about `limit` characters of text are collected, also inside one long
+    ///   paragraph or line.
     public static func plain(markdown s: String, limit: Int = 2000) -> String {
-        let blocks = plainBlocks(s, limit: limit)
+        joined(plainBlocks(s, limit: limit))
+    }
+
+    /// Blocks as one line, with the separators `plain(markdown:limit:)` uses.
+    static func joined(_ blocks: some Collection<PlainBlock>) -> String {
         var out = ""
-        for (i, b) in blocks.enumerated() {
-            if i > 0 { out += separator(after: blocks[i - 1], before: b) }
+        var previous: PlainBlock?
+        for b in blocks {
+            if let previous { out += separator(after: previous, before: b) }
             out += b.text
+            previous = b
         }
         return out
     }
@@ -37,23 +44,40 @@ extension EventText {
         var blocks: [PlainBlock] = []
         var code: [String] = []
         var current: PlainBlock?
+        /// Characters gathered into `current` so far (its Markdown, before the syntax goes).
+        var gathered = 0
         var fence: String?
         var total = 0
+        // A line or a block is read at most this far: enough for `limit` characters of text plus
+        // the syntax around them, so one huge paragraph isn't gathered (and parsed) whole.
+        let window = Swift.max(1, limit) + 256
 
         func flush() {
             guard let c = current else { return }
             current = nil
+            gathered = 0
             let text = inlinePlain(c.text)
             guard !text.isEmpty else { return }
             blocks.append(PlainBlock(kind: c.kind, text: text))
             total += text.count
         }
+        func start(_ kind: PlainBlock.Kind, _ text: String) {
+            current = PlainBlock(kind: kind, text: text)
+            gathered = text.count
+        }
 
         var rest = s[...]
-        while !rest.isEmpty, total < limit {
-            let end = rest.firstIndex(where: \.isNewline) ?? rest.endIndex
-            let raw = rest[..<end]
-            rest = end < rest.endIndex ? rest[rest.index(after: end)...] : rest[rest.endIndex...]
+        while !rest.isEmpty, total + gathered < limit {
+            let head = rest.prefix(window)
+            let raw: Substring
+            if let end = head.firstIndex(where: \.isNewline) {
+                raw = rest[..<end]
+                rest = rest[rest.index(after: end)...]
+            } else {
+                // The last line, or one longer than the window: read its start and stop there.
+                raw = head
+                rest = rest[rest.endIndex...]
+            }
             var line = raw.trimmingCharacters(in: .whitespaces)
 
             if let f = fence {
@@ -70,30 +94,35 @@ extension EventText {
             if line.isEmpty || isRule(line) { flush(); continue }
             if let h = heading(line) {
                 flush()
-                current = PlainBlock(kind: .heading, text: h)
+                start(.heading, h)
                 flush()
                 continue
             }
             if let item = listItem(line) {
                 flush()
-                current = PlainBlock(kind: .item, text: item)
+                start(.item, item)
                 continue
             }
             if line.hasPrefix("|") {
                 // A table row: its cells, comma-separated.
                 flush()
                 let cells = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                current = PlainBlock(kind: .item, text: cells.joined(separator: ", "))
+                start(.item, cells.joined(separator: ", "))
                 flush()
                 continue
             }
             if current == nil, let label = boldLabel(line) {
                 // "**Summary**" on a line of its own reads like a heading.
-                current = PlainBlock(kind: .heading, text: label)
+                start(.heading, label)
                 flush()
                 continue
             }
-            if current != nil { current!.text += " " + line } else { current = PlainBlock(kind: .paragraph, text: line) }
+            if current != nil {
+                current!.text += " " + line
+                gathered += line.count + 1
+            } else {
+                start(.paragraph, line)
+            }
         }
         flush()
         if blocks.isEmpty, !code.isEmpty {
@@ -177,13 +206,27 @@ extension EventText {
         for (re, template) in inlineRules {
             text = re.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
         }
-        // Syntax left unmatched (often by an earlier cut): stray strong markers and backticks.
-        text = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        // Syntax left unmatched (often by an earlier cut): a strong marker or backticks that open or
+        // close a word. "**" between spaces or next to a slash is prose ("2 ** 10", "**/*.ts").
+        if let re = strayMarks, text.contains("**") || text.contains("`") {
+            text = re.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
+        }
         if protect { text = restore(text, spans: spans) }
         return collapse(text)
     }
 
     private static let inlineMarks: Set<Character> = ["*", "_", "`", "[", "<", "~", "\\"]
+
+    /// Half a span: "**" or backticks after a space or an opening bracket and before a word
+    /// ("**Playback", "`npm"), or after a word and before a space or punctuation ("done**",
+    /// "test`,"). Markers with prose or a slash on both sides don't match.
+    private static let strayMarks: NSRegularExpression? = {
+        let opens = #"(?<![^\s(\[{'"‘“])"#
+        let closes = #"(?![^\s.,;:!?)\]}'"’”])"#
+        let pattern = #"\#(opens)\*\*(?=[\p{L}\p{N}(\['"‘“])|(?<=[\p{L}\p{N}.,;:!?)\]'"’”])\*\*\#(closes)"#
+            + #"|\#(opens)`+(?=[^\s`])|(?<=[^\s`])`+\#(closes)"#
+        return try? NSRegularExpression(pattern: pattern)
+    }()
 
     /// Escapes become U+F0000 + their ASCII code; code spans U+F0100 + their index.
     private static let escapeBase: UInt32 = 0xF0000
