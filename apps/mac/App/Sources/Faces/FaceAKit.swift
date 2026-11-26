@@ -18,6 +18,12 @@ enum FaceA {
     @MainActor
     static func isFrozen(_ fixed: Double?) -> Bool { SnapshotHarness.time != nil || fixed != nil }
 
+    /// `date` truncated to its minute: a stable value for symbols that only show hh:mm, so they
+    /// compare equal (and skip re-rendering) for the rest of the minute.
+    static func minute(_ date: Date) -> Date {
+        Date(timeIntervalSinceReferenceDate: floor(date.timeIntervalSinceReferenceDate / 60) * 60)
+    }
+
     /// Wall-clock time to display. Snapshots get a fixed, pretty moment (Thursday 26 November,
     /// 10:41:52 local) plus the snapshot time, so clocks render identically every run.
     @MainActor
@@ -151,6 +157,13 @@ enum FaceA {
         }.prefix(max))
     }
 
+    /// Where an agent works, for subtitles: its project, or the ISIs a Silicon is running.
+    static func whereabouts(_ s: AgentSession) -> String? {
+        if let p = s.projectName { return p }
+        if let id = s.identity, id.isSilicon, !id.members.isEmpty { return id.members.map(\.name).joined(separator: ", ") }
+        return nil
+    }
+
     /// Short human title for a session.
     static func title(_ s: AgentSession, max: Int = 28) -> String {
         let raw = s.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,11 +190,12 @@ enum FaceA {
         guard !parts.isEmpty else {
             return Text("No agents running").foregroundStyle(Theme.Night.muted)
         }
-        var out = Text("")
+        var out = Text(verbatim: "")
         for (i, p) in parts.enumerated() {
-            if i > 0 { out = out + Text("  ·  ").foregroundStyle(Theme.Night.faint) }
-            out = out + Text("\(p.count)").foregroundStyle(Theme.stateColor(p.state)).monospacedDigit()
-                + Text(" \(p.label)").foregroundStyle(Theme.Night.secondary)
+            let sep = i > 0 ? Text(verbatim: "  ·  ").foregroundStyle(Theme.Night.faint) : Text(verbatim: "")
+            let count = Text(verbatim: "\(p.count)").foregroundStyle(Theme.stateColor(p.state)).monospacedDigit()
+            let label = Text(verbatim: " \(p.label)").foregroundStyle(Theme.Night.secondary)
+            out = Text("\(out)\(sep)\(count)\(label)")
         }
         return out
     }
@@ -191,10 +205,12 @@ enum FaceA {
 /// panic visual; this keeps the face itself in character).
 struct FaceAPanicWash: View {
     let active: Bool
+    var paused = false
     var body: some View {
         if active {
-            TimelineView(.animation(minimumInterval: 1 / 30)) { tl in
-                let t = tl.date.timeIntervalSinceReferenceDate
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: paused)) { tl in
+                // Snapshots get a fixed mid-throb so they're reproducible.
+                let t = SnapshotHarness.isRendering ? 0 : tl.date.timeIntervalSinceReferenceDate
                 let p = 0.5 + 0.5 * sin(t * 2 * .pi * 3.2)
                 RadialGradient(colors: [.clear, FaceA.red.color(0.10 + 0.32 * p)],
                                center: .center, startRadius: 120, endRadius: 900)
@@ -228,6 +244,32 @@ struct FaceASiliconMark: View {
 
 /// Richer demo sessions for snapshots (six providers, every state).
 enum FaceASamples {
+    /// Two demo Silicons (one session each, grouped ISIs as members) plus two regular agents, for
+    /// checking Silicon avatars on every face. Handles and names are made up.
+    static let silicons: [AgentSession] = {
+        let now = Date()
+        func ev(_ t: String, _ k: AgentEvent.Kind, _ ago: Double, _ seed: String) -> AgentEvent {
+            AgentEvent(id: "\(seed)-\(Int(ago))", at: now.addingTimeInterval(-ago), kind: k, text: t)
+        }
+        let scout = AgentIdentity(kind: AgentIdentity.siliconKind, handle: "si:demo_scout", displayName: "Scout",
+                                  members: [.init(name: "digest", state: .working), .init(name: "tidy", state: .finished)])
+        let owl = AgentIdentity(kind: AgentIdentity.siliconKind, handle: "si:night_owl",
+                                members: [.init(name: "inbox", state: .needsYou)])
+        return [
+            AgentSession(provider: AgentIdentity.siliconKind, nativeID: "si:demo_scout", title: "Scout", state: .working,
+                         startedAt: now.addingTimeInterval(-700), updatedAt: now,
+                         recentEvents: [ev("Read notes/weekly.md", .tool, 30, "scout"), ev("Drafted the weekly digest", .assistant, 8, "scout")],
+                         identity: scout),
+            AgentSession(provider: AgentIdentity.siliconKind, nativeID: "si:night_owl", title: "Night Owl", state: .needsYou,
+                         startedAt: now.addingTimeInterval(-1500), updatedAt: now.addingTimeInterval(-40),
+                         recentEvents: [ev("Wants to send the reply", .permission, 40, "owl")],
+                         pendingQuestions: [AgentQuestion(id: "demo-owl-q", sessionID: "silicon:si:night_owl", provider: AgentIdentity.siliconKind,
+                                                          kind: .permission, title: "Send email", detail: "Reply to the design thread",
+                                                          options: AgentQuestion.permissionOptions(), answerable: false)],
+                         identity: owl),
+        ] + SampleAgents.sessions.filter { $0.state != .needsYou }
+    }()
+
     static let sessions: [AgentSession] = {
         let now = Date()
         func s(_ p: String, _ id: String, _ title: String, _ st: AgentState, _ ago: Double) -> AgentSession {

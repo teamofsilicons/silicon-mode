@@ -28,25 +28,28 @@ enum DeskFace {
 struct DeskFaceView: View {
     let ctx: FaceContext
     @State private var sim = DeskSim()
+    @State private var clock = FacePauseClock()
+    /// Calm scenes (Silly sipping coffee or holding up the sign) animate at `ctx.calmFrameInterval`.
+    @State private var calm = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let plan = DeskPlan(ctx: ctx)
-        // The whole room drifts a few points every few seconds so nothing sits on the same pixels for
-        // hours; the static layers just move (no redraw).
-        TimelineView(.periodic(from: .distantPast, by: DeskFaceView.driftStep)) { tl in
-            let d = reduceMotion ? .zero : DeskFaceView.drift(FaceBClock.seconds(tl.date))
+        // The whole room drifts a fraction of a point every couple of seconds so nothing sits on the
+        // same pixels for hours. The layers just move (no redraw), and the step is snapped, not
+        // animated: an endless implicit animation would re-render the room at display rate.
+        TimelineView(FacePeriodicSchedule(interval: DeskFaceView.driftStep, paused: ctx.paused)) { tl in
+            let d = reduceMotion ? .zero : DeskFaceView.drift(FaceBClock.seconds(clock.date(tl.date, paused: ctx.paused)))
             layers(plan)
                 .padding(-DeskFaceView.bleed)
                 .offset(x: d.x, y: d.y)
-                .animation(.linear(duration: DeskFaceView.driftStep), value: d)
         }
         .background(Theme.Night.background)
         .clipped()
     }
 
     static let bleed: CGFloat = 10
-    static let driftStep: Double = 6
+    static let driftStep: Double = 2
 
     static func drift(_ t: Double) -> CGPoint {
         let k = floor(t / driftStep) * driftStep
@@ -56,26 +59,155 @@ struct DeskFaceView: View {
     @ViewBuilder
     private func layers(_ plan: DeskPlan) -> some View {
         ZStack {
-            DeskSkyLayer(preview: ctx.isPreview)
+            DeskSkyLayer(preview: ctx.isPreview, paused: ctx.paused, clock: clock)
             DeskRoomLayer(theme: plan.theme, showClock: plan.showClock).equatable()
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : ctx.frameInterval)) { tl in
-                let t = FaceBClock.seconds(tl.date)
+            TimelineView(.animation(minimumInterval: ctx.animationInterval(calm: calm), paused: ctx.paused)) { tl in
+                let t = FaceBClock.seconds(clock.date(tl.date, paused: ctx.paused))
                 let wall = FaceBClock.wallDate(tl.date)
                 let _ = sim.advance(to: t, plan: plan, reduceMotion: reduceMotion)
-                Canvas { g, size in
+                Canvas(rendersAsynchronously: true) { g, size in
                     DeskPainter(sim: sim, plan: plan, t: t, wall: wall, reduceMotion: reduceMotion).draw(&g, size: size)
                 } symbols: {
-                    ForEach(plan.marks, id: \.self) { p in
-                        ProviderMark(provider: p, size: 15).tag("mark:" + p)
-                    }
-                    ForEach(plan.screens) { spec in
-                        DeskScreenLines(session: spec.session, width: spec.width, showText: plan.showText)
-                            .equatable()
-                            .tag("text:" + spec.id)
-                    }
+                    DeskSymbols(plan: plan, askCount: sim.pose == .ask ? plan.counts.needsYou : nil)
                 }
+                .onChange(of: sim.calm) { _, quiet in calm = quiet }
+            }
+            // Static: the soft vignette over the whole room, composited, never repainted.
+            DeskVignette().equatable()
+        }
+    }
+}
+
+/// The Desk canvas's symbols: monitor text, chin marks and every label the painter draws, laid out
+/// once and redrawn only when they change (text is never resolved per frame).
+private struct DeskSymbols: View {
+    let plan: DeskPlan
+    /// The "?" sign's count while Silly holds it up.
+    let askCount: Int?
+
+    var body: some View {
+        ForEach(plan.screens) { spec in
+            let s = spec.session
+            DeskScreenLines(session: s, width: spec.width, showText: plan.showText)
+                .equatable()
+                .tag(DeskSymbol.text(s.id))
+            FaceAgentMark(s, size: 15).equatable().tag(DeskSymbol.mark(s.id))
+            if spec.titleWidth > 20 {
+                DeskText(text: s.title, size: 11.5, weight: .medium, color: .white.opacity(0.62), width: spec.titleWidth)
+                    .equatable().tag(DeskSymbol.title(s.id))
+            }
+            switch s.state {
+            case .needsYou:
+                let q = s.pendingQuestions.first
+                DeskText(text: q?.title ?? "Needs you", size: 13.5, weight: .semibold, color: Theme.Night.warning,
+                         width: spec.cardWidth - 52)
+                    .equatable().tag(DeskSymbol.cardTitle(s.id))
+                if plan.showText {
+                    DeskText(text: FB.clip(q?.detail ?? s.recentEvents.last?.text ?? "", 60), size: 11, weight: .regular,
+                             color: Theme.Night.secondary, width: spec.cardWidth - 28, mono: true)
+                        .equatable().tag(DeskSymbol.cardDetail(s.id))
+                }
+                let buttons = DeskPainter.cardButtons(q)
+                if let first = buttons.first {
+                    DeskText(text: first, size: 11.5, weight: .semibold, color: Color(hex: "3A2508"))
+                        .equatable().tag(DeskSymbol.button(s.id, 0))
+                }
+                if buttons.count > 1 {
+                    DeskText(text: buttons[1], size: 11.5, weight: .medium, color: .white.opacity(0.75))
+                        .equatable().tag(DeskSymbol.button(s.id, 1))
+                }
+            case .finished:
+                if plan.showText, let last = s.recentEvents.last {
+                    DeskText(text: FB.clip(last.text, 44), size: 11.5, weight: .regular, color: Theme.Night.muted)
+                        .equatable().tag(DeskSymbol.last(s.id))
+                }
+            case .error:
+                DeskText(text: "✕  " + FB.clip(s.recentEvents.last?.text ?? "Error", 48), size: 12, weight: .medium,
+                         color: Theme.Night.danger, width: spec.bannerWidth)
+                    .equatable().tag(DeskSymbol.error(s.id))
+            case .working, .idle:
+                EmptyView()
             }
         }
+        if plan.screens.contains(where: { $0.session.state == .needsYou }) {
+            DeskText(text: "?", size: 15, weight: .black, color: Color(hex: "3A2508")).equatable().tag(DeskSymbol.cardMark)
+        }
+        if plan.screens.contains(where: { $0.session.state == .finished }) {
+            DeskText(text: "Done", size: 15, weight: .semibold, color: Theme.Night.foreground).equatable().tag(DeskSymbol.done)
+        }
+        if plan.screens.contains(where: { $0.session.state == .idle }) {
+            DeskText(text: "idle", size: 12, weight: .medium, color: Theme.Night.muted).equatable().tag(DeskSymbol.idle)
+        }
+        if plan.slots.contains(where: { $0.sessions.isEmpty }) {
+            DeskText(text: "No agents running", size: 20, weight: .semibold, color: Theme.Night.secondary)
+                .equatable().tag(DeskSymbol.screensaverTitle)
+            DeskText(text: "Silly's on a coffee break", size: 13.5, weight: .regular, color: Theme.Night.muted)
+                .equatable().tag(DeskSymbol.screensaverSubtitle)
+        }
+        if let askCount {
+            DeskText(text: "?", size: 70, weight: .black, color: Color(hex: "5A3A0C")).equatable().tag(DeskSymbol.signMark)
+            if askCount > 1 {
+                DeskText(text: "\(askCount)", size: 22, weight: .bold, color: Color(hex: "F5D27F")).equatable().tag(DeskSymbol.signCount)
+            }
+        }
+        if plan.isPanicking {
+            DeskText(text: "!", size: 36, weight: .black, color: Color(hex: "2A0D0A")).equatable().tag(DeskSymbol.exclaim)
+        }
+    }
+}
+
+/// Symbol tags for the Desk canvas (per session, never per provider: two Silicons share one).
+enum DeskSymbol {
+    static func text(_ id: String) -> String { "text:" + id }
+    static func mark(_ id: String) -> String { "mark:" + id }
+    static func title(_ id: String) -> String { "title:" + id }
+    static func cardTitle(_ id: String) -> String { "card.title:" + id }
+    static func cardDetail(_ id: String) -> String { "card.detail:" + id }
+    static func button(_ id: String, _ i: Int) -> String { "card.button\(i):" + id }
+    static func last(_ id: String) -> String { "last:" + id }
+    static func error(_ id: String) -> String { "error:" + id }
+    static let cardMark = "desk.card.mark"
+    static let done = "desk.done"
+    static let idle = "desk.idle"
+    static let screensaverTitle = "desk.screensaver.title"
+    static let screensaverSubtitle = "desk.screensaver.subtitle"
+    static let signMark = "desk.sign.mark"
+    static let signCount = "desk.sign.count"
+    static let exclaim = "desk.exclaim"
+}
+
+/// One line of Desk text as a Canvas symbol. With a width it is truncated to it and left-aligned
+/// (the painter used to wrap it into a rect of that width).
+struct DeskText: View, Equatable {
+    let text: String
+    let size: CGFloat
+    let weight: Theme.Weight
+    let color: Color
+    var width: CGFloat?
+    var mono = false
+
+    var body: some View {
+        Text(text)
+            .font(mono ? .system(size: size, design: .monospaced) : Theme.allo(size, weight))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(width: width.map { max($0, 1) }, alignment: .leading)
+            .fixedSize(horizontal: width == nil, vertical: true)
+    }
+}
+
+/// The soft vignette over the room (screen space, static).
+struct DeskVignette: View, Equatable {
+    var body: some View {
+        Canvas { g, size in
+            let rr = max(size.width, size.height) * 0.78
+            let center = CGPoint(x: size.width / 2, y: size.height * 0.48)
+            g.fill(Path(CGRect(origin: .zero, size: size)),
+                   with: .radialGradient(Gradient(stops: [.init(color: .clear, location: 0.55), .init(color: .black.opacity(0.42), location: 1)]),
+                                         center: center, startRadius: 0, endRadius: rr))
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -88,7 +220,7 @@ private struct DeskScreenLines: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             line(glyph: "~", glyphColor: Theme.Night.accent,
-                 text: "\(session.projectName ?? "agent") · \(ProviderCatalog.info(for: session.provider).name)",
+                 text: "\(FaceA.whereabouts(session) ?? "agent") · \(ProviderCatalog.info(for: session.provider).name)",
                  textColor: Theme.Night.muted)
             ForEach(session.recentEvents.suffix(10)) { e in
                 let k = FBEventKind(e)
@@ -130,6 +262,14 @@ struct DeskMonitorSlot {
         return CGRect(x: s.minX + 12, y: s.minY + 30, width: s.width - 24, height: s.height - 38)
     }
 
+    /// Room for the title in the title bar (less when stacked agents show tabs).
+    var titleWidth: CGFloat {
+        let bar = screen
+        guard sessions.count > 1 else { return bar.width - 56 }
+        let x0 = bar.maxX - 8 - CGFloat(sessions.count) * (14 + 4)
+        return x0 - bar.minX - 52
+    }
+
     func current(_ t: Double) -> (AgentSession?, Int) {
         guard !sessions.isEmpty else { return (nil, 0) }
         let i = sessions.count == 1 ? 0 : Int(floor(t / 6)) % sessions.count
@@ -140,7 +280,12 @@ struct DeskMonitorSlot {
 struct DeskScreenSpec: Identifiable {
     let id: String
     let session: AgentSession
+    /// Width of the monitor's text body.
     let width: CGFloat
+    let titleWidth: CGFloat
+    /// Width of the needs-you card and of the error banner's text.
+    let cardWidth: CGFloat
+    let bannerWidth: CGFloat
 }
 
 struct DeskPlan {
@@ -153,7 +298,6 @@ struct DeskPlan {
     let sessions: [AgentSession]
     let slots: [DeskMonitorSlot]
     let screens: [DeskScreenSpec]
-    let marks: [String]
     let counts: AgentCounts
 
     init(ctx: FaceContext) {
@@ -184,9 +328,13 @@ struct DeskPlan {
         if groups.isEmpty { groups = [[]] }
         slots = zip(rects, groups).map { DeskMonitorSlot(rect: $0.0.rect, sessions: $0.1, topRow: $0.0.top) }
         var specs: [DeskScreenSpec] = []
-        for slot in slots { for s in slot.sessions { specs.append(DeskScreenSpec(id: s.id, session: s, width: slot.body.width)) } }
+        for slot in slots {
+            for s in slot.sessions {
+                specs.append(DeskScreenSpec(id: s.id, session: s, width: slot.body.width, titleWidth: slot.titleWidth,
+                                            cardWidth: slot.body.width - 8, bannerWidth: slot.screen.width - 24))
+            }
+        }
         screens = specs
-        marks = Array(Set(ctx.sessions.map(\.provider))).sorted()
     }
 
     /// Monitor bezels in illustration space: one big screen, a pair, a trio, or two rows.
@@ -222,8 +370,22 @@ final class DeskSim {
     private(set) var now: Double = 0
     private var states: [String: AgentState] = [:]
     private var last: Double?
+    private var calmGate = FaceCalmGate()
+    private var darknessCache: (minute: Double, value: Double)?
+
+    /// True while Silly is calm (sipping coffee or holding up the sign) and nothing is popping in.
+    private(set) var calm = false
 
     static let celebrateLength = 4.6
+
+    /// How dark it is outside, recomputed once a minute (it changes over hours).
+    func darkness(_ wall: Date) -> Double {
+        let minute = floor(wall.timeIntervalSinceReferenceDate / 60)
+        if let c = darknessCache, c.minute == minute { return c.value }
+        let v = DeskSky.darkness(wall)
+        darknessCache = (minute, v)
+        return v
+    }
 
     func advance(to t: Double, plan: DeskPlan, reduceMotion: Bool) {
         var first = false
@@ -252,6 +414,21 @@ final class DeskSim {
             states = states.filter { live.contains($0.key) }
             stateSince = stateSince.filter { live.contains($0.key) }
         }
+        calmGate.update(quiet: isQuiet(plan), t: now)
+        calm = calmGate.calm
+    }
+
+    /// Quiet: no typing, celebrating or panicking, no turn or pop-in under way, and (while chilling)
+    /// not in the middle of a sip or a stretch.
+    private func isQuiet(_ plan: DeskPlan) -> Bool {
+        guard !plan.isPanicking, !plan.isPreview, pose == .chill || pose == .ask,
+              now - turnAt > 0.6, now - poseSince > 0.8, now - celebrateStart > 3.4 else { return false }
+        if stateSince.values.contains(where: { now - $0 < 0.8 }) { return false }
+        if pose == .chill {
+            let cyc = now.truncatingRemainder(dividingBy: 22)
+            if (5.1...9.8).contains(cyc) || (14.0...18.8).contains(cyc) { return false }
+        }
+        return true
     }
 
     private func observe(_ plan: DeskPlan, first: Bool) {
@@ -303,7 +480,7 @@ struct DeskPainter {
         let space = DeskSpace(size)
         var c = g
         space.apply(&c)
-        let dark = DeskSky.darkness(wall)
+        let dark = sim.darkness(wall)
 
         drawFairyLights(&c, dark: dark)
         if plan.showClock { drawClock(&c) }
@@ -366,16 +543,22 @@ struct DeskPainter {
                             count: n, spread: 1.2, life: 3.0)
         }
 
-        // Screen-space finish: panic flash + a soft vignette.
+        // Screen-space finish: the panic flash (the vignette is a static layer above).
         if plan.isPanicking {
             let a = 0.12 + 0.1 * (0.5 + 0.5 * sin(t * 14))
             g.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Theme.Night.danger.opacity(a)))
         }
-        let rr = max(size.width, size.height) * 0.78
-        let center = CGPoint(x: size.width / 2, y: size.height * 0.48)
-        g.fill(Path(CGRect(origin: .zero, size: size)),
-               with: .radialGradient(Gradient(stops: [.init(color: .clear, location: 0.55), .init(color: .black.opacity(0.42), location: 1)]),
-                                     center: center, startRadius: 0, endRadius: rr))
+    }
+
+    /// The needs-you card's buttons: the question's first two options.
+    static func cardButtons(_ q: AgentQuestion?) -> [String] {
+        let opts = q?.options.prefix(2).map(\.label) ?? ["Allow", "Deny"]
+        return opts.isEmpty ? ["Open"] : opts
+    }
+
+    /// Draws a symbol if it was laid out.
+    private func drawSymbol(_ c: inout GraphicsContext, _ id: String, at p: CGPoint, anchor: UnitPoint) {
+        if let sym = c.resolveSymbol(id: id) { c.draw(sym, at: p, anchor: anchor) }
     }
 
     private func glowColor(_ s: AgentSession?) -> Color {
@@ -435,11 +618,9 @@ struct DeskPainter {
         sc.fill(glare, with: .linearGradient(Gradient(colors: [.white.opacity(0.045), .clear]),
                                              startPoint: CGPoint(x: scr.minX, y: scr.minY), endPoint: CGPoint(x: scr.minX + 120, y: scr.minY + 120)))
 
-        // Chin: provider mark + state LED.
+        // Chin: the agent's mark (a Silicon's avatar) + state LED.
         let chinY = r.maxY - 13.5
-        if let session, let mark = c.resolveSymbol(id: "mark:" + session.provider) {
-            c.draw(mark, at: CGPoint(x: r.midX, y: chinY), anchor: .center)
-        }
+        if let session { drawSymbol(&c, DeskSymbol.mark(session.id), at: CGPoint(x: r.midX, y: chinY), anchor: .center) }
         if let session {
             let col = Theme.stateColor(session.state)
             let a = session.state == .needsYou ? (sin(t * 6) > 0 ? 1.0 : 0.3) : 0.9
@@ -462,7 +643,6 @@ struct DeskPainter {
             c.fill(Path(ellipseIn: CGRect(x: bar.minX + 9 + CGFloat(i) * 10, y: bar.midY - 3, width: 6, height: 6)),
                    with: .color(Color(hex: hex).opacity(0.55)))
         }
-        var titleW = bar.width - 56
         if slot.sessions.count > 1 {
             // Tabs for stacked agents.
             let n = slot.sessions.count
@@ -472,11 +652,9 @@ struct DeskPainter {
                 c.fill(Path(roundedRect: CGRect(x: x0 + CGFloat(i) * (tw + 4), y: bar.midY - 2.5, width: tw, height: 5), cornerRadius: 2.5),
                        with: .color(.white.opacity(i == tabIndex ? 0.7 : 0.18)))
             }
-            titleW = x0 - bar.minX - 52
         }
-        if titleW > 20 {
-            c.draw(Text(s.title).font(Theme.allo(11.5, .medium)).foregroundStyle(Color.white.opacity(0.62)),
-                   in: CGRect(x: bar.minX + 44, y: bar.minY + 3.5, width: titleW, height: 16))
+        if slot.titleWidth > 20 {
+            drawSymbol(&c, DeskSymbol.title(s.id), at: CGPoint(x: bar.minX + 44, y: bar.minY + 3.5), anchor: .topLeading)
         }
         if s.state == .working && !reduceMotion {
             // A tiny spinner of dots at the right of the bar.
@@ -555,29 +733,24 @@ struct DeskPainter {
             cc.stroke(cp, with: .color(Theme.Night.warning.opacity(0.55)), lineWidth: 1.5)
             let ic = CGPoint(x: card.minX + 24, y: card.minY + 24)
             cc.fill(Path(ellipseIn: CGRect(x: ic.x - 11, y: ic.y - 11, width: 22, height: 22)), with: .color(Theme.Night.warning))
-            cc.draw(Text("?").font(Theme.allo(15, .black)).foregroundStyle(Color(hex: "3A2508")), at: ic, anchor: .center)
-            cc.draw(Text(q?.title ?? "Needs you").font(Theme.allo(13.5, .semibold)).foregroundStyle(Theme.Night.warning),
-                    in: CGRect(x: ic.x + 18, y: ic.y - 9, width: card.maxX - ic.x - 28, height: 18))
-            let detail = q?.detail ?? s.recentEvents.last?.text ?? ""
+            drawSymbol(&cc, DeskSymbol.cardMark, at: ic, anchor: .center)
+            drawSymbol(&cc, DeskSymbol.cardTitle(s.id), at: CGPoint(x: ic.x + 18, y: ic.y - 9), anchor: .topLeading)
             if plan.showText {
-                cc.draw(Text(FB.clip(detail, 60)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.Night.secondary),
-                        in: CGRect(x: card.minX + 14, y: card.minY + 44, width: card.width - 28, height: 16))
+                drawSymbol(&cc, DeskSymbol.cardDetail(s.id), at: CGPoint(x: card.minX + 14, y: card.minY + 44), anchor: .topLeading)
             }
             if !compact || card.height > 90 {
                 let by = card.maxY - 34
-                let opts = q?.options.prefix(2).map(\.label) ?? ["Allow", "Deny"]
                 var bx = card.minX + 14
-                for (i, label) in (opts.isEmpty ? ["Open"] : opts).enumerated() {
+                for (i, label) in Self.cardButtons(q).enumerated() {
                     let w = CGFloat(label.count) * 7.5 + 28
                     let br = CGRect(x: bx, y: by, width: w, height: 22)
                     let bp = Path(roundedRect: br, cornerRadius: 11)
                     if i == 0 {
                         cc.fill(bp, with: .color(Theme.Night.warning))
-                        cc.draw(Text(label).font(Theme.allo(11.5, .semibold)).foregroundStyle(Color(hex: "3A2508")), at: CGPoint(x: br.midX, y: br.midY), anchor: .center)
                     } else {
                         cc.stroke(bp, with: .color(.white.opacity(0.25)), lineWidth: 1)
-                        cc.draw(Text(label).font(Theme.allo(11.5, .medium)).foregroundStyle(Color.white.opacity(0.75)), at: CGPoint(x: br.midX, y: br.midY), anchor: .center)
                     }
+                    drawSymbol(&cc, DeskSymbol.button(s.id, i), at: CGPoint(x: br.midX, y: br.midY), anchor: .center)
                     bx += w + 8
                 }
             }
@@ -594,21 +767,17 @@ struct DeskPainter {
             check.addLine(to: CGPoint(x: center.x - rad * 0.1, y: center.y + rad * 0.36))
             check.addLine(to: CGPoint(x: center.x + rad * 0.48, y: center.y - rad * 0.32))
             c.stroke(check.trimmedPath(from: 0, to: p), with: .color(Theme.Night.success), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-            c.draw(Text("Done").font(Theme.allo(15, .semibold)).foregroundStyle(Theme.Night.foreground),
-                   at: CGPoint(x: center.x, y: center.y + rad + 16), anchor: .center)
-            if plan.showText, let last = s.recentEvents.last {
-                c.draw(Text(FB.clip(last.text, 44)).font(Theme.allo(11.5, .regular)).foregroundStyle(Theme.Night.muted),
-                       at: CGPoint(x: center.x, y: center.y + rad + 35), anchor: .center)
+            drawSymbol(&c, DeskSymbol.done, at: CGPoint(x: center.x, y: center.y + rad + 16), anchor: .center)
+            if plan.showText {
+                drawSymbol(&c, DeskSymbol.last(s.id), at: CGPoint(x: center.x, y: center.y + rad + 35), anchor: .center)
             }
         case .idle:
             drawBouncer(&c, scr.insetBy(dx: 6, dy: 28), size: 22, alpha: 0.6)
-            c.draw(Text("idle").font(Theme.allo(12, .medium)).foregroundStyle(Theme.Night.muted),
-                   at: CGPoint(x: body.maxX - 6, y: body.maxY - 4), anchor: .bottomTrailing)
+            drawSymbol(&c, DeskSymbol.idle, at: CGPoint(x: body.maxX - 6, y: body.maxY - 4), anchor: .bottomTrailing)
         case .error:
             let banner = CGRect(x: scr.minX, y: scr.maxY - 30, width: scr.width, height: 30)
             c.fill(Path(banner), with: .color(Theme.Night.danger.opacity(0.18)))
-            c.draw(Text("✕  " + FB.clip(s.recentEvents.last?.text ?? "Error", 48)).font(Theme.allo(12, .medium))
-                    .foregroundStyle(Theme.Night.danger), in: CGRect(x: banner.minX + 12, y: banner.minY + 7, width: banner.width - 24, height: 18))
+            drawSymbol(&c, DeskSymbol.error(s.id), at: CGPoint(x: banner.minX + 12, y: banner.minY + 7), anchor: .topLeading)
         case .working:
             break
         }
@@ -616,10 +785,8 @@ struct DeskPainter {
 
     private func drawScreensaver(_ c: inout GraphicsContext, _ scr: CGRect) {
         drawBouncer(&c, scr.insetBy(dx: 10, dy: 10), size: 46, alpha: 0.9)
-        c.draw(Text("No agents running").font(Theme.allo(20, .semibold)).foregroundStyle(Theme.Night.secondary),
-               at: CGPoint(x: scr.midX, y: scr.minY + scr.height * 0.3), anchor: .center)
-        c.draw(Text("Silly's on a coffee break").font(Theme.allo(13.5, .regular)).foregroundStyle(Theme.Night.muted),
-               at: CGPoint(x: scr.midX, y: scr.minY + scr.height * 0.3 + 26), anchor: .center)
+        drawSymbol(&c, DeskSymbol.screensaverTitle, at: CGPoint(x: scr.midX, y: scr.minY + scr.height * 0.3), anchor: .center)
+        drawSymbol(&c, DeskSymbol.screensaverSubtitle, at: CGPoint(x: scr.midX, y: scr.minY + scr.height * 0.3 + 26), anchor: .center)
     }
 
     /// A DVD-style bouncing silicon tile.

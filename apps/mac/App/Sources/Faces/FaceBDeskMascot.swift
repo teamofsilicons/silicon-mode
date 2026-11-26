@@ -338,12 +338,21 @@ struct DeskMascot {
                                      startPoint: CGPoint(x: 0, y: board.minY), endPoint: CGPoint(x: 0, y: board.maxY)))
         s.fill(Path(roundedRect: CGRect(x: board.minX + 22, y: board.minY + 9, width: 60, height: 7), cornerRadius: 3.5),
                with: .color(.white.opacity(0.45)))
-        s.draw(Text("?").font(Theme.allo(70, .black)).foregroundStyle(Color(hex: "5A3A0C")),
-               at: CGPoint(x: 0, y: board.midY + 2), anchor: .center)
+        // Glyphs come from the canvas's symbols (laid out once), with a fallback.
+        if let q = s.resolveSymbol(id: DeskSymbol.signMark) {
+            s.draw(q, at: CGPoint(x: 0, y: board.midY + 2), anchor: .center)
+        } else {
+            s.draw(Text("?").font(Theme.allo(70, .black)).foregroundStyle(Color(hex: "5A3A0C")),
+                   at: CGPoint(x: 0, y: board.midY + 2), anchor: .center)
+        }
         if count > 1 {
             let bc = CGPoint(x: board.maxX - 6, y: board.minY + 6)
             s.fill(Path(ellipseIn: CGRect(x: bc.x - 20, y: bc.y - 20, width: 40, height: 40)), with: .color(Color(hex: "1E1826")))
-            s.draw(Text("\(count)").font(Theme.allo(22, .bold)).foregroundStyle(Color(hex: "F5D27F")), at: bc, anchor: .center)
+            if let n = s.resolveSymbol(id: DeskSymbol.signCount) {
+                s.draw(n, at: bc, anchor: .center)
+            } else {
+                s.draw(Text("\(count)").font(Theme.allo(22, .bold)).foregroundStyle(Color(hex: "F5D27F")), at: bc, anchor: .center)
+            }
         }
         // The hand wraps the stick.
         s.fill(Path(ellipseIn: CGRect(x: -13, y: -13, width: 26, height: 26)), with: .color(pal.top))
@@ -371,7 +380,11 @@ struct DeskMascot {
     private func drawExclaim(_ c: inout GraphicsContext) {
         let p = CGPoint(x: 96, y: -232)
         c.fill(Path(ellipseIn: CGRect(x: p.x - 26, y: p.y - 26, width: 52, height: 52)), with: .color(Theme.Night.danger))
-        c.draw(Text("!").font(Theme.allo(36, .black)).foregroundStyle(Color(hex: "2A0D0A")), at: p, anchor: .center)
+        if let mark = c.resolveSymbol(id: DeskSymbol.exclaim) {
+            c.draw(mark, at: p, anchor: .center)
+        } else {
+            c.draw(Text("!").font(Theme.allo(36, .black)).foregroundStyle(Color(hex: "2A0D0A")), at: p, anchor: .center)
+        }
     }
 
     /// A mug (bottom centre at `p`) with optional steam. Also used for the mug on the desk.

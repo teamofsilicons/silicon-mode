@@ -7,7 +7,26 @@ import SiliconModeKit
 @MainActor
 enum FaceSnapshots {
     static var items: [SnapshotItem] {
-        bounce + orbit + clock + marks
+        bounce + orbit + clock + marks + silicon
+    }
+
+    /// Silicon avatars (monogram + TOS badge in snapshots) on every face.
+    private static var silicon: [SnapshotItem] {
+        let s = FaceASamples.silicons
+        return [
+            SnapshotItem(id: "face-bounce-silicon", view: { AnyView(BounceFaceView(ctx: ctx(s), fixedTime: 4)) }),
+            SnapshotItem(id: "face-orbit-silicon", view: { AnyView(OrbitFaceView(ctx: ctx(s), fixedTime: 6)) }),
+            SnapshotItem(id: "face-clock-silicon", view: { AnyView(ClockFaceView(ctx: ctx(s), fixedTime: 2)) }),
+            // The live path: far planets drawn from pre-blurred images instead of a per-frame blur.
+            SnapshotItem(id: "face-orbit-blurcache", view: {
+                let sessions = FaceASamples.sessions
+                let u = FaceA.unit(for: CGSize(width: 1512, height: 982))
+                let r = 19 * u
+                OrbitBlurCache.shared.prepare(.init(planets: OrbitPlanet.make(sessions, preview: false),
+                                                    spec: .init(size: r * 2 * 1.4, pad: r * 0.6, radius: r * 0.22, scale: 2)))
+                return AnyView(OrbitFaceView(ctx: ctx(sessions), fixedTime: 37, blurCache: true))
+            }),
+        ]
     }
 
     private static let preview = CGSize(width: 320, height: 200)
