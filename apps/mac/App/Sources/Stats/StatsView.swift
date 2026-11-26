@@ -289,7 +289,7 @@ private struct StatTile: View {
                 .alloText(26, .semibold, display: true)
                 .monospacedDigit()
                 .foregroundStyle(Theme.foreground)
-                .contentTransition(.numericText())
+                .contentTransition(.opacity)
             HStack(spacing: 5) {
                 Circle().fill(tint).frame(width: 6, height: 6)
                 Text(unit).alloText(11, .medium).foregroundStyle(Theme.textMuted)

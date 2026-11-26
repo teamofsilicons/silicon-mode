@@ -152,7 +152,7 @@ struct AgentRow: View, Equatable {
                         .font(Theme.allo(11.5, .medium))
                         .monospacedDigit()
                         .foregroundStyle(Theme.textMuted)
-                        .contentTransition(.numericText())
+                        .contentTransition(.opacity)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(Theme.textMuted)

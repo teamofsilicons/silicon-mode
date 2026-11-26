@@ -336,7 +336,9 @@ struct SettingsValueChip: View {
             .padding(.horizontal, 8)
             .frame(height: 22)
             .background(Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .contentTransition(.numericText())
+            // A crossfade: dragging a slider changes it many times a second (a numericText roll
+            // would leave its intermediate glyph bitmaps in CoreGraphics’ cache for good).
+            .contentTransition(.opacity)
             .animation(Theme.Motion.fast, value: text)
     }
 }

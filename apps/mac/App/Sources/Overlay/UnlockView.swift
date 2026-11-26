@@ -187,7 +187,9 @@ struct UnlockView: View {
             Text(statusText)
                 .font(Theme.allo(13, .medium))
                 .monospacedDigit()
-                .contentTransition(.numericText(countsDown: true))
+                // A crossfade: the throttle countdown changes every second (a numericText roll would
+                // leave its intermediate glyph bitmaps in CoreGraphics’ cache for good).
+                .contentTransition(.opacity)
         }
         .foregroundStyle(statusColor)
         .frame(height: 18)

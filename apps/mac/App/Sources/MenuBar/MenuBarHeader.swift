@@ -176,7 +176,7 @@ private struct StatusLine: View {
                 TimelineView(.periodic(from: .now, by: 1)) { ctx in
                     let s = ctx.date.timeIntervalSince(since)
                     Text("Active for \(Text(Self.duration(s)).foregroundStyle(Theme.foreground))")
-                        .contentTransition(.numericText(value: s))
+                        .contentTransition(.opacity)
                 }
             default:
                 text
@@ -241,7 +241,10 @@ private struct LidGauge: View {
                     .tracking(-0.6)
                     .monospacedDigit()
                     .foregroundStyle(Theme.foreground)
-                    .contentTransition(.numericText(value: Double(degrees ?? 0)))
+                    // A crossfade, not `.numericText()`: the live angle changes every couple of
+                    // seconds, and each numericText roll leaves its intermediate glyph bitmaps in
+                    // CoreGraphics’ cache for good (measured: steady growth while shown).
+                    .contentTransition(.opacity)
                     .animation(MB.Motion.digit, value: degrees)
                 Text(angle == nil ? "no sensor" : "lid")
                     .font(Theme.allo(10.5, .medium))
@@ -435,7 +438,7 @@ private struct HeaderActionButton: View {
                     Text("\(Int(rem.rounded(.up)))s")
                         .monospacedDigit()
                         .foregroundStyle(Theme.textSecondary)
-                        .contentTransition(.numericText(countsDown: true))
+                        .contentTransition(.opacity)
                 }
             }
         case .turnOff:
@@ -448,7 +451,7 @@ private struct HeaderActionButton: View {
                         .font(Theme.allo(12, .medium))
                         .monospacedDigit()
                         .foregroundStyle(Theme.textSecondary)
-                        .contentTransition(.numericText(countsDown: true))
+                        .contentTransition(.opacity)
                 }
             }
         case .unlock:
