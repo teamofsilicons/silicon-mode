@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Time source for overlay animations: wall-clock seconds since `start`, or the snapshot
@@ -22,6 +23,8 @@ struct EnterTransition<Content: View>: View {
     @ViewBuilder var content: Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Report frames to OverlayTiming (off for the prewarm's warm-up draw).
+    @Environment(\.overlayRecordsTiming) private var recordsTiming
     @State private var settled: Bool
 
     init(enterStartedAt: Date?, exitStartedAt: Date?, @ViewBuilder content: () -> Content) {
@@ -44,6 +47,7 @@ struct EnterTransition<Content: View>: View {
         GeometryReader { geo in
             TimelineView(.animation(minimumInterval: nil, paused: settled)) { tl in
                 let f = frame(at: tl.date)
+                let _ = recordFrame()
                 content
                     .scaleEffect(f.scale, anchor: .top)
                     .blur(radius: f.blur)
@@ -66,7 +70,13 @@ struct EnterTransition<Content: View>: View {
                 if Task.isCancelled { return }
             }
             settled = true
+            if recordsTiming { OverlayTiming.end(.enter, "settled") }
         }
+    }
+
+    private func recordFrame() {
+        guard recordsTiming else { return }
+        if exitStartedAt != nil { OverlayTiming.frame(.exit) } else if enterStartedAt != nil, !settled { OverlayTiming.frame(.enter) }
     }
 
     // MARK: Frame
@@ -115,17 +125,157 @@ struct EnterTransition<Content: View>: View {
     }
 
     private func shader(_ f: Frame, size: CGSize) -> Shader {
-        let origin = CGPoint(x: size.width / 2, y: 0)
-        let a = Color(hex: "D6C8F7"), b = Color(hex: "F6D6B2")
         switch f.shader {
-        case .exit(let p):
-            return ShaderLibrary.overlayImplode(.float2(origin), .float2(size), .float(p), .color(a), .color(b))
-        case .enter(let t):
-            return ShaderLibrary.overlayBumpShockwave(.float2(origin), .float2(size), .float(t), .color(a), .color(b))
-        case .none:
-            return ShaderLibrary.overlayBumpShockwave(.float2(origin), .float2(size), .float(10), .color(a), .color(b))
+        case .exit(let p): OverlayShaders.implode(size: size, progress: p)
+        case .enter(let t): OverlayShaders.bump(size: size, time: t)
+        case .none: OverlayShaders.bump(size: size, time: 10)
         }
     }
+}
+
+/// The overlay's shaders, looked up once (not on every frame of an animation).
+enum OverlayShaders {
+    static let tintA = Color(hex: "D6C8F7")
+    static let tintB = Color(hex: "F6D6B2")
+    private static let bumpFunction = ShaderLibrary.overlayBumpShockwave
+    private static let implodeFunction = ShaderLibrary.overlayImplode
+    private static let glitchFunction = ShaderLibrary.overlayPanicGlitch
+
+    /// The entrance shockwave, `time` seconds in, from the top centre of a `size` layer.
+    static func bump(size: CGSize, time: Double) -> Shader {
+        bumpFunction(.float2(CGPoint(x: size.width / 2, y: 0)), .float2(size), .float(time), .color(tintA), .color(tintB))
+    }
+
+    /// The exit implosion at `progress` (0…1).
+    static func implode(size: CGSize, progress: Double) -> Shader {
+        implodeFunction(.float2(CGPoint(x: size.width / 2, y: 0)), .float2(size), .float(progress), .color(tintA), .color(tintB))
+    }
+
+    /// The panic glitch (PanicGlitchEffect), for precompiling.
+    static func glitch(size: CGSize, time: Double) -> Shader {
+        glitchFunction(.float2(size), .float(time), .float(1))
+    }
+}
+
+// MARK: - Prewarm
+
+/// First-use work for the overlay's animations, done ahead of time (OverlayController.prewarm):
+/// compiles the layer-effect shaders and draws each effect once, in a tiny window at 1%
+/// opacity that ignores the mouse, so the GPU pipelines behind the shockwave, implosion, blurs and
+/// gradients exist before the first entry.
+@MainActor
+enum OverlayWarmup {
+    static func run() {
+        Task { await compileShaders() }
+        drawOnce()
+    }
+
+    private static func compileShaders() async {
+        let size = CGSize(width: 64, height: 64)
+        let shaders: [(String, Shader)] = [
+            ("bump", OverlayShaders.bump(size: size, time: 0.5)),
+            ("implode", OverlayShaders.implode(size: size, progress: 0.5)),
+            ("glitch", OverlayShaders.glitch(size: size, time: 0.5)),
+        ]
+        for (name, shader) in shaders {
+            let t0 = CACurrentMediaTime()
+            do {
+                try await shader.compile(as: .layerEffect)
+                OverlayTiming.note(.prewarm, "shader \(name) compiled \(String(format: "%.1f", (CACurrentMediaTime() - t0) * 1000)) ms")
+            } catch {
+                OverlayTiming.note(.prewarm, "shader \(name) failed to compile: \(error)")
+            }
+        }
+    }
+
+    private static func drawOnce() {
+        guard let screen = NSScreen.overlayPrimary else { return }
+        let t0 = CACurrentMediaTime()
+        let side = OverlayWarmupView.side
+        let panel = OverlayPanel(frame: NSRect(x: screen.frame.minX, y: screen.frame.minY, width: side, height: side),
+                                 level: NSWindow.Level(rawValue: OverlayController.countdownLevel.rawValue - 1))
+        panel.ignoresMouseEvents = true
+        panel.alphaValue = 0.01
+        panel.host(OverlayWarmupView())
+        panel.orderFrontRegardless()
+        // A few frames on screen, then gone.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            panel.tearDown()
+            OverlayTiming.note(.prewarm, "effects drawn once (\(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000)) ms on screen)")
+        }
+    }
+}
+
+/// Every effect the countdown and the entrance/exit draw, stacked at a tiny size.
+private struct OverlayWarmupView: View {
+    static let side: CGFloat = 8
+    static let blurRadii: [CGFloat] = [0.5, 1, 2, 3, 4, 6, 8, 10, 12, 14, 18, 22]
+    @State private var start = Date()
+    /// The selected face, mid-entrance (its own drawing, inside the shockwave).
+    @State private var faceStage: OverlayStage = {
+        let s = OverlayStage()
+        s.enterStartedAt = Date().addingTimeInterval(-0.6)
+        return s
+    }()
+
+    var body: some View {
+        ZStack {
+            SiliconModeFaceStage(stage: faceStage, displayID: 0)
+                .environment(AppModel.shared)
+            // Entrance mid-wave (shockwave shader, blur, scale) and the exit mid-implosion.
+            EnterTransition(enterStartedAt: start.addingTimeInterval(-0.5), exitStartedAt: nil) { sample }
+            EnterTransition(enterStartedAt: nil, exitStartedAt: start.addingTimeInterval(-0.3)) { sample }
+            // The countdown's dial and tint: radial/conic/linear gradients, a blurred stroke,
+            // a light blend, a mask and a shadowed numeral.
+            Canvas { ctx, size in
+                let r = CGRect(origin: .zero, size: size)
+                ctx.fill(Path(ellipseIn: r), with: .radialGradient(Gradient(colors: [.white.opacity(0.07), .clear]),
+                                                                   center: CGPoint(x: r.midX, y: r.midY), startRadius: 0, endRadius: r.width))
+                var glow = ctx
+                glow.addFilter(.blur(radius: 8))
+                glow.stroke(Path(ellipseIn: r), with: .conicGradient(Gradient(colors: [Theme.Night.lavender, Theme.Night.peach]),
+                                                                     center: CGPoint(x: r.midX, y: r.midY)), lineWidth: 3)
+            }
+            ZStack {
+                RadialGradient(colors: [Theme.Night.lavender.opacity(0.2), .clear], center: .center, startRadius: 0, endRadius: 4)
+                    .blendMode(.plusLighter)
+                Text("5")
+                    .font(Theme.allo(4, .medium))
+                    .foregroundStyle(LinearGradient(colors: [.white, Theme.Night.lavender], startPoint: .top, endPoint: .bottom))
+                    .shadow(color: Theme.Night.lavender.opacity(0.35), radius: 6)
+            }
+            .mask { LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom) }
+            .blur(radius: 2)
+            // Blurs at the radii the animations pass through (the entrance starts at 18, the
+            // exit ends at 6, the face behind the unlock sheet sits at 22): blur pipelines are
+            // specialised by radius.
+            ForEach(Self.blurRadii, id: \.self) { r in
+                sample.blur(radius: r)
+            }
+            // Liquid Glass (furniture, chrome, the countdown's button).
+            Color.clear.overlayGlass(tint: .black.opacity(0.18), in: Capsule())
+            // The panic glitch.
+            sample
+                .compositingGroup()
+                .layerEffect(OverlayShaders.glitch(size: CGSize(width: Self.side, height: Self.side), time: 0.3),
+                             maxSampleOffset: CGSize(width: 110, height: 0))
+        }
+        .frame(width: Self.side, height: Self.side)
+        .allowsHitTesting(false)
+        .environment(\.overlayRecordsTiming, false)
+    }
+
+    private var sample: some View {
+        ZStack {
+            Theme.Night.background
+            Text("8").font(Theme.allo(4, .medium)).foregroundStyle(.white)
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// Overlay animations report their frames to OverlayTiming (not in the prewarm's warm-up draw).
+    @Entry var overlayRecordsTiming = true
 }
 
 /// Fade / rise / sharpen used for the chrome (HUD, controls) that can't live inside the
@@ -133,7 +283,10 @@ struct EnterTransition<Content: View>: View {
 struct OverlayChromeEntrance: ViewModifier {
     var shown: Bool
     var rise: CGFloat = 14
+    @Environment(\.overlayRecordsTiming) private var recordsTiming
+
     func body(content: Content) -> some View {
+        let _ = shown && recordsTiming ? OverlayTiming.point(.enter, "chrome-in") : ()
         content
             .opacity(shown ? 1 : 0)
             .offset(y: shown ? 0 : rise)

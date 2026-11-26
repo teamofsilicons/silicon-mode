@@ -78,12 +78,7 @@ struct CountdownView: View {
     /// Darkening for legibility over any wallpaper, plus a faint silicon glow behind the dial.
     private func tint(size: CGSize, centerY: CGFloat) -> some View {
         ZStack {
-            LinearGradient(stops: [
-                .init(color: .black.opacity(0.40), location: 0),
-                .init(color: .black.opacity(0.26), location: 0.4),
-                .init(color: .black.opacity(0.08), location: 0.74),
-                .init(color: .black.opacity(0), location: 1),
-            ], startPoint: .top, endPoint: .bottom)
+            LinearGradient(gradient: CountdownStyle.shade, startPoint: .top, endPoint: .bottom)
             // Local shade so white numerals hold up over bright wallpapers.
             RadialGradient(colors: [.black.opacity(0.34), .black.opacity(0)],
                            center: UnitPoint(x: 0.5, y: centerY / max(size.height, 1)),
@@ -100,13 +95,28 @@ struct CountdownView: View {
                 .blendMode(.plusLighter)
         }
         .mask {
-            LinearGradient(stops: [
-                .init(color: .black, location: 0),
-                .init(color: .black, location: 0.55),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
+            LinearGradient(gradient: CountdownStyle.tintMask, startPoint: .top, endPoint: .bottom)
         }
     }
+}
+
+/// The countdown's fixed gradients, made once instead of on every frame of the dial.
+private enum CountdownStyle {
+    static let shade = Gradient(stops: [
+        .init(color: .black.opacity(0.40), location: 0),
+        .init(color: .black.opacity(0.26), location: 0.4),
+        .init(color: .black.opacity(0.08), location: 0.74),
+        .init(color: .black.opacity(0), location: 1),
+    ])
+    static let tintMask = Gradient(stops: [
+        .init(color: .black, location: 0),
+        .init(color: .black, location: 0.55),
+        .init(color: .clear, location: 1),
+    ])
+    static let numeral = LinearGradient(colors: [.white, Color(hex: "E6DDF8")], startPoint: .top, endPoint: .bottom)
+    static let disc = Gradient(colors: [.white.opacity(0.07), .white.opacity(0.015)])
+    static let arc = Gradient(colors: [Theme.Night.lavender, Theme.Night.peach, Theme.Night.lavender])
+    static let cometGlow = Gradient(colors: [.white.opacity(0.55), .white.opacity(0)])
 }
 
 // MARK: - Dial
@@ -123,6 +133,7 @@ private struct CountdownDial: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: nil, paused: preview != nil || !visible)) { tl in
+            let _ = preview == nil ? OverlayTiming.frame(.countdown) : ()
             let (remaining, duration) = timing(now: tl.date)
             let elapsed = max(0, duration - remaining)
             let digit = max(1, Int(ceil(remaining - 0.0005)))
@@ -136,8 +147,7 @@ private struct CountdownDial: View {
                     .font(Theme.allo(diameter * 0.5, .medium))
                     .monospacedDigit()
                     .tracking(-diameter * 0.012)
-                    .foregroundStyle(LinearGradient(colors: [.white, Color(hex: "E6DDF8")],
-                                                    startPoint: .top, endPoint: .bottom))
+                    .foregroundStyle(CountdownStyle.numeral)
                     .shadow(color: Theme.Night.lavender.opacity(0.35), radius: 24)
                     .contentTransition(.numericText(countsDown: true))
                     .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.5, bounce: 0.22), value: digit)
@@ -172,8 +182,7 @@ private struct CountdownDial: View {
 
             // Soft inner disc so the numeral sits on something.
             let disc = Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
-            ctx.fill(disc, with: .radialGradient(Gradient(colors: [.white.opacity(0.07), .white.opacity(0.015)]),
-                                                 center: c, startRadius: 0, endRadius: r))
+            ctx.fill(disc, with: .radialGradient(CountdownStyle.disc, center: c, startRadius: 0, endRadius: r))
 
             // Per-second ripple.
             if !reduceMotion {
@@ -194,9 +203,7 @@ private struct CountdownDial: View {
             let end = Angle.degrees(-90 + 360 * progress)
             var arc = Path()
             arc.addArc(center: c, radius: r, startAngle: start, endAngle: end, clockwise: false)
-            let shading = GraphicsContext.Shading.conicGradient(
-                Gradient(colors: [Theme.Night.lavender, Theme.Night.peach, Theme.Night.lavender]),
-                center: c, angle: start)
+            let shading = GraphicsContext.Shading.conicGradient(CountdownStyle.arc, center: c, angle: start)
             var glow = ctx
             glow.addFilter(.blur(radius: 8))
             glow.stroke(arc, with: shading, style: StrokeStyle(lineWidth: lw * 3, lineCap: .round))
@@ -206,8 +213,7 @@ private struct CountdownDial: View {
             let hx = c.x + r * cos(end.radians), hy = c.y + r * sin(end.radians)
             let head = CGPoint(x: hx, y: hy)
             ctx.fill(Path(ellipseIn: CGRect(x: head.x - 14, y: head.y - 14, width: 28, height: 28)),
-                     with: .radialGradient(Gradient(colors: [.white.opacity(0.55), .white.opacity(0)]),
-                                           center: head, startRadius: 0, endRadius: 14))
+                     with: .radialGradient(CountdownStyle.cometGlow, center: head, startRadius: 0, endRadius: 14))
             ctx.fill(Path(ellipseIn: CGRect(x: head.x - 3.5, y: head.y - 3.5, width: 7, height: 7)), with: .color(.white))
         }
     }

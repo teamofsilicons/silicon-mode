@@ -33,6 +33,7 @@ final class CountdownBlurNSView: NSView {
     private weak var backdrop: CALayer?
     private var filter: NSObject?
     private var configured = false
+    private var configureAttempts = 0
     private var visible = false
     private var animating = false
 
@@ -103,36 +104,57 @@ final class CountdownBlurNSView: NSView {
 
     private func configure() {
         guard !configured, window != nil else { return }
+        guard let backdrop = Self.findBackdrop(effects[0].layer) else {
+            // The material builds its backdrop layer on a later display pass (a prewarmed strip
+            // is configured while ordered out): look again shortly before falling back.
+            if Self.variableBlurAvailable, configureAttempts < 20 {
+                configureAttempts += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.configure() }
+            } else {
+                configured = true
+                installFallback()
+                OverlayTiming.note(.countdown, "blur fallback (no backdrop layer)")
+            }
+            return
+        }
         configured = true
-        if let backdrop = Self.findBackdrop(effects[0].layer),
-           let cls = NSClassFromString("CAFilter") as? NSObject.Type,
-           cls.responds(to: NSSelectorFromString("filterWithType:")),
-           let f = cls.perform(NSSelectorFromString("filterWithType:"), with: "variableBlur")?
-               .takeUnretainedValue() as? NSObject {
+        if let f = Self.makeVariableBlur() {
             f.setValue("variableBlur", forKey: "name")
             f.setValue(visible ? maxRadius : 0, forKey: "inputRadius")
-            f.setValue(Self.radiusMask(), forKey: "inputMaskImage")
+            f.setValue(Self.radiusMaskImage, forKey: "inputMaskImage")
             f.setValue(true, forKey: "inputNormalizeEdges")
             backdrop.filters = [f]
             // Drop the material's tint/luminosity layers: we paint our own tint in SwiftUI.
             backdrop.superlayer?.sublayers?.filter { $0 !== backdrop }.forEach { $0.isHidden = true }
             self.backdrop = backdrop
             self.filter = f
+            OverlayTiming.point(.countdown, "blur-configured")
+            OverlayTiming.note(.countdown, "variable blur ready (after \(configureAttempts) retries)")
         } else {
             installFallback()
         }
+    }
+
+    private static var variableBlurAvailable: Bool {
+        (NSClassFromString("CAFilter") as? NSObject.Type)?.responds(to: NSSelectorFromString("filterWithType:")) ?? false
+    }
+
+    private static func makeVariableBlur() -> NSObject? {
+        guard let cls = NSClassFromString("CAFilter") as? NSObject.Type,
+              cls.responds(to: NSSelectorFromString("filterWithType:")) else { return nil }
+        return cls.perform(NSSelectorFromString("filterWithType:"), with: "variableBlur")?.takeUnretainedValue() as? NSObject
     }
 
     /// Public fallback: several stacked behind-window blurs, each fading out at a different depth,
     /// so the combined blur opacity eases off smoothly toward the bottom.
     private func installFallback() {
         let first = effects[0]
-        first.maskImage = Self.alphaMask(extent: 0.42)
+        first.maskImage = Self.cachedAlphaMask(extent: 0.42)
         for extent in [0.7, 1.0] {
             let e = Self.makeEffect()
             e.frame = host.bounds
             e.autoresizingMask = [.width, .height]
-            e.maskImage = Self.alphaMask(extent: extent)
+            e.maskImage = Self.cachedAlphaMask(extent: extent)
             host.addSubview(e)
             effects.append(e)
         }
@@ -143,6 +165,17 @@ final class CountdownBlurNSView: NSView {
         if String(describing: type(of: l)) == "CABackdropLayer" { return l }
         for s in l.sublayers ?? [] { if let b = findBackdrop(s) { return b } }
         return nil
+    }
+
+    /// The masks are fixed: made once per process, not per countdown.
+    private static let radiusMaskImage = radiusMask()
+    private static var alphaMasks: [Double: NSImage] = [:]
+
+    private static func cachedAlphaMask(extent: Double) -> NSImage {
+        if let m = alphaMasks[extent] { return m }
+        let m = alphaMask(extent: extent)
+        alphaMasks[extent] = m
+        return m
     }
 
     /// Radius mask: full radius through the top ~30%, easing to zero at the bottom edge.
