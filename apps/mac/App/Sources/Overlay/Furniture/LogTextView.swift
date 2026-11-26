@@ -17,6 +17,9 @@ import SiliconModeKit
 /// - It follows the tail while the view rests at the bottom; scrolling up pauses that, counts the
 ///   unseen lines into `unseen`, and scrolling back down (or `jump`) resumes it. Only the user's
 ///   own scrolling (wheel, trackpad, scroller) decides that: layout and resizes never do.
+/// - Following, a new line that the plan is growing the view to fit (`expected`) is revealed by
+///   that growth: the rows hold still instead of scrolling up and back down again. Once the view
+///   is as tall as it gets, new lines scroll in smoothly.
 /// - It reports how much text is scrolled out of view above and below (`fade`), so the body can
 ///   dissolve rows under its edges instead of cutting them.
 struct LogTextView: NSViewRepresentable {
@@ -25,6 +28,9 @@ struct LogTextView: NSViewRepresentable {
     @Binding var unseen: Int
     /// Changes when the "Latest" button is pressed: scroll to the end and follow again.
     let jump: Int
+    /// The height the furniture plan is about to give this view: the lines' wanted height, or
+    /// the current height when the plan can't grow it.
+    let expected: CGFloat
     /// The scroll-edge fades this view's position calls for.
     let fade: LogEdgeFade
 
@@ -93,6 +99,7 @@ struct LogTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ scroll: LogScrollView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
+        coordinator.stop()
         scroll.onResize = nil
         scroll.onUserScroll = nil
     }
@@ -108,6 +115,15 @@ struct LogTextView: NSViewRepresentable {
         private var offsets: [Int] = []
         /// The fades last asked for (applied on the next turn of the run loop).
         private var edges = (top: CGFloat(0), bottom: CGFloat(0))
+        /// Set while the plan grows the view to reveal appended lines: the rows hold still. Ends
+        /// once the tail is in view, or after `revealWait` (then the lines scroll in).
+        private var revealCheck: Task<Void, Never>?
+        /// A smooth scroll is under way until then.
+        private var smoothUntil = Date.distantPast
+
+        /// The plan's rate limit, its resize animation, and some slack.
+        static let revealWait: TimeInterval = LogTabsState.planInterval + 0.6
+        static let smoothScroll: TimeInterval = 0.25
 
         private struct Rendered: Equatable {
             var id: String
@@ -123,6 +139,8 @@ struct LogTextView: NSViewRepresentable {
             self.scroll = scroll
             self.text = text
         }
+
+        func stop() { endReveal() }
 
         // MARK: Content
 
@@ -158,8 +176,10 @@ struct LogTextView: NSViewRepresentable {
             }
             storage.endEditing()
 
-            if initial || parent.following {
+            if initial {
                 scrollToEnd()
+            } else if parent.following {
+                follow()
             } else if added > 0 {
                 let n = parent.unseen + added
                 Task { @MainActor [weak self] in self?.parent.unseen = n }
@@ -174,16 +194,83 @@ struct LogTextView: NSViewRepresentable {
             return scroll.contentView.bounds.maxY >= doc.frame.height - 8
         }
 
-        func scrollToEnd() {
+        /// New or changed lines while following the tail. When the plan is growing the view to
+        /// fit them, the rows hold still and the growth reveals them (in a bottom slot the rows
+        /// rise with the panel's top edge; in a top slot they stay put). When the view can't grow
+        /// to fit them, they scroll in smoothly.
+        private func follow() {
+            guard let scroll, let text, let layout = text.layoutManager, let container = text.textContainer else { return }
+            guard scroll.bounds.width >= 1 else { return }
+            layout.ensureLayout(for: container)
+            text.sizeToFit()
+            let clip = scroll.contentView.bounds
+            let doc = text.frame.height
+            if doc <= clip.maxY + 0.5 {
+                // The tail is in view; the log may have got shorter (lines dropped at the front).
+                if clip.minY > max(0, doc - clip.height) + 0.5 { scrollToEnd() }
+                return
+            }
+            if parent.expected > clip.height + 0.5, doc <= parent.expected + 2 {
+                holdForReveal()
+            } else {
+                endReveal()
+                scrollToEnd(smoothly: true)
+            }
+        }
+
+        private var revealing: Bool { revealCheck != nil }
+
+        private func holdForReveal() {
+            revealCheck?.cancel()
+            revealCheck = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(Self.revealWait))
+                guard let self, !Task.isCancelled else { return }
+                self.revealCheck = nil
+                // The plan didn't grow the view after all (no room in the column): scroll them in.
+                if self.parent.following, !self.tailVisible { self.scrollToEnd(smoothly: true) }
+            }
+        }
+
+        private func endReveal() {
+            revealCheck?.cancel()
+            revealCheck = nil
+        }
+
+        private var tailVisible: Bool {
+            guard let scroll, let doc = scroll.documentView else { return true }
+            return doc.frame.height <= scroll.contentView.bounds.maxY + 0.5
+        }
+
+        /// Scrolls to the tail: at once, or `smoothly` (an append, at most a screenful away).
+        func scrollToEnd(smoothly: Bool = false) {
             guard let scroll, let text, let layout = text.layoutManager, let container = text.textContainer else { return }
             // Not laid out yet (a new tab's view starts at zero size): laying the whole log out a
             // glyph per line would be wasted; the first resize scrolls to the end.
             guard scroll.bounds.width >= 1 else { return }
+            endReveal()
             layout.ensureLayout(for: container)
             text.sizeToFit()
-            let y = max(0, text.frame.height - scroll.contentView.bounds.height)
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
-            scroll.reflectScrolledClipView(scroll.contentView)
+            let clip = scroll.contentView
+            let target = NSPoint(x: 0, y: max(0, text.frame.height - clip.bounds.height))
+            let distance = abs(target.y - clip.bounds.minY)
+            if smoothly, distance > 0.5, distance <= clip.bounds.height {
+                smoothUntil = Date().addingTimeInterval(Self.smoothScroll + 0.05)
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = Self.smoothScroll
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    clip.animator().setBoundsOrigin(target)
+                }
+            } else if Date() < smoothUntil {
+                // Replace the smooth scroll under way (it would stop where the tail used to be).
+                smoothUntil = .distantPast
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0
+                    clip.animator().setBoundsOrigin(target)
+                }
+            } else {
+                clip.scroll(to: target)
+            }
+            scroll.reflectScrolledClipView(clip)
             if !parent.following || parent.unseen != 0 {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -193,9 +280,22 @@ struct LogTextView: NSViewRepresentable {
             }
         }
 
-        /// The view was resized (minimise, a new plan): stay on the tail while following.
+        /// The view was resized (minimise, a new plan): stay on the tail while following. While
+        /// the plan grows the view to reveal new lines, the rows hold still instead (never
+        /// scrolling down) until the tail is in view.
         func keepTail() {
-            if parent.following { scrollToEnd() }
+            guard parent.following else { return }
+            if revealing, let scroll, let doc = scroll.documentView {
+                let clip = scroll.contentView.bounds
+                let y = min(clip.minY, max(0, doc.frame.height - clip.height))
+                if y != clip.minY {
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                if doc.frame.height <= y + clip.height + 0.5 { endReveal() }
+                return
+            }
+            scrollToEnd()
         }
 
         /// The scroller was dragged (live scroll): same as a wheel scroll.
@@ -210,8 +310,9 @@ struct LogTextView: NSViewRepresentable {
         func updateEdges() {
             guard let scroll, let doc = scroll.documentView else { return }
             let visible = scroll.contentView.bounds
-            let top = LogEdgeFade.height(hidden: visible.minY, max: LogEdgeFade.topMax)
-            let bottom = LogEdgeFade.height(hidden: doc.frame.height - visible.maxY, max: LogEdgeFade.bottomMax)
+            let top = LogEdgeFade.height(hidden: visible.minY, max: LogEdgeFade.topHeight(visible: visible.height))
+            let bottom = LogEdgeFade.height(hidden: doc.frame.height - visible.maxY,
+                                            max: LogEdgeFade.bottomHeight(visible: visible.height))
             guard top != edges.top || bottom != edges.bottom else { return }
             edges = (top, bottom)
             let fade = parent.fade
@@ -266,8 +367,8 @@ final class LogNSTextView: NSTextView {
 /// macOS 26 scroll-edge effect: rows dissolve under the tab strip instead of being cut.
 @MainActor @Observable
 final class LogEdgeFade {
-    static let topMax: CGFloat = 28
-    static let bottomMax: CGFloat = 20
+    nonisolated static let topMax: CGFloat = 28
+    nonisolated static let bottomMax: CGFloat = 20
 
     var top: CGFloat = 0
     var bottom: CGFloat = 0
@@ -276,8 +377,14 @@ final class LogEdgeFade {
     /// growing to `max`, in 4 pt steps.
     nonisolated static func height(hidden: CGFloat, max: CGFloat) -> CGFloat {
         let h = Swift.min(max, Swift.max(0, (hidden - 6) * 2))
-        return (h / 4).rounded() * 4
+        return Swift.min(max, (h / 4).rounded() * 4)
     }
+
+    /// The top fade's full height in a body `visible` points tall: at most a fifth of it, so a
+    /// short body (one or two rows) keeps its rows legible.
+    nonisolated static func topHeight(visible: CGFloat) -> CGFloat { Swift.min(topMax, (visible * 0.2).rounded()) }
+    /// The bottom fade's: at most about a seventh.
+    nonisolated static func bottomHeight(visible: CGFloat) -> CGFloat { Swift.min(bottomMax, (visible * 0.15).rounded()) }
 }
 
 /// The body's mask: soft top and bottom edges (heights from `LogEdgeFade`) and the panel's
