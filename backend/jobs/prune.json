@@ -1,0 +1,3 @@
+{"schedule":{"cron":"*/15 * * * *","timezone":"UTC"},
+ "target":{"sql":"UPDATE public.questions SET state='expired',resolved_at=now() WHERE state='pending' AND expires_at<now(); DELETE FROM public.events WHERE created_at<now()-interval '3 days'; DELETE FROM public.answers WHERE created_at<now()-interval '30 days'; DELETE FROM public.questions WHERE state<>'pending' AND created_at<now()-interval '30 days'; DELETE FROM public.agent_sessions WHERE coalesce(ended_at,last_event_at)<now()-interval '30 days'; UPDATE public.device_status SET online=false WHERE online AND updated_at<now()-interval '5 minutes';","execute":true},
+ "enabled":true,"allow_overlap":false,"max_attempts":3,"backoff_seconds":30,"max_backoff_seconds":600,"timeout_seconds":30}
