@@ -78,7 +78,9 @@ public final class CrushProvider: AgentProvider, @unchecked Sendable {
                     let at = row["created"].double.flatMap(MoreDates.epoch)
                     if let at { lastAt = at }
                     if let m = row["model"].string, !m.isEmpty { model = m }
-                    let mid = row["id"].string ?? UUID().uuidString
+                    // No id: hash the row's content (stable across scans, unlike a random UUID).
+                    let mid = row["id"].string
+                        ?? MoreHash.id("\(row["role"].string ?? "")|\(row["created"].string ?? "")|\(row["parts"].string ?? "")")
                     let role = row["role"].string ?? ""
                     var sawCall = false
                     for (k, part) in (J.parse(row["parts"].string ?? "[]")?.array ?? []).enumerated() {

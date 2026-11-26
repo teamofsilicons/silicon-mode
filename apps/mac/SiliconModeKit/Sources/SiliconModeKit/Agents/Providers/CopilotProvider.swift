@@ -60,7 +60,8 @@ public final class CopilotProvider: AgentProvider, @unchecked Sendable {
         var lastAt: Date?
         var firstPrompt: String?
         var model: String?
-        for (i, line) in MoreFiles.tailLines(path, maxBytes: 384 << 10).enumerated() {
+        // Ids are byte offsets in the file: stable as it grows (window positions are not).
+        for (off, line) in MoreFiles.tailLinesWithOffsets(path, maxBytes: 384 << 10) {
             guard let e = J.parse(line) else { continue }
             let type = (e["type"].string ?? "").lowercased()
             let d = e["data"].exists ? e["data"] : e
@@ -71,30 +72,30 @@ public final class CopilotProvider: AgentProvider, @unchecked Sendable {
             let text = d.first("content", "text", "message", "prompt").flattenedText
             if type.contains("user") && type.contains("message") {
                 if firstPrompt == nil { firstPrompt = text }
-                events.add("\(i)", at: at, .user, text); activity = .running
+                events.add("\(off)", at: at, .user, text); activity = .running
             } else if type.contains("assistant") && type.contains("message") {
-                events.add("\(i)", at: at, .assistant, text)
+                events.add("\(off)", at: at, .assistant, text)
                 let reqs = d["toolRequests"].array
                 for (k, r) in reqs.enumerated() {
                     let s = MoreText.tool(r.first("name", "toolName").string, args: r.first("arguments", "args"), cwd: cwd)
-                    events.add("\(i).\(k)", at: at, .tool, s)
-                    open[r.first("toolCallId", "id").string ?? "\(i).\(k)"] = s
+                    events.add("\(off).\(k)", at: at, .tool, s)
+                    open[r.first("toolCallId", "id").string ?? "\(off).\(k)"] = s
                 }
                 activity = reqs.isEmpty ? (open.isEmpty ? .ended : .toolPending) : .toolPending
             } else if type.contains("tool") && (type.contains("start") || type.contains("request") || type.contains("call")) {
                 let s = MoreText.tool(d.first("toolName", "name").string, args: d.first("arguments", "args"), cwd: cwd)
-                let tid = d.first("toolCallId", "id").string ?? "\(i)"
-                if open[tid] == nil { events.add("\(i)", at: at, .tool, s) }
+                let tid = d.first("toolCallId", "id").string ?? "\(off)"
+                if open[tid] == nil { events.add("\(off)", at: at, .tool, s) }
                 open[tid] = s
                 activity = .toolPending
             } else if type.contains("tool") && (type.contains("complete") || type.contains("result") || type.contains("end")) {
                 open[d.first("toolCallId", "id").string ?? ""] = nil
-                if d["success"].bool == false { events.add("\(i)", at: at, .error, "Tool failed") }
+                if d["success"].bool == false { events.add("\(off)", at: at, .error, "Tool failed") }
                 activity = open.isEmpty ? .running : .toolPending
             } else if type.contains("turn_end") || type.contains("turn.end") || type.contains("idle") {
                 open = [:]; activity = .ended
             } else if type.contains("error") {
-                events.add("\(i)", at: at, .error, text ?? "Error"); activity = .errored
+                events.add("\(off)", at: at, .error, text ?? "Error"); activity = .errored
             }
         }
         return ParsedSession(nativeID: id, title: firstPrompt, cwd: cwd, model: model, updatedAt: max(lastAt ?? .distantPast, mtime),

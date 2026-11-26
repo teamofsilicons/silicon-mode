@@ -56,7 +56,8 @@ public final class KiroProvider: AgentProvider, @unchecked Sendable {
         var open: [String: String] = [:]
         var lastAt: Date?
         var firstPrompt: String?
-        for (i, line) in MoreFiles.tailLines(path, maxBytes: 384 << 10).enumerated() {
+        // Ids are byte offsets in the file: stable as it grows (window positions are not).
+        for (off, line) in MoreFiles.tailLinesWithOffsets(path, maxBytes: 384 << 10) {
             guard let j = J.parse(line) else { continue }
             let kind = (j["kind"].string ?? j["type"].string ?? "").lowercased()
             let data = j["data"].exists ? j["data"] : j
@@ -65,12 +66,12 @@ public final class KiroProvider: AgentProvider, @unchecked Sendable {
             let text = data.first("content", "text", "prompt", "message").flattenedText
             if kind.contains("prompt") || kind.contains("user") {
                 if firstPrompt == nil { firstPrompt = text }
-                events.add("\(i)", at: at, .user, text); activity = .running
+                events.add("\(off)", at: at, .user, text); activity = .running
             } else if kind.contains("tooluse") || kind.contains("tool_use") || kind.contains("toolcall") {
                 for (k, t) in (data["tool_uses"].array.isEmpty ? [data] : data["tool_uses"].array).enumerated() {
                     let s = MoreText.tool(t.first("name", "tool_name").string, args: t.first("args", "input", "arguments"), cwd: cwd)
-                    events.add("\(i).\(k)", at: at, .tool, s)
-                    open[t.first("id", "tool_use_id").string ?? "\(i).\(k)"] = s
+                    events.add("\(off).\(k)", at: at, .tool, s)
+                    open[t.first("id", "tool_use_id").string ?? "\(off).\(k)"] = s
                 }
                 activity = .toolPending
             } else if kind.contains("toolresult") || kind.contains("tool_result") {
@@ -79,10 +80,10 @@ public final class KiroProvider: AgentProvider, @unchecked Sendable {
                 }
                 if open.isEmpty { activity = .running }
             } else if kind.contains("assistant") || kind.contains("response") {
-                events.add("\(i)", at: at, .assistant, text)
+                events.add("\(off)", at: at, .assistant, text)
                 activity = open.isEmpty ? .ended : .toolPending
             } else if kind.contains("error") {
-                events.add("\(i)", at: at, .error, text ?? "Error"); activity = .errored
+                events.add("\(off)", at: at, .error, text ?? "Error"); activity = .errored
             }
         }
         if let s = meta["session_state"].string?.lowercased() {
@@ -103,7 +104,10 @@ public final class KiroProvider: AgentProvider, @unchecked Sendable {
             let id = j["conversation_id"].text ?? "cwd:\(cwd)"
             var events = EventList(prefix: "kiro:\(id)", fallback: stamp.date)
             var activity: TurnActivity = .unknown
-            for (i, entry) in j["history"].array.suffix(12).enumerated() {
+            // Ids use absolute history indices (a position inside the suffix shifts every turn).
+            let history = j["history"].array
+            for i in history.indices.suffix(12) {
+                let entry = history[i]
                 let user = entry["user"].exists ? entry["user"] : entry[0]
                 let assistant = entry["assistant"].exists ? entry["assistant"] : entry[1]
                 let prompt = user["content"]["Prompt"]["prompt"].text ?? user["content"].flattenedText

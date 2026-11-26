@@ -180,8 +180,11 @@ final class ClaudeCodeProvider: AgentProvider, @unchecked Sendable {
                 state = .needsYou
                 questions = openQuestions()
                 if questions.isEmpty, reg.waitingFor != "dialog open" {
+                    // One id per wait (keyed by when the registry entered it), so each wait is its own
+                    // question downstream; stable across scans of the same wait.
+                    let waitKey = reg.statusUpdatedAt.map { ":\(Int(($0.timeIntervalSince1970 * 1000).rounded()))" } ?? ""
                     questions = [t?.permissionPlaceholder(sessionRef: sessionRef, reason: reg.waitingFor, at: reg.statusUpdatedAt ?? now)
-                                 ?? AgentQuestion(id: "\(sessionRef):waiting", sessionID: sessionRef, provider: ClaudeCodeProvider.id,
+                                 ?? AgentQuestion(id: "\(sessionRef):waiting\(waitKey)", sessionID: sessionRef, provider: ClaudeCodeProvider.id,
                                                   kind: reg.waitingFor == "input needed" ? .input : .permission,
                                                   title: "Waiting for you", detail: reg.waitingFor?.capitalizedFirst,
                                                   createdAt: reg.statusUpdatedAt ?? now, answerable: false)]

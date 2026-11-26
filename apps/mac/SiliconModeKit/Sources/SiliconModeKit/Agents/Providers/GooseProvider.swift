@@ -73,7 +73,9 @@ public final class GooseProvider: AgentProvider, @unchecked Sendable {
                     for msg in msgs.reversed() {
                         let at = Self.date(msg["created"]) ?? Self.date(msg["ts"])
                         if let at { lastAt = at }
-                        let mid = msg["id"].string ?? UUID().uuidString
+                        // No id: hash the row's content (stable across scans, unlike a random UUID).
+                        let mid = msg["id"].string
+                            ?? MoreHash.id("\(msg["role"].string ?? "")|\(msg["created"].string ?? msg["ts"].string ?? "")|\(msg["content"].string ?? "")")
                         let role = msg["role"].string ?? ""
                         questions = []
                         for (k, item) in (J.parse(msg["content"].string ?? "[]")?.array ?? []).enumerated() {
