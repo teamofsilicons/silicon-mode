@@ -1,4 +1,4 @@
-# Silicon Mode — status (2026-11-27, Mac app 0.1.1)
+# Silicon Mode — status (2026-11-27, Mac app 0.1.2)
 
 ## What exists
 
@@ -35,6 +35,14 @@
 - Cloud sync: device, status, sessions, tail events, questions, usage buckets.
 - Adversarial review: 42 confirmed findings across lock, hooks, providers, sync, crash-safety, web and
   mobile — all fixed (see `docs/review/*.md`); 141 Kit unit tests, web 27 tests.
+
+## 0.1.2 (Mac)
+
+- **T3 Code** threads are detected (T3 runs Antigravity, Codex, Claude… itself, so they were
+  invisible before): read-only from `~/.t3/userdata/statev2.sqlite`, shown as "‹thread› · ‹agent›",
+  working while a run is live, needs-you while it waits (answered in T3), with its recent steps as
+  log lines. The native sessions T3 drives are not listed twice. Checked against a live
+  T3 → Antigravity run.
 
 ## 0.1.1 (Mac)
 
