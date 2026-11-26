@@ -17,12 +17,13 @@ import Foundation
         let p = Process()
         let out = Pipe()
         let start = Date()
-        init(home: String, args: [String], stdin: String) throws {
+        init(home: String, args: [String], stdin: String, env extra: [String: String] = [:]) throws {
             p.executableURL = URL(fileURLWithPath: CoreHelperEndToEndTests.helper)
             p.arguments = args
             var env = ProcessInfo.processInfo.environment
             env["HOME"] = home
             env["CFFIXED_USER_HOME"] = home
+            env.merge(extra) { _, new in new }
             p.environment = env
             let input = Pipe()
             p.standardInput = input
@@ -80,5 +81,31 @@ import Foundation
         let out = try #require(CoreJSON.object(r.stdout))
         #expect(out.obj("hookSpecificOutput")?.str("hookEventName") == "PermissionRequest")
         #expect(out.obj("hookSpecificOutput")?.obj("decision")?.str("behavior") == "allow")
+    }
+
+    /// The helper forwards Claude's entrypoint, so `claude -p` is not held by the terminal floor.
+    @Test(.enabled(if: CoreHelperEndToEndTests.built)) func headlessClaudeIsNotHeld() throws {
+        let home = "/tmp/smh-e2e-\(UUID().uuidString.prefix(6))"
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let server = HookServer(socketPath: home + "/.silicon-mode/run/hook.sock")
+        server.holdDuration = { $0 == "claude-code" ? 60 : 0 }
+        try server.start()
+        defer { server.stop() }
+
+        let headless = try Spawned(home: home, args: ["claude-code", "PermissionRequest"], stdin: payload("PermissionRequest"),
+                                   env: ["CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "CLAUDE_CODE_SESSION_ATTENDED": "0"]).finish()
+        #expect(headless.status == 0 && headless.stdout.isEmpty)
+        #expect(headless.seconds < 2)
+
+        let terminal = try Spawned(home: home, args: ["claude-code", "PermissionRequest"], stdin: payload("PermissionRequest"),
+                                   env: ["CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"])
+        let deadline = Date().addingTimeInterval(3)
+        while server.heldQuestionIDs.isEmpty && Date() < deadline { usleep(10_000) }
+        let qid = try #require(server.heldQuestionIDs.first)
+        usleep(300_000)
+        #expect(terminal.p.isRunning)
+        #expect(server.resolve(questionID: qid, answer: AgentAnswer(questionID: qid, optionIDs: ["deny"], source: .phone)))
+        let r = terminal.finish()
+        #expect(CoreJSON.object(r.stdout)?.obj("hookSpecificOutput")?.obj("decision")?.str("behavior") == "deny")
     }
 }

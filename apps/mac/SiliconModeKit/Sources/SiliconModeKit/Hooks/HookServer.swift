@@ -11,9 +11,10 @@ import Darwin
 /// non-blocking fd watched by a dispatch source on one serial queue).
 ///
 /// A held prompt is released (pass-through: the agent's own prompt decides) when:
-/// - `holdDuration(agent)` has elapsed (re-evaluated every second, so leaving Silicon Mode
-///   releases Codex prompts immediately),
+/// - `holdDuration(policy key)` has elapsed (re-evaluated every second, so leaving Silicon Mode
+///   or any other policy change releases prompts that are already held),
 /// - the helper disconnects (the agent killed it at its hook timeout),
+/// - the agent process is gone (crashed or was killed without running its exit hooks),
 /// - the session moved on: `UserPromptSubmit`, `Stop`, `SessionEnd`, a matching `PostToolUse`,
 ///   Claude's live registry leaving `waiting`, or a provider reporting newer transcript
 ///   progress via `reconcile(…)`.
@@ -26,11 +27,26 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
         case listen(Int32)
     }
 
-    /// How long to hold an answerable prompt for `agent` (seconds; 0 = pass through immediately).
-    /// Claude Code shows its own dialog in parallel with the PermissionRequest hook (first answer
-    /// wins), so holding never delays it; Codex runs the hook *before* showing its prompt, so the
-    /// app only holds Codex prompts while Silicon Mode is active.
-    public var holdDuration: @Sendable (_ agent: String) -> TimeInterval {
+    /// Hold-policy key for Claude Code prompts that no Claude dialog runs alongside: `claude -p`,
+    /// Agent SDK hosts, background sessions, teammates and background subagents. There the hook is
+    /// the only decider (Claude denies when it passes through), so these must not get the long hold
+    /// that is safe for interactive Claude sessions.
+    public static let claudeHeadlessPolicy = "claude-code-headless"
+
+    /// The provider id a hold-policy key belongs to ("claude-code-headless" → "claude-code").
+    public static func providerID(forHoldPolicy key: String) -> String {
+        key == claudeHeadlessPolicy ? "claude-code" : key
+    }
+
+    /// How long to hold an answerable prompt (seconds; 0 = pass through immediately), by policy key:
+    /// - "claude-code": an attended Claude Code terminal, desktop or VS Code session. Claude shows
+    ///   its own dialog in parallel with the PermissionRequest hook (first answer wins), so holding
+    ///   never delays it.
+    /// - `claudeHeadlessPolicy`: Claude Code with no dialog of its own (see there). Holding blocks
+    ///   the run, so hold only as long as someone may answer from Silicon Mode.
+    /// - any other agent id (e.g. "codex"): Codex runs the hook *before* showing its prompt, so
+    ///   holding delays its prompt.
+    public var holdDuration: @Sendable (_ policyKey: String) -> TimeInterval {
         get { lock.withLock { _holdDuration } }
         set { lock.withLock { _holdDuration = newValue } }
     }
@@ -53,6 +69,9 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
     var displayOnlyTTL: TimeInterval = 30 * 60
     /// Hook sessions with no event for this long are forgotten.
     var sessionTTL: TimeInterval = 12 * 3600
+    /// How long a subagent prompt from an interactive Claude session is held while waiting for
+    /// Claude's registry to show its dialog (see `HoldPolicy.awaitsDialog`).
+    var dialogGrace: TimeInterval = 3
 
     private let lock = NSLock()
     private var _holdDuration: @Sendable (String) -> TimeInterval = { _ in 0 }
@@ -161,8 +180,12 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
         var openTools: [(name: String, inputKey: String)]?
 
         /// Whether a prompt for `tool` (with `inputKey`, "" = unknown) created at `at` is behind us.
-        func movedPast(tool: String, inputKey: String, createdAt at: Date) -> Bool {
+        /// `subagent`: the prompt came from a subagent. Its tool calls live in its own transcript,
+        /// not the one this progress describes (a sibling subagent finishing says nothing about it),
+        /// so only a turn boundary of the main thread counts.
+        func movedPast(tool: String, inputKey: String, createdAt at: Date, subagent: Bool = false) -> Bool {
             if let b = boundary, b > at.addingTimeInterval(0.5) { return true }
+            if subagent { return false }
             if resolvedTools.contains(where: { t in
                 t.name == tool && t.at > at && (t.inputKey == inputKey || t.inputKey.isEmpty || inputKey.isEmpty)
             }) { return true }
@@ -179,7 +202,7 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
             var released = false
             var ids: [UInt64] = []
             for (heldID, h) in store.held where h.sessionKey == key
-                && progress.movedPast(tool: h.toolName, inputKey: h.inputKey, createdAt: h.createdAt) {
+                && progress.movedPast(tool: h.toolName, inputKey: h.inputKey, createdAt: h.createdAt, subagent: h.agentID != nil) {
                 ids.append(h.connID)
                 removeHeld(heldID, state: nil)
                 released = true
@@ -236,12 +259,46 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
 
     enum HeldKind: Sendable { case permission, askUser, plan }
 
+    /// Which `holdDuration` key governs a prompt.
+    struct HoldPolicy: Equatable, Sendable {
+        var key: String
+        /// A subagent prompt from an interactive Claude session. A foreground subagent's dialog runs
+        /// alongside the hook like the main thread's, but a background subagent has no dialog (the
+        /// hook is its only decider) or shows one only after the hook returns. So it starts on the
+        /// headless policy, is held at least `dialogGrace`, and moves to "claude-code" only once
+        /// Claude's registry shows a dialog open.
+        var awaitsDialog = false
+    }
+
+    /// Claude Code entrypoints whose permission dialog runs alongside the PermissionRequest hook.
+    static let claudeDialogEntrypoints: Set<String> = ["cli", "claude-desktop", "claude-vscode"]
+
+    /// Classifies a PermissionRequest. Claude Code always sets `CLAUDE_CODE_ENTRYPOINT` for its hooks
+    /// ("sdk-cli" in print mode, "sdk-ts"/"sdk-py" under the Agent SDK) and, in recent versions,
+    /// `CLAUDE_CODE_SESSION_ATTENDED` ("0" for background sessions and teammates). Anything not
+    /// positively known to have a dialog is headless: wrongly holding a headless run stalls it for
+    /// hours, while wrongly treating an interactive one as headless only costs answering it here.
+    static func holdPolicy(agent: String, env: [String: String], payload: JSONObject) -> HoldPolicy {
+        guard agent == "claude-code" else { return HoldPolicy(key: agent) }
+        let entrypoint = env["CLAUDE_CODE_ENTRYPOINT"] ?? ""
+        guard claudeDialogEntrypoints.contains(entrypoint), env["CLAUDE_CODE_SESSION_ATTENDED"] != "0" else {
+            return HoldPolicy(key: claudeHeadlessPolicy)
+        }
+        if payload.nonEmpty("agent_id") != nil { return HoldPolicy(key: claudeHeadlessPolicy, awaitsDialog: true) }
+        return HoldPolicy(key: agent)
+    }
+
     struct Held: Sendable {
         var id: String
         var connID: UInt64
         var agent: String
         var sessionKey: String
         var pid: Int32?
+        /// Start time of `pid` when the prompt was held (guards against pid reuse).
+        var pidStart: Int64?
+        var policy: HoldPolicy
+        /// Claude subagent that asked (payload `agent_id`); nil for the main thread.
+        var agentID: String?
         var kind: HeldKind
         var toolName: String
         var inputKey: String
@@ -320,7 +377,14 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
         let toolName = payload.str("tool_name") ?? ""
         let toolInput = payload.obj("tool_input") ?? [:]
         let pid = req.ppid > 1 ? req.ppid : peerPID
-        let hold = event == "PermissionRequest" ? max(0, holdDuration(agent)) : 0
+        let policy = HookServer.holdPolicy(agent: agent, env: req.env, payload: payload)
+        var hold: TimeInterval = 0
+        var pidStart: Int64?
+        if event == "PermissionRequest" {
+            hold = max(0, holdDuration(policy.key))
+            if policy.awaitsDialog { hold = max(hold, dialogGrace) }
+            if hold > 0, let pid, case .running(let start) = HookServer.processState(pid) { pidStart = start }
+        }
 
         var reply = Reply.now(.passThrough)
         let releasedConns: [UInt64] = lock.withLock {
@@ -368,16 +432,23 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
                 let built = HookQuestions.build(agent: agent, sessionKey: key, sessionID: sid, heldID: heldID,
                                                 toolName: toolName, input: toolInput, suggestions: suggestions,
                                                 cwd: s.cwd, answerable: hold > 0, now: now)
-                s.state = .needsYou
                 if hold > 0 {
-                    let h = Held(id: heldID, connID: connID, agent: agent, sessionKey: key, pid: s.pid, kind: built.kind,
+                    s.state = .needsYou
+                    let h = Held(id: heldID, connID: connID, agent: agent, sessionKey: key, pid: s.pid,
+                                 pidStart: s.pid == pid ? pidStart : nil, policy: policy,
+                                 agentID: payload.nonEmpty("agent_id"), kind: built.kind,
                                  toolName: toolName, inputKey: CoreJSON.canonical(toolInput),
                                  toolInput: CoreJSON.data(toolInput), suggestions: suggestions.isEmpty ? nil : CoreJSON.data(suggestions),
                                  questions: built.questions, createdAt: now)
                     store.held[heldID] = h
                     for q in built.questions { store.questionIndex[q.id] = heldID }
                     reply = .hold
+                } else if policy.key == HookServer.claudeHeadlessPolicy {
+                    // No Claude dialog to show it: passing through denies it right away, so
+                    // nothing is left waiting for anyone.
+                    s.state = .working
                 } else {
+                    s.state = .needsYou
                     for q in built.questions { store.displayTool[q.id] = toolName }
                     s.displayOnly += built.questions
                 }
@@ -602,35 +673,73 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
             finish(c.id, .passThrough)
         }
 
-        // Held prompts: hold policy and Claude's registry.
+        // Held prompts: agent liveness, Claude's registry, and the hold policy (re-evaluated every
+        // tick, so a policy change also applies to prompts that are already held).
         let held = lock.withLock { Array(store.held.values) }
         var expire: [String] = []
+        var orphaned: [String] = []
         var sawWaiting: [String] = []
+        var policyChanges: [String: HoldPolicy] = [:]
         if !held.isEmpty {
-            let policy = holdDuration
-            var cache: [String: Double] = [:]
+            let holdFor = holdDuration
+            var limits: [String: Double] = [:]
+            func limit(_ key: String) -> Double {
+                if let l = limits[key] { return l }
+                let l = max(0, holdFor(key))
+                limits[key] = l
+                return l
+            }
             for h in held {
-                let limit = cache[h.agent] ?? max(0, policy(h.agent))
-                cache[h.agent] = limit
-                if now.timeIntervalSince(h.createdAt) >= limit { expire.append(h.id); continue }
-                if h.agent == "claude-code", let pid = h.pid, now.timeIntervalSince(h.createdAt) > 0.5 {
+                let age = now.timeIntervalSince(h.createdAt)
+                // The agent died without a SessionEnd (SIGKILL, crash): nobody will read the answer,
+                // and its orphaned helper waits on us.
+                if let pid = h.pid, !HookServer.isRunning(pid, startedAt: h.pidStart) { orphaned.append(h.id); continue }
+                var dialogOpen = false
+                if h.agent == "claude-code", let pid = h.pid, age > 0.5 {
                     switch registryStatus(pid: pid) {
-                    case "waiting"?: if !h.sawWaiting { sawWaiting.append(h.id) }
-                    case let s? where h.sawWaiting && s != "waiting": expire.append(h.id)
+                    case "waiting"?:
+                        dialogOpen = true
+                        if !h.sawWaiting { sawWaiting.append(h.id) }
+                    case let s? where h.sawWaiting && s != "waiting":
+                        expire.append(h.id)
+                        continue
                     default: break
                     }
                 }
+                var policy = h.policy
+                if policy.awaitsDialog {
+                    if dialogOpen { policy = HoldPolicy(key: "claude-code") }      // Claude's dialog is up
+                    else if age >= dialogGrace { policy.awaitsDialog = false }     // no dialog: headless
+                }
+                if policy != h.policy { policyChanges[h.id] = policy }
+                var l = limit(policy.key)
+                if policy.awaitsDialog { l = max(l, dialogGrace) }
+                if age >= l { expire.append(h.id) }
             }
         }
 
         var changed = false
         let conns: [UInt64] = lock.withLock {
             for id in sawWaiting { store.held[id]?.sawWaiting = true }
+            for (id, p) in policyChanges { store.held[id]?.policy = p }
             var ids: [UInt64] = []
             for id in expire {
                 guard let h = store.held[id] else { continue }
                 ids.append(h.connID)
                 removeHeld(id, state: nil)
+                changed = true
+            }
+            for id in orphaned {
+                guard let h = store.held[id] else { continue }
+                ids.append(h.connID)
+                removeHeld(id, state: nil)
+                // The session's own process is the one that died: nothing in it waits any more.
+                if var s = store.sessions[h.sessionKey], s.pid == h.pid {
+                    for q in s.displayOnly { store.displayTool.removeValue(forKey: q.id) }
+                    s.displayOnly.removeAll()
+                    if !store.held.values.contains(where: { $0.sessionKey == h.sessionKey }) { s.state = .idle }
+                    store.sessions[h.sessionKey] = s
+                }
                 changed = true
             }
             if now.timeIntervalSince(lastPrune) > 30 {
@@ -671,6 +780,36 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
         let path = claudeRegistryDirectory + "/\(pid).json"
         guard let data = CoreFS.read(path, max: 64 << 10), let obj = CoreJSON.object(data) else { return nil }
         return obj.str("status")
+    }
+
+    // MARK: - Internals: processes
+
+    enum ProcessState: Equatable {
+        /// `start`: microseconds since 1970 (nil if it couldn't be read).
+        case running(start: Int64?)
+        case gone
+    }
+
+    /// Whether `pid` is a live (non-zombie) process, and when it started.
+    static func processState(_ pid: Int32) -> ProcessState {
+        guard pid > 0 else { return .gone }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0 else {
+            return kill(pid, 0) != 0 && errno == ESRCH ? .gone : .running(start: nil)
+        }
+        guard size >= MemoryLayout<kinfo_proc>.size, info.kp_proc.p_pid == pid else { return .gone }
+        if Int32(info.kp_proc.p_stat) == SZOMB { return .gone }
+        let tv = info.kp_proc.p_starttime
+        return .running(start: Int64(tv.tv_sec) * 1_000_000 + Int64(tv.tv_usec))
+    }
+
+    /// `pid` is still the process that started at `startedAt` (when known).
+    static func isRunning(_ pid: Int32, startedAt: Int64?) -> Bool {
+        guard case .running(let start) = processState(pid) else { return false }
+        if let startedAt, let start, start != startedAt { return false } // the pid was reused
+        return true
     }
 }
 

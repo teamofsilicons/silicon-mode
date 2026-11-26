@@ -71,7 +71,11 @@ public enum HookWire {
         public static let passThrough = Response()
     }
 
-    /// Environment keys forwarded for attribution.
+    /// Environment keys forwarded for attribution and hold policy. Claude Code sets
+    /// `CLAUDE_CODE_ENTRYPOINT` ("cli", "sdk-cli" for `claude -p`, "claude-desktop", …) and
+    /// `CLAUDE_CODE_SESSION_ATTENDED` ("1"/"0") in every hook's environment; the server uses them to
+    /// tell sessions with a permission dialog of their own from headless ones.
     public static let forwardedEnv = ["TERM_PROGRAM", "TERM_SESSION_ID", "TMUX", "TMUX_PANE", "ITERM_SESSION_ID",
-                                      "VSCODE_PID", "CLAUDE_PROJECT_DIR", "CODEX_HOME", "__CFBundleIdentifier"]
+                                      "VSCODE_PID", "CLAUDE_PROJECT_DIR", "CODEX_HOME", "__CFBundleIdentifier",
+                                      "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED"]
 }
