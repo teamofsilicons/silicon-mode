@@ -1,11 +1,11 @@
 import SwiftUI
 import SiliconModeKit
 
-/// A clock on the face, in one of three styles (option `style`):
-/// - `digital`: big Allo thin time over an SF Pro date line, like the Lock Screen.
+/// A clock on the face, in one of three styles (option `style`), on glass like every piece:
+/// - `digital`: big Allo thin time over an SF Pro date line, like the Lock Screen, on a glass panel.
 /// - `analog`: a minimal dial on a Liquid Glass disc; an orange seconds hand ticks only with
 ///   `seconds` on.
-/// - `words`: "it's ten forty-two" with the lit words in silicon ink, and the weekday.
+/// - `words`: "it's ten forty-two" with the lit words in silicon ink, and the weekday, on a glass panel.
 ///
 /// It redraws once a minute (once a second with `seconds` on, for digital and analog), in its own
 /// timeline, so nothing else re-renders with it. Snapshots show the frozen `FaceA.wallDate`.
@@ -13,11 +13,15 @@ struct ClockPiece: View {
     let options: [String: FaceOptionValue]
     let leading: Bool
 
+    /// Inset of the digital and words clocks inside their glass panel.
+    static let panelInset = EdgeInsets(top: 14, leading: 20, bottom: 14, trailing: 20)
+
     static func height(style: String) -> CGFloat {
+        let panel = panelInset.top + panelInset.bottom
         switch style {
-        case "analog": AnalogClock.side
-        case "words": WordsClock.height
-        default: DigitalClock.height
+        case "analog": return AnalogClock.side
+        case "words": return WordsClock.height + panel
+        default: return DigitalClock.height + panel
         }
     }
 
@@ -31,8 +35,8 @@ struct ClockPiece: View {
             Group {
                 switch style {
                 case "analog": AnalogClock(date: now, seconds: seconds)
-                case "words": WordsClock(date: now, leading: leading)
-                default: DigitalClock(date: now, use24h: use24h, seconds: seconds, leading: leading)
+                case "words": WordsClock(date: now, leading: leading).padding(Self.panelInset).hudPanel()
+                default: DigitalClock(date: now, use24h: use24h, seconds: seconds, leading: leading).padding(Self.panelInset).hudPanel()
                 }
             }
             .frame(maxWidth: .infinity, alignment: leading ? .leading : .trailing)
@@ -97,7 +101,6 @@ private struct DigitalClock: View {
                 .foregroundStyle(.secondary)
         }
         .lineLimit(1)
-        .shadow(color: .black.opacity(0.45), radius: 16)
         .accessibilityLabel(date.formatted(date: .complete, time: .shortened))
     }
 }
@@ -175,7 +178,6 @@ private struct WordsClock: View {
         }
         .lineLimit(1)
         .multilineTextAlignment(leading ? .leading : .trailing)
-        .shadow(color: .black.opacity(0.45), radius: 14)
         .accessibilityLabel("It's \(w), \(p.weekday)")
     }
 

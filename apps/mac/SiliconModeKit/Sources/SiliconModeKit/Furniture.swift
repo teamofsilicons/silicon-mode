@@ -10,7 +10,8 @@ public enum FurnitureKind: String, Codable, Sendable, CaseIterable {
     case agents
     /// Chrome-style tabs, one per agent, with a scrollable log.
     case logs
-    /// Answerable question cards.
+    /// Answerable question cards. Always placed (see `isRequired`): it takes no room until an
+    /// agent asks something, and the user only chooses its corner.
     case questions
     /// A clock (digital, analog or words).
     case clock
@@ -24,6 +25,11 @@ public enum FurnitureKind: String, Codable, Sendable, CaseIterable {
         case .clock, .system: false
         }
     }
+
+    /// Every layout holds exactly one piece of this kind; it can be moved, never removed. Only the
+    /// questions: an agent waiting on the human must always be answerable on the face, even with
+    /// the rest of the furniture hidden.
+    public var isRequired: Bool { self == .questions }
 
     /// Where a new piece of this kind goes by default.
     public var defaultSlot: FurnitureSlot {
@@ -108,22 +114,32 @@ public extension FurniturePiece {
     static let maxPieces = 12
 
     /// Furniture rebuilt from the pre-furniture HUD toggles (settings.json without a `furniture` key).
+    /// Questions are always placed, whatever `showQuestions` said.
     static func migrated(showAgentCounts: Bool, showAgentList: Bool, showTailLogs: Bool, showQuestions: Bool) -> [FurniturePiece] {
         var out: [FurniturePiece] = []
         if showAgentCounts || showAgentList { out.append(defaults[0]) }
         if showTailLogs { out.append(defaults[1]) }
-        if showQuestions { out.append(defaults[2]) }
+        out.append(defaults[2])
         return out
     }
 
     /// Clamps a layout: at most `maxPieces`, one agents / logs / questions piece (the first wins),
-    /// unique non-empty ids (duplicates get a deterministic "-2", "-3"… suffix).
+    /// unique non-empty ids (duplicates get a deterministic "-2", "-3"… suffix), and always one
+    /// questions piece (added in its default corner when missing, in place of the last piece
+    /// when the layout is full).
     static func sanitized(_ pieces: [FurniturePiece]) -> [FurniturePiece] {
+        var pieces = pieces
+        if !pieces.contains(where: { $0.kind == .questions }) {
+            pieces = Array(pieces.prefix(maxPieces - 1))
+            pieces.append(FurniturePiece(id: "questions", kind: .questions, slot: FurnitureKind.questions.defaultSlot))
+        }
         var out: [FurniturePiece] = []
         var singletons = Set<FurnitureKind>()
         var ids = Set<String>()
         for var p in pieces {
-            if out.count >= maxPieces { break }
+            // Keep a place for the questions piece until it's in.
+            let reserved = singletons.contains(.questions) || p.kind == .questions ? 0 : 1
+            if out.count >= maxPieces - reserved { continue }
             if p.kind.isSingleton {
                 guard singletons.insert(p.kind).inserted else { continue }
             }

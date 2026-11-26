@@ -27,8 +27,8 @@ struct SettingsFurniturePane: View {
             SettingsCard {
                 SettingsRow(icon: hidden ? "eye.slash" : "eye", title: "Show face furniture",
                             detail: hidden
-                                ? "Off: Silicon Mode shows just the face. Unlock always stays, and a small pill still tells you when an agent needs you."
-                                : "Agents, logs, questions, clocks and system activity on top of the face. In Silicon Mode, the eye button next to Unlock hides them all.") {
+                                ? "Off: Silicon Mode shows just the face. Questions still appear when an agent needs you, and Unlock always stays."
+                                : "Agents, logs, clocks and system activity on top of the face. In Silicon Mode, the eye button next to Unlock hides them all. Questions always show when an agent needs you.") {
                     Toggle("Show face furniture", isOn: Binding(
                         get: { !hidden },
                         set: { show in
@@ -159,7 +159,7 @@ struct SettingsFurniturePane: View {
                             options: options(piece.id),
                             onSlot: { s in apply { SettingsFurnitureEdit.moving(piece.id, to: s, in: $0) } },
                             onMove: { up in apply { SettingsFurnitureEdit.moving(piece.id, up: up, in: $0) } },
-                            onRemove: {
+                            onRemove: piece.kind.isRequired ? nil : {
                                 if hovered == piece.id { hovered = nil }
                                 apply { SettingsFurnitureEdit.removing(piece.id, from: $0) }
                             },
@@ -177,12 +177,6 @@ struct SettingsFurniturePane: View {
 
     @ViewBuilder
     private func footer(_ list: [FurniturePiece]) -> some View {
-        if !list.contains(where: { $0.kind == .questions }) {
-            SettingsNote(icon: "exclamationmark.bubble",
-                         text: "Without Questions, prompts can't be answered on the face. The menu bar, your phone and the web still can.",
-                         tint: Theme.warning)
-                .padding(.leading, 4)
-        }
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             SettingsNote(text: "Every display shows the same furniture. Your phone always shows recent events and questions, even when they're hidden here.")
             Spacer(minLength: 0)
@@ -211,7 +205,8 @@ private struct SettingsFurniturePieceRow: View {
     var options: Binding<[String: FaceOptionValue]>
     var onSlot: (FurnitureSlot) -> Void
     var onMove: (_ up: Bool) -> Void
-    var onRemove: () -> Void
+    /// Nil for the piece that can't be removed (Questions): it keeps a placeholder of the same size.
+    var onRemove: (() -> Void)?
     var onHover: (Bool) -> Void
 
     private var title: String { SettingsFurnitureCatalog.title(piece.kind) }
@@ -261,7 +256,16 @@ private struct SettingsFurniturePieceRow: View {
             .opacity(showsReorder ? 1 : 0)
             .disabled(!showsReorder)
             .accessibilityHidden(!showsReorder)
-            SettingsIconButton(systemImage: "minus.circle", label: "Remove \(title)", tint: Theme.danger, fontSize: 14, action: onRemove)
+            if let onRemove {
+                SettingsIconButton(systemImage: "minus.circle", label: "Remove \(title)", tint: Theme.danger, fontSize: 14, action: onRemove)
+            } else {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.textFaint)
+                    .frame(width: 26, height: 26)
+                    .help("Questions always stay so agents waiting on you can be answered. Pick its corner instead.")
+                    .accessibilityLabel("\(title) can't be removed")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

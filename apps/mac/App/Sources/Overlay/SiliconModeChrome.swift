@@ -4,8 +4,8 @@ import QuartzCore
 import SiliconModeKit
 
 /// What always stays on screen in Silicon Mode (it isn't furniture), in one row at the bottom right:
-/// the Unlock / Turn Off control, the hide-furniture toggle, while furniture is hidden and an agent
-/// needs you an "N need you" pill, and while the pointer moves the lid angle.
+/// the Unlock / Turn Off control, the hide-furniture toggle, and while the pointer moves the lid
+/// angle. Questions need no pill here: their piece stays even with the furniture hidden.
 ///
 /// While the pointer is idle the chrome recedes so the face reads alone: the eye fades most, the
 /// control and the pill much less, so their labels stay legible (`ChromeDim`).
@@ -17,13 +17,7 @@ struct SiliconModeChrome: View {
 
     var body: some View {
         let hidden = preview?.furnitureHidden ?? model.settings.furnitureHidden
-        let pending = preview.map { p in (p.furniture?.questions ?? p.sessions.flatMap(\.pendingQuestions)).count }
-            ?? model.pendingQuestions.count
         let idle = stage.pointerIdle && preview == nil
-        let peek = preview?.questionsPeek ?? stage.questionsPeek
-        // The pill opens the placed Questions piece. Without one (the user removed it) there is
-        // nothing to open: it is only a count, and never shows answerable cards.
-        let questionsPlaced = (preview?.furnitureSource.settings ?? model.settings).furniture.contains { $0.kind == .questions }
 
         HStack(spacing: ChromeMetrics.spacing) {
             // Only while someone is at the Mac (the pointer moves): idle, it would be one more
@@ -31,18 +25,6 @@ struct SiliconModeChrome: View {
             if !idle {
                 SiliconModeAngleReadout(preview: preview)
                     .transition(.opacity)
-            }
-            if hidden && pending > 0 {
-                Group {
-                    if questionsPlaced {
-                        NeedYouPill(count: pending, peeking: peek) { togglePeek() }
-                    } else {
-                        NeedYouCount(count: pending)
-                    }
-                }
-                .opacity(ChromeDim.attention(idle: idle))
-                // Moves and fades only: a scale would redraw its glyphs at every step.
-                .transition(.opacity.combined(with: .offset(x: 14)))
             }
             FurnitureToggle(hidden: hidden) { setHidden(!hidden) }
                 .opacity(ChromeDim.toggle(idle: idle, hidden: hidden))
@@ -53,27 +35,11 @@ struct SiliconModeChrome: View {
         .padding(.bottom, 26)
         .animation(.easeInOut(duration: 0.6), value: idle)
         .animation(.easeInOut(duration: 0.6), value: hidden)
-        .animation(Theme.Motion.slow, value: hidden && pending > 0)
-        .onChange(of: pending) { _, n in
-            // The peek ends when nobody waits any more.
-            if n == 0, stage.questionsPeek, preview == nil { stage.questionsPeek = false }
-        }
-        .onChange(of: questionsPlaced) { _, placed in
-            if !placed, stage.questionsPeek, preview == nil { stage.questionsPeek = false }
-        }
     }
 
     private func setHidden(_ hide: Bool) {
         guard preview == nil else { return }
-        withAnimation(Theme.Motion.slow) {
-            stage.questionsPeek = false
-            model.setFurnitureHidden(hide)
-        }
-    }
-
-    private func togglePeek() {
-        guard preview == nil else { return }
-        withAnimation(Theme.Motion.slow) { stage.questionsPeek.toggle() }
+        withAnimation(Theme.Motion.slow) { model.setFurnitureHidden(hide) }
     }
 }
 
@@ -95,7 +61,7 @@ enum ChromeMetrics {
     static let spacing: CGFloat = 12
 }
 
-// MARK: - Hide toggle and the "N need you" pill
+// MARK: - Hide toggle
 
 /// Eye: furniture shows (click hides it). Eye with a slash: hidden (click shows it).
 private struct FurnitureToggle: View {
@@ -118,78 +84,6 @@ private struct FurnitureToggle: View {
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(hidden ? "Show face furniture" : "Hide face furniture")
         .accessibilityLabel(hidden ? "Show face furniture" : "Hide face furniture")
-    }
-}
-
-/// While furniture is hidden: "2 need you". Click to show the questions (click again to put them
-/// away); they also go away by themselves once nobody waits. Neutral glass like the rest of the
-/// chrome: the orange is in the label only, the same treatment as the agents pill's summary.
-private struct NeedYouPill: View {
-    let count: Int
-    let peeking: Bool
-    var action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                NeedYouLabel(count: count)
-                Image(systemName: peeking ? "xmark" : "chevron.up")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .padding(.leading, 14)
-            .padding(.trailing, 16)
-            .frame(height: ChromeMetrics.height)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(ChromePressStyle())
-        .focusable(false)
-        .chromeGlass(in: Capsule(), hovering: hovering)
-        // Outside the glass, so the capsule resizes along with the label's crossfade.
-        .animation(AgentSummaryMotion.change, value: count)
-        .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
-        .help(peeking ? "Hide the questions" : "Show the questions")
-        .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
-        .accessibilityHint(peeking ? "Hides the questions" : "Shows the questions")
-    }
-}
-
-/// The count alone, for when no Questions piece is placed: nothing to open, so not a button.
-private struct NeedYouCount: View {
-    let count: Int
-
-    var body: some View {
-        NeedYouLabel(count: count)
-            .padding(.horizontal, 16)
-            .frame(height: ChromeMetrics.height)
-            .chromeGlass(in: Capsule(), hovering: false)
-            .animation(AgentSummaryMotion.change, value: count)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
-    }
-}
-
-/// "2 need you" in the needs-you colour, as the agents pill's summary leads with it.
-private struct NeedYouLabel: View {
-    let count: Int
-
-    var body: some View {
-        Label {
-            Text("\(count) need\(count == 1 ? "s" : "") you")
-                .monospacedDigit()
-                // A crossfade (not `.numericText()`, whose roll leaves cached glyph bitmaps behind),
-                // animated by the pill around it.
-                .contentTransition(.opacity)
-        } icon: {
-            // One solid colour with the label (hierarchical would draw the bell as a translucent,
-            // brownish orange on the dark glass).
-            Image(systemName: "bell.badge.fill")
-                .symbolRenderingMode(.monochrome)
-        }
-        .font(.headline)
-        .foregroundStyle(HUDTint.needsYou)
     }
 }
 

@@ -5,8 +5,8 @@ import SiliconModeKit
 /// clocks, system activity), laid out by `FurniturePlan` so they never overlap each other or the
 /// chrome. Full-screen and transparent; empty space is not hit-testable.
 ///
-/// When furniture is hidden nothing is drawn, except the Questions piece while the user peeks at
-/// it through the chrome's "N need you" pill.
+/// The Questions piece is the one piece that always stays: with the rest of the furniture hidden
+/// it still appears (in its corner) whenever an agent is waiting, and takes no room otherwise.
 struct FurnitureLayer: View {
     @Environment(AppModel.self) private var model
     /// Snapshot / preview data (nil = live).
@@ -22,8 +22,7 @@ struct FurnitureLayer: View {
         let settings = preview?.settings ?? model.settings
         let liveQuestions = preview?.questions ?? model.pendingQuestions
         let questions = preview == nil ? plannedQuestions ?? liveQuestions : liveQuestions
-        let pieces = Self.shownPieces(settings: settings, peek: preview?.questionsPeek ?? stage?.questionsPeek ?? false,
-                                      hasQuestions: !questions.isEmpty)
+        let pieces = Self.shownPieces(settings: settings, hasQuestions: !questions.isEmpty)
         let agentCount = preview?.sessions.count ?? model.modeAgents.count
         let collapsed = preview?.agentsCollapsed ?? ui.agentsCollapsed
 
@@ -60,12 +59,11 @@ struct FurnitureLayer: View {
         }
     }
 
-    /// What is drawn: the layout, nothing while hidden, or just the placed Questions piece while
-    /// peeking. A user who removed the Questions piece never gets answerable cards from a peek.
-    static func shownPieces(settings: ModeSettings, peek: Bool, hasQuestions: Bool) -> [FurniturePiece] {
+    /// What is drawn: the layout, or while hidden just the Questions piece when someone waits.
+    static func shownPieces(settings: ModeSettings, hasQuestions: Bool) -> [FurniturePiece] {
         guard settings.furnitureHidden else { return settings.furniture }
-        guard peek, hasQuestions, let placed = settings.furniture.first(where: { $0.kind == .questions }) else { return [] }
-        return [placed]
+        guard hasQuestions else { return [] }
+        return settings.furniture.filter { $0.kind.isRequired }
     }
 
     @ViewBuilder

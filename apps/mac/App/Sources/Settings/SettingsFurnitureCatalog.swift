@@ -75,7 +75,7 @@ enum SettingsFurnitureCatalog {
         switch k {
         case .agents: "Who needs you, who's working, who finished since you started."
         case .logs: "A tab per agent with every line since you started. Scroll or minimise."
-        case .questions: "Answer permission prompts and agent questions from the face."
+        case .questions: "Always on. Answer permission prompts and agent questions; it takes no room until one comes."
         case .clock: "Digital, analog or in words."
         case .system: "CPU, memory, battery and network."
         }
@@ -162,7 +162,7 @@ enum SettingsFurnitureEdit {
     }
 
     static func removing(_ id: String, from list: [FurniturePiece]) -> [FurniturePiece] {
-        list.filter { $0.id != id }
+        list.filter { $0.id != id || $0.kind.isRequired }
     }
 
     /// A slot's pieces from the top of the screen to the bottom.

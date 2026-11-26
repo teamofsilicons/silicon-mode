@@ -26,6 +26,7 @@ import Foundation
             FurniturePiece(id: "clock-a1", kind: .clock, slot: .topTrailing,
                            options: ["style": .string("analog"), "seconds": .bool(true), "size": .number(1.5)]),
             FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+            FurniturePiece(id: "questions", kind: .questions, slot: .bottomTrailing),
         ]
         s.furnitureHidden = true
         let back = try roundTrip(s)
@@ -39,17 +40,17 @@ import Foundation
         #expect(all.furniture.map(\.kind) == [.agents, .logs, .questions])
         #expect(all.furniture == FurniturePiece.defaults)
 
-        // Counts alone still give the agents piece; logs off; questions off.
+        // Counts alone still give the agents piece; logs off. Questions are always placed.
         let some = try decode(#"{"showAgentCounts":true,"showAgentList":false,"showTailLogs":false,"showQuestions":false}"#)
-        #expect(some.furniture.map(\.kind) == [.agents])
+        #expect(some.furniture.map(\.kind) == [.agents, .questions])
 
         // The list alone too.
         let list = try decode(#"{"showAgentCounts":false,"showAgentList":true,"showTailLogs":true,"showQuestions":true}"#)
         #expect(list.furniture.map(\.kind) == [.agents, .logs, .questions])
 
-        // Everything off: no furniture.
+        // Everything off: just the questions, which can't be removed.
         let none = try decode(#"{"showAgentCounts":false,"showAgentList":false,"showTailLogs":false,"showQuestions":false}"#)
-        #expect(none.furniture.isEmpty)
+        #expect(none.furniture.map(\.kind) == [.questions])
 
         // An empty file: defaults.
         #expect(try decode("{}").furniture == FurniturePiece.defaults)
@@ -57,9 +58,10 @@ import Foundation
 
     @Test func presentFurnitureKeyWinsOverOldToggles() throws {
         let s = try decode(#"{"showAgentList":true,"furniture":[{"id":"c1","kind":"clock","slot":"bottomTrailing"}]}"#)
-        #expect(s.furniture == [FurniturePiece(id: "c1", kind: .clock, slot: .bottomTrailing)])
-        // An explicitly empty list stays empty (the user removed everything).
-        #expect(try decode(#"{"furniture":[]}"#).furniture.isEmpty)
+        #expect(s.furniture == [FurniturePiece(id: "c1", kind: .clock, slot: .bottomTrailing),
+                                FurniturePiece(id: "questions", kind: .questions, slot: .topTrailing)])
+        // An explicitly empty list (the user removed everything) keeps only the questions.
+        #expect(try decode(#"{"furniture":[]}"#).furniture.map(\.kind) == [.questions])
     }
 
     @Test func oldKeysStayDecodable() throws {
@@ -80,7 +82,7 @@ import Foundation
           null
         ]}
         """#)
-        #expect(s.furniture.map(\.kind) == [.agents, .system, .clock])
+        #expect(s.furniture.map(\.kind) == [.agents, .system, .clock, .questions])
         // Unknown slot → the kind's default; missing id → a fresh "<kind>-…" id; bad options → none.
         #expect(s.furniture[0].slot == .topLeading)
         #expect(s.furniture[1].id.hasPrefix("system-"))
@@ -120,14 +122,35 @@ import Foundation
                        FurniturePiece(id: "x", kind: .clock, slot: .topTrailing),
                        FurniturePiece(id: "y", kind: .logs, slot: .bottomTrailing)]
         let clean = s.sanitized()
-        #expect(clean.furniture.map(\.id) == ["x", "x-2"])
-        #expect(clean.furniture.map(\.kind) == [.logs, .clock])
+        #expect(clean.furniture.map(\.id) == ["x", "x-2", "questions"])
+        #expect(clean.furniture.map(\.kind) == [.logs, .clock, .questions])
     }
 
     @Test func decodedListIsSanitized() throws {
         let s = try decode(#"{"furniture":[{"id":"a","kind":"agents"},{"id":"b","kind":"agents"},{"id":"a","kind":"clock"}]}"#)
-        #expect(s.furniture.map(\.id) == ["a", "a-2"])
-        #expect(s.furniture.map(\.kind) == [.agents, .clock])
+        #expect(s.furniture.map(\.id) == ["a", "a-2", "questions"])
+        #expect(s.furniture.map(\.kind) == [.agents, .clock, .questions])
+    }
+
+    @Test func questionsAreAlwaysPlaced() {
+        // Removed: put back in its default corner.
+        let none = FurniturePiece.sanitized([])
+        #expect(none.map(\.kind) == [.questions])
+        #expect(none.first?.slot == FurnitureKind.questions.defaultSlot)
+        // Moved: the user's corner is kept.
+        let moved = FurniturePiece.sanitized([FurniturePiece(id: "q", kind: .questions, slot: .bottomLeading)])
+        #expect(moved.map(\.slot) == [.bottomLeading])
+        // A full layout without questions gives up its last piece for them.
+        let full = (0..<20).map { FurniturePiece(id: "c\($0)", kind: .clock, slot: .topTrailing) }
+        let s = FurniturePiece.sanitized(full)
+        #expect(s.count == FurniturePiece.maxPieces)
+        #expect(s.last?.kind == .questions)
+        // Questions placed after the cap still make it in.
+        let late = FurniturePiece.sanitized(full + [FurniturePiece(id: "q", kind: .questions, slot: .bottomTrailing)])
+        #expect(late.count == FurniturePiece.maxPieces)
+        #expect(late.filter { $0.kind == .questions }.map(\.slot) == [.bottomTrailing])
+        #expect(FurniturePiece.sanitized(late) == late)
+        #expect(FurnitureKind.allCases.filter(\.isRequired) == [.questions])
     }
 
     @Test func makeGivesFreshUniqueIDs() {
