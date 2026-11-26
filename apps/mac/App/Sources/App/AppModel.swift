@@ -112,10 +112,12 @@ final class AppModel {
         hookServer.holdDuration = { agent in
             // Called on the hook server's queue; reads a snapshot published from the main actor.
             // A provider the user switched off is neither shown nor answerable: never hold it.
-            let provider = agent == "claude-code-headless" ? "claude-code" : agent
+            let provider = HookServer.providerID(forHoldPolicy: agent)
             if disabledSnap.value.contains(provider) { return 0 }
             let p = policy.value
-            // Claude Code answers its own dialog in parallel, so holding is always safe there.
+            // Interactive Claude Code sessions show their own dialog alongside the hook (first answer
+            // wins), so holding never blocks them. Headless runs ("claude-code-headless": claude -p,
+            // SDK hosts) get the normal policy, like Codex: held only while Silicon Mode is on.
             return agent == "claude-code" ? max(p, 6 * 3600) : p
         }
         hookServer.onChange = {
@@ -387,6 +389,8 @@ final class AppModel {
 
     func refreshAgents() async {
         let snap = await hub.refresh()
+        // A caller resuming late must not apply an older snapshot over a newer one.
+        guard snap.takenAt >= snapshot.takenAt else { return }
         usage.sample(running: snap.sessions.filter { $0.state.isRunning }.map { (id: $0.id, provider: $0.provider) },
                      siliconModeActive: isActive)
         if snap != snapshot {

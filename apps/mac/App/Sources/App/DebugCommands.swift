@@ -127,6 +127,7 @@ enum DebugCommands {
             "face": m.settings.faceID,
             "pinSet": m.pinVault.isSet,
             "signedIn": m.account.isSignedIn,
+            "signInURL": m.account.signInURL?.absoluteString as Any,
             "appActive": NSApp.isActive,
             "kiosk": ["engaged": m.kiosk.engaged, "effective": m.kiosk.isEffective,
                       "options": NSApp.currentSystemPresentationOptions.rawValue],

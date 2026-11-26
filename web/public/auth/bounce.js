@@ -6,7 +6,14 @@
   var TARGET = "ai.tos.mode://auth/callback";
   var frag = location.hash.slice(1);
   var query = location.search;
-  var url = TARGET + (frag ? "#" + frag : query);
+  // Android: an intent: URL naming the package, so Chrome hands the tokens only to Silicon Mode
+  // and never to another app that claims ai.tos.mode://. The app reads them from the query.
+  var android = document.documentElement.getAttribute("data-platform") === "android";
+  var INTENT_TAIL = "#Intent;scheme=ai.tos.mode;package=ai.tos.mode;action=android.intent.action.VIEW;end";
+  if (android) TARGET = "intent://auth/callback" + INTENT_TAIL;
+  var url = android
+    ? "intent://auth/callback?" + (frag || query.slice(1)) + INTENT_TAIL
+    : TARGET + (frag ? "#" + frag : query);
   history.replaceState(null, "", location.pathname);
 
   var open = document.getElementById("open");

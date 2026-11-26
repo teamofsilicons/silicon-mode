@@ -62,8 +62,12 @@ final class SettingsHooks {
         let raw = HookInstaller.targets
         targets = raw.map(SettingsHookTarget.init)
         Task {
-            let s = await Task.detached { Dictionary(raw.map { ($0.id, HookInstaller.status($0)) }, uniquingKeysWith: { a, _ in a }) }.value
+            let (s, problems) = await Task.detached {
+                (Dictionary(raw.map { ($0.id, HookInstaller.status($0)) }, uniquingKeysWith: { a, _ in a }),
+                 Dictionary(raw.compactMap { t in HookInstaller.configProblem(t).map { (t.id, $0) } }, uniquingKeysWith: { a, _ in a }))
+            }.value
             statuses = s
+            for (id, p) in problems where errors[id] == nil { errors[id] = p }
         }
     }
 
