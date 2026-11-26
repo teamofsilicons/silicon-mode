@@ -167,11 +167,29 @@ final class AppModel {
                 readFailures = 0
             }
         }
-        if reading != angle { angle = reading }
+        publishAngle(reading, now: now)
 
         let events = engine.update(now: now, angle: reading, agentsRunning: counts.running)
         apply(events)
         syncFromEngine(now: now)
+    }
+
+    /// The engine gets every raw sample; the UI gets a steadied, whole-degree angle. The sensor
+    /// flickers ±1° at 30 Hz, and every published change re-renders (and re-animates) views that
+    /// show the angle — on a full-screen glass overlay that's a constant redraw for hours.
+    private var lastAnglePublish: Double = 0
+    private func publishAngle(_ reading: Double?, now: Double) {
+        guard let reading else {
+            if angle != nil { angle = nil }
+            return
+        }
+        guard let current = angle else { angle = reading.rounded(); lastAnglePublish = now; return }
+        let delta = abs(reading - current)
+        // Real movement shows immediately; jitter of a degree or so settles at most every 2 s.
+        if delta >= 2 || (delta >= 1 && now - lastAnglePublish >= 2) {
+            angle = reading.rounded()
+            lastAnglePublish = now
+        }
     }
 
     private func syncFromEngine(now: Double) {

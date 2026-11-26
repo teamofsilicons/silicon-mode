@@ -35,7 +35,7 @@ struct OrbitFaceView: View {
             let u = FaceA.unit(for: size) * (ctx.isPreview ? 1.45 : 1)
             let planetR = 19 * u
             let maxScale: CGFloat = 1.4
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : 1 / 60)) { tl in
+            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : ctx.frameInterval)) { tl in
                 let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
                 let wall = FaceA.wallDate(now: tl.date, fixed: fixedTime)
                 let config = OrbitRenderer.Config(

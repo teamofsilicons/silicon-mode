@@ -58,7 +58,7 @@ struct DeskFaceView: View {
         ZStack {
             DeskSkyLayer(preview: ctx.isPreview)
             DeskRoomLayer(theme: plan.theme, showClock: plan.showClock).equatable()
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : 1.0 / 60)) { tl in
+            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : ctx.frameInterval)) { tl in
                 let t = FaceBClock.seconds(tl.date)
                 let wall = FaceBClock.wallDate(tl.date)
                 let _ = sim.advance(to: t, plan: plan, reduceMotion: reduceMotion)

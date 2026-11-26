@@ -174,6 +174,14 @@ final class OverlayController {
         focus(display: stage.focusedDisplay)
         startInteractionMonitors()
 
+        // Once the entrance wave has passed, the mode windows are fully covered by the opaque
+        // base: mark them opaque so the window server stops compositing the desktop beneath
+        // every frame (a large, constant saving for a screen that stays up for hours).
+        opaqueWork?.cancel()
+        let opaque = DispatchWorkItem { [weak self] in self?.setModePanelsOpaque(true) }
+        opaqueWork = opaque
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.enterDuration + 0.6, execute: opaque)
+
         hapticWork?.cancel()
         let haptic = DispatchWorkItem {
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
@@ -187,6 +195,8 @@ final class OverlayController {
         isModeShown = false
         hapticWork?.cancel()
         stopInteractionMonitors()
+        opaqueWork?.cancel()
+        setModePanelsOpaque(false)
         stage.exitStartedAt = Date()
         stage.pointerIdle = false
 
@@ -195,6 +205,15 @@ final class OverlayController {
         modeTeardown = work
         let delay = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.35 : Self.exitDuration + 0.05
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private var opaqueWork: DispatchWorkItem?
+
+    private func setModePanelsOpaque(_ opaque: Bool) {
+        for p in modePanels.values {
+            p.isOpaque = opaque
+            p.backgroundColor = opaque ? NSColor(Theme.Night.background) : .clear
+        }
     }
 
     private func tearDownMode() {
@@ -237,6 +256,10 @@ final class OverlayController {
             p.styleMask.remove(.nonactivatingPanel)
             p.acceptsKey = id == (stage.focusedDisplay == 0 ? primary : stage.focusedDisplay)
             p.host(SiliconModeRootView(stage: stage, displayID: id).environment(model))
+            if opaqueWork == nil || opaqueWork?.isCancelled == false, stage.enterStartedAt.map({ Date().timeIntervalSince($0) > Self.enterDuration + 0.6 }) == true {
+                p.isOpaque = true
+                p.backgroundColor = NSColor(Theme.Night.background)
+            }
             p.orderFrontRegardless()
             modePanels[id] = p
         }

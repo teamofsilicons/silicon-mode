@@ -33,7 +33,7 @@ struct ChompFaceView: View {
     var body: some View {
         GeometryReader { geo in
             let plan = ChompPlan(ctx: ctx, size: geo.size, reduceMotion: reduceMotion)
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : 1.0 / 60)) { tl in
+            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : ctx.frameInterval)) { tl in
                 let t = FaceBClock.seconds(tl.date)
                 let wall = FaceBClock.wallDate(tl.date)
                 let _ = sim.advance(to: t, plan: plan)

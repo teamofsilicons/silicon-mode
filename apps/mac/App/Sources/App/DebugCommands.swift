@@ -18,6 +18,14 @@ enum DebugCommands {
 
     static func handleLaunchArguments() {
         let args = CommandLine.arguments
+        // The control channel can change the PIN and drive the lock, so it only exists in Debug
+        // builds, or in a Release build explicitly launched with --debug-control (for QA).
+        #if DEBUG
+        let controlEnabled = true
+        #else
+        let controlEnabled = args.contains("--debug-control")
+        #endif
+        guard controlEnabled else { return }
         if let i = args.firstIndex(of: "--simulate-angle"), i + 1 < args.count, let a = Double(args[i + 1]) {
             AppModel.shared.simulatedAngle = a
         }

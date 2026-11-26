@@ -43,7 +43,7 @@ struct BounceFaceView: View {
                 if ctx.showClock && !ctx.isPreview {
                     BounceClockWatermark(start: start, fixedTime: fixedTime, unit: u)
                 }
-                TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : 1 / 60)) { tl in
+                TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : ctx.frameInterval)) { tl in
                     let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
                     let symbolSpecs = world.sync(specs, t: t)
                     let config = BounceWorld.Config(

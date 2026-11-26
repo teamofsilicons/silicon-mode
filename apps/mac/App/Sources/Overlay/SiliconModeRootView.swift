@@ -176,7 +176,8 @@ private struct SiliconModeFaceLayer: View {
             options: descriptor.resolvedOptions(s.faceOptions[descriptor.id]),
             showClock: s.showClock,
             isPreview: false,
-            isPanicking: preview?.panicking ?? model.isPanicking))
+            isPanicking: preview?.panicking ?? model.isPanicking,
+            frameInterval: 1.0 / max(15, s.faceFrameRate)))
         .id(descriptor.id)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

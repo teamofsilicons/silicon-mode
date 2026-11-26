@@ -26,6 +26,8 @@ public struct ModeSettings: Codable, Equatable, Sendable {
     public var faceOptions: [String: [String: FaceOptionValue]] = [:]
     /// Show a clock on faces that support it.
     public var showClock = true
+    /// Face animation frame rate (30 saves energy on a laptop running for hours; 60 is smoother).
+    public var faceFrameRate: Double = 30
 
     // MARK: HUD
     public var showAgentCounts = true
@@ -81,6 +83,7 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         v("faceID", \.faceID)
         v("faceOptions", \.faceOptions)
         v("showClock", \.showClock)
+        v("faceFrameRate", \.faceFrameRate)
         v("showAgentCounts", \.showAgentCounts)
         v("showAgentList", \.showAgentList)
         v("showTailLogs", \.showTailLogs)
@@ -112,6 +115,7 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         s.graceSeconds = min(max(s.graceSeconds, 0), 3600)
         s.panicRatio = min(max(s.panicRatio, 0.3), 0.99)
         s.tailLogCount = min(max(s.tailLogCount, 1), 50)
+        s.faceFrameRate = s.faceFrameRate >= 45 ? 60 : 30
         s.panicVolume = min(max(s.panicVolume, 0), 1)
         s.menuBarHoldSeconds = min(max(s.menuBarHoldSeconds, 0), 600)
         return s
