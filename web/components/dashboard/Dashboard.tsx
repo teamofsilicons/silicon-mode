@@ -133,7 +133,7 @@ function Signed({ source, user, onSignedOut }: { source: Source; user: CellUser 
 
   const right = source === "demo" ? (
     <>
-      <span className={styles.demoPill}><FlaskConical size={12} strokeWidth={2.2} aria-hidden="true" /> Sample data</span>
+      <span className={styles.demoPill}><FlaskConical size={12} strokeWidth={2.2} aria-hidden="true" /> <span className={styles.demoLabel}>Sample data</span></span>
       <ThemeToggle />
       <ButtonLink href="/app" size="sm" variant="primary" onClick={(e) => { e.preventDefault(); location.href = "/app"; }}>Sign in</ButtonLink>
     </>

@@ -14,6 +14,9 @@ const config: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   turbopack: { root: dirname(fileURLToPath(import.meta.url)) },
+  // Next 16.4.6 panics ("ModuleGraph::from_graphs_inner was canceled") on the second build that
+  // reuses Turbopack's persistent build cache in .next/cache. A static export builds in seconds anyway.
+  experimental: { turbopackFileSystemCacheForBuild: false },
 };
 
 export default config;

@@ -13,11 +13,11 @@
 <!-- Sign-in hand-off to any native Silicon Mode app. Static on purpose: no analytics, no third-party code (tokens pass through this page). -->
 <main>
 <img class="mark" src="/icon.svg" alt="" width="56" height="56">
-<h1>Opening Silicon Mode</h1>
+<h1 id="title">Opening Silicon Mode</h1>
 <p id="status">You&#8217;re signed in. Taking you back to the app&#8230;</p>
 <div class="spinner" aria-hidden="true"></div>
 <a id="open" class="open" href="ai.tos.mode://auth/callback">Open Silicon Mode</a>
-<p class="hint">Nothing happened? Tap the button, or open Silicon Mode yourself.</p>
+<p id="hint" class="hint">Nothing happened? Tap the button, or open Silicon Mode yourself.</p>
 </main>
 <script src="/auth/bounce.js"></script>
 </body>

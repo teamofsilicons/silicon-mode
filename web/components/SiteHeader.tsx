@@ -22,7 +22,7 @@ export function SiteHeader({ links = true }: { links?: boolean }) {
         )}
         <div className={styles.actions}>
           <ThemeToggle />
-          <ButtonLink href="/app" variant="ghost" size="sm" as={Link}>
+          <ButtonLink href="/app" variant="ghost" size="sm" as={Link} className={styles.signIn}>
             Sign in
           </ButtonLink>
           <ButtonLink href="/download" variant="primary" size="sm" as={Link} className={styles.download}>

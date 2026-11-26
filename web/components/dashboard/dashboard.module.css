@@ -25,6 +25,8 @@
 .brand {
   display: inline-flex;
   align-items: center;
+  flex: none;
+  white-space: nowrap;
   gap: 10px;
   font: var(--label);
   font-size: 15px;
@@ -40,6 +42,7 @@
 }
 
 .demoPill {
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -71,6 +74,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
+  corner-shape: round;
   border: 2px solid var(--border);
   border-top-color: var(--foreground);
   animation: spin 0.8s linear infinite;
@@ -175,6 +179,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--border-strong);
 }
 
@@ -266,7 +271,7 @@
 
 @keyframes bloomIn {
   from { clip-path: circle(0% at 70% 0%); opacity: 0.4; }
-  to { clip-path: circle(150% at 70% 0%); opacity: 1; }
+  to { clip-path: circle(150% at 70% 0%); opacity: var(--face-opacity, 1); }
 }
 
 .statusCanvas {
@@ -654,6 +659,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--surface-muted);
   color: var(--text-secondary);
 }
@@ -682,6 +688,7 @@
   height: 26px;
   margin-left: auto;
   border-radius: 50%;
+  corner-shape: round;
   color: var(--text-muted);
   cursor: pointer;
 }
@@ -761,6 +768,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--state-idle);
 }
 
@@ -874,6 +882,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--border-strong);
 }
 
@@ -1236,6 +1245,15 @@
   }
 }
 
+@media (max-width: 480px) {
+  .demoLabel {
+    display: none;
+  }
+  .brand span {
+    display: none;
+  }
+}
+
 @media (max-width: 560px) {
   .counts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1248,7 +1266,8 @@
   }
   .statusFace {
     inset: 0;
-    opacity: 0.45;
+    --face-opacity: 0.32;
+    opacity: 0.32;
     -webkit-mask-image: none;
     mask-image: none;
   }

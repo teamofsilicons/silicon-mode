@@ -8,3 +8,5 @@ next-env.d.ts
 app/fonts/AlloVariable.woff2
 public/fonts/AlloVariable.woff2
 public/fonts/OFL.txt
+.vercel
+.env*

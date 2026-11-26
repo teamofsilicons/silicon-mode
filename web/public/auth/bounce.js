@@ -14,8 +14,13 @@
   var failed = !frag && !/[?&]error=/.test(query);
   if (open) open.setAttribute("href", failed ? "/" : url);
   if (failed) {
-    if (status) status.textContent = "This link has already been used. Start signing in again from the app.";
+    var title = document.getElementById("title");
+    var hint = document.getElementById("hint");
+    if (title) title.textContent = "Nothing to open";
+    if (status) status.textContent = "This sign-in link has already been used. Start signing in again from the app.";
+    if (hint) hint.textContent = "";
     if (open) open.textContent = "Back to Silicon Mode";
+    document.documentElement.setAttribute("data-waited", "");
     return;
   }
   if (/[?&]error=/.test(query) && status) status.textContent = "Sign-in was cancelled. Returning to the app…";

@@ -31,6 +31,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
+  corner-shape: round;
   background: linear-gradient(120deg, var(--bloom-from), var(--bloom-to));
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--bloom-from) 30%, transparent);
 }
@@ -137,6 +138,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--accent);
 }
 

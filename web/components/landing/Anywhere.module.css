@@ -27,6 +27,7 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
+  corner-shape: round;
   background: var(--border-strong);
 }
 
@@ -137,6 +138,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  corner-shape: round;
   background: #7fc79a;
   box-shadow: 0 0 0 3px rgb(127 199 154 / 0.2);
 }
