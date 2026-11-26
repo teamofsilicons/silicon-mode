@@ -61,6 +61,10 @@ enum FaceSnapshotsB {
         out.append(item("desk-preview", size: CGSize(width: 320, height: 200), time: 3) { face(desk, FaceBSamples.sample, preview: true) })
         out.append(item("desk-preview-empty", size: CGSize(width: 320, height: 200), time: 3) { face(desk, [], preview: true) })
         out.append(item("desk-external-t9", size: CGSize(width: 1920, height: 1080), time: 9) { face(desk, FaceBSamples.busy) })
+
+        // Silicon avatars (monogram + TOS badge in snapshots).
+        out.append(item("chomp-silicon-t3", time: 3) { face(ChompFace.descriptor, FaceASamples.silicons) })
+        out.append(item("desk-silicon-t9", time: 9) { face(desk, FaceASamples.silicons) })
         return out
     }
 

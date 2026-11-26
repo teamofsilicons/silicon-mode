@@ -28,31 +28,145 @@ enum ChompFace {
 struct ChompFaceView: View {
     let ctx: FaceContext
     @State private var sim = ChompSim()
+    @State private var clock = FacePauseClock()
+    /// Calm scenes (every lane stopped and settled) animate at `ctx.calmFrameInterval`.
+    @State private var calm = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
             let plan = ChompPlan(ctx: ctx, size: geo.size, reduceMotion: reduceMotion)
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1.0 / 30 : ctx.frameInterval)) { tl in
-                let t = FaceBClock.seconds(tl.date)
+            TimelineView(.animation(minimumInterval: ctx.animationInterval(calm: calm), paused: ctx.paused)) { tl in
+                let t = FaceBClock.seconds(clock.date(tl.date, paused: ctx.paused))
                 let wall = FaceBClock.wallDate(tl.date)
                 let _ = sim.advance(to: t, plan: plan)
-                Canvas { g, size in
-                    ChompPainter(sim: sim, plan: plan, t: t, wall: wall).draw(&g, size: size)
+                let labels = sim.labelPellets(plan: plan)
+                let statuses = plan.isPreview ? [] : sim.headerSessions.compactMap(ChompStatusSpec.init)
+                // Opaque (the painter fills the night base first); RenderBox runs off the main thread.
+                Canvas(opaque: true, rendersAsynchronously: true) { g, size in
+                    ChompPainter(sim: sim, plan: plan, t: t, wall: wall, labels: labels).draw(&g, size: size)
                 } symbols: {
                     ForEach(sim.headerSessions, id: \.id) { s in
                         ChompLaneHeader(session: s, u: plan.u, width: plan.headerW, compact: plan.compactHeader)
                             .equatable()
                             .tag(s.id)
                     }
+                    // Text is laid out here once and only re-laid when it changes; the painter
+                    // draws these symbols with per-frame opacity and position.
+                    if plan.showClock {
+                        ChompClockText(minute: FaceA.minute(wall), cu: plan.cu, preview: plan.isPreview, date: false)
+                            .equatable().tag(ChompSymbol.clockTime)
+                        if !plan.isPreview {
+                            ChompClockText(minute: FaceA.minute(wall), cu: plan.cu, preview: false, date: true)
+                                .equatable().tag(ChompSymbol.clockDate)
+                        }
+                    }
+                    if plan.hidden > 0 {
+                        ChompText(text: "+\(plan.hidden) more agent\(plan.hidden == 1 ? "" : "s")", size: 13 * plan.cu,
+                                  weight: .medium, ink: .muted)
+                            .equatable().tag(ChompSymbol.more)
+                    }
+                    if plan.ambient && !plan.isPreview {
+                        ChompText(text: "No agents running", size: 17 * plan.u, weight: .semibold, ink: .secondary)
+                            .equatable().tag(ChompSymbol.ambientTitle)
+                        ChompText(text: "Chomp is snacking on spare cycles until they show up.", size: 13 * plan.u,
+                                  weight: .regular, ink: .muted)
+                            .equatable().tag(ChompSymbol.ambientSubtitle)
+                    }
+                    // ForEach ids must differ from the headers' (session ids) inside one Canvas.
+                    ForEach(labels.sorted { $0.key < $1.key }.map { (ChompSymbol.pellet($0.key), $0.value) }, id: \.0) { tag, pellet in
+                        ChompText(text: "\(pellet.kind.glyph)  \(pellet.text)", size: 13 * plan.u, weight: .medium,
+                                  ink: .event(pellet.kind))
+                            .equatable().tag(tag)
+                    }
+                    ForEach(statuses, id: \.symbolID) { st in
+                        ChompText(text: st.title, size: 15 * plan.u, weight: .semibold, ink: .state(st.state))
+                            .equatable().tag(ChompSymbol.statusTitle(st.id))
+                        if let detail = st.detail {
+                            ChompText(text: detail, size: 13 * plan.u, weight: .regular, ink: .detail)
+                                .equatable().tag(ChompSymbol.statusDetail(st.id))
+                        }
+                    }
+                    if plan.shown.contains(where: { $0.state == .needsYou }) {
+                        ChompText(text: "?", size: 0.4 * plan.laneH * 0.66, weight: .black, ink: .questionInk)
+                            .equatable().tag(ChompSymbol.question)
+                    }
                 }
+                .onChange(of: sim.calm) { _, quiet in calm = quiet }
             }
         }
-        .background(Theme.Night.background)
     }
 }
 
-/// Provider mark + title + state, rendered once per lane as a Canvas symbol.
+/// Symbol tags for the Chomp canvas.
+enum ChompSymbol {
+    static let clockTime = "chomp.clock.time"
+    static let clockDate = "chomp.clock.date"
+    static let more = "chomp.more"
+    static let ambientTitle = "chomp.ambient.title"
+    static let ambientSubtitle = "chomp.ambient.subtitle"
+    static let question = "chomp.question"
+    static func pellet(_ lane: String) -> String { "chomp.pellet:" + lane }
+    static func statusTitle(_ lane: String) -> String { "chomp.status.title:" + lane }
+    static func statusDetail(_ lane: String) -> String { "chomp.status.detail:" + lane }
+}
+
+/// One line of Chomp text as a Canvas symbol (laid out once, drawn every frame).
+struct ChompText: View, Equatable {
+    enum Ink: Equatable {
+        case muted, secondary, detail, questionInk
+        case event(FBEventKind)
+        case state(AgentState)
+
+        var color: Color {
+            switch self {
+            case .muted: Theme.Night.muted
+            case .secondary: Theme.Night.secondary
+            case .detail: Theme.Night.secondary.opacity(0.85)
+            case .questionInk: Color(hex: "5A3A0C")
+            case .event(let k): k.color
+            case .state(let s): ChompPainter.statusColor(s)
+            }
+        }
+    }
+
+    let text: String
+    let size: CGFloat
+    let weight: Theme.Weight
+    let ink: Ink
+
+    var body: some View {
+        Text(text)
+            .font(Theme.allo(size, weight))
+            .foregroundStyle(ink.color)
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
+/// The top-right clock (hh:mm) or its date line, keyed on the minute.
+struct ChompClockText: View, Equatable {
+    let minute: Date
+    let cu: CGFloat
+    let preview: Bool
+    let date: Bool
+
+    var body: some View {
+        if date {
+            Text(minute, format: .dateTime.weekday(.wide).month(.abbreviated).day())
+                .font(Theme.allo(14 * cu, .medium)).foregroundStyle(Theme.Night.muted)
+                .fixedSize()
+        } else {
+            Text(minute, format: .dateTime.hour().minute())
+                .font(Theme.allo((preview ? 30 : 46) * cu, .light).monospacedDigit())
+                .tracking(Theme.tracking(46 * cu, display: true))
+                .foregroundStyle(Theme.Night.foreground.opacity(0.92))
+                .fixedSize()
+        }
+    }
+}
+
+/// Provider mark (or a Silicon's avatar) + title + state, rendered once per lane as a Canvas symbol.
 private struct ChompLaneHeader: View, Equatable {
     let session: AgentSession
     let u: CGFloat
@@ -61,7 +175,7 @@ private struct ChompLaneHeader: View, Equatable {
 
     var body: some View {
         HStack(spacing: 12 * u) {
-            ProviderMark(provider: session.provider, size: 34 * u)
+            FaceAgentMark(session, size: 34 * u)
             if !compact {
                 VStack(alignment: .leading, spacing: 5 * u) {
                     Text(session.title)
@@ -85,7 +199,7 @@ private struct ChompLaneHeader: View, Equatable {
     }
 
     private var subtitle: String {
-        let where_ = session.projectName ?? ProviderCatalog.info(for: session.provider).name
+        let where_ = FaceA.whereabouts(session) ?? ProviderCatalog.info(for: session.provider).name
         return "\(session.state.label) · \(where_)"
     }
 }
@@ -200,9 +314,36 @@ struct ChompLaneGeo {
     }
 }
 
+/// What a stopped lane says next to its prop ("Finished" + the last event, the question…).
+struct ChompStatusSpec: Identifiable, Equatable {
+    let id: String
+    let state: AgentState
+    let title: String
+    let detail: String?
+
+    /// A Canvas-unique identity (the lane headers already use the session ids).
+    var symbolID: String { "chomp.status:" + id }
+
+    init?(_ s: AgentSession) {
+        guard s.state != .working else { return nil }
+        let last = s.recentEvents.last.map { FBEventKind.shortText($0, max: 80) }
+        let (title, detail): (String, String?) = switch s.state {
+        case .needsYou: (s.pendingQuestions.first?.title ?? "Needs you", s.pendingQuestions.first?.detail ?? last)
+        case .finished: ("Finished", last)
+        case .idle: ("Resting", last)
+        case .error: ("Hit an error", last)
+        case .working: ("", nil)
+        }
+        id = s.id
+        state = s.state
+        self.title = FB.clip(title, 48)
+        self.detail = detail.flatMap { $0.isEmpty ? nil : FB.clip($0, 80) }
+    }
+}
+
 // MARK: - Simulation
 
-struct ChompPellet {
+struct ChompPellet: Equatable {
     let id: String
     let kind: FBEventKind
     let text: String
@@ -259,6 +400,10 @@ final class ChompSim {
     private(set) var order: [String] = []
     private(set) var now: Double = 0
     private var time: Double?
+    private var calmGate = FaceCalmGate()
+
+    /// True while every lane is stopped and settled (no conveyor, bites, turns, drops or confetti).
+    private(set) var calm = false
 
     /// Sessions that need a header symbol (shown + fading out).
     var headerSessions: [AgentSession] { order.compactMap { lanes[$0]?.session } }
@@ -296,6 +441,42 @@ final class ChompSim {
         }
         now = t
         time = t
+        calmGate.update(quiet: isQuiet(plan), t: t)
+        calm = calmGate.calm
+    }
+
+    private func isQuiet(_ plan: ChompPlan) -> Bool {
+        guard !plan.isPanicking, !plan.isPreview, !lanes.isEmpty else { return false }
+        for lane in lanes.values {
+            let r = lane.rect, g = lane.target
+            let settled = abs(r.minX - g.minX) < 0.5 && abs(r.minY - g.minY) < 0.5
+                && abs(r.width - g.width) < 0.5 && abs(r.height - g.height) < 0.5
+            let confettiDone = lane.confettiAt.map { now - $0 > 3.1 } ?? true
+            guard lane.session != nil, lane.present, lane.alpha > 0.995, lane.rate == 0, settled, lane.bursts.isEmpty,
+                  now - lane.turnAt > 0.4, now - lane.stateSince > 1.0, confettiDone else { return false }
+        }
+        return true
+    }
+
+    /// The pellet each lane labels: the newest one on its visible conveyor (as the painter picks it).
+    func labelPellets(plan: ChompPlan) -> [String: ChompPellet] {
+        guard plan.labels else { return [:] }
+        var out: [String: ChompPellet] = [:]
+        for id in order {
+            guard let lane = lanes[id], lane.session != nil else { continue }
+            let geo = ChompLaneGeo(rect: lane.rect, headerW: plan.ambient ? 0 : plan.headerW)
+            let u = geo.u
+            let sp = ChompSim.spacing
+            let firstK = Int(floor(lane.scroll / sp)) + 1
+            let lastK = Int(ceil((lane.scroll + Double((geo.rightX - geo.mouthX) / u) + 20) / sp))
+            guard lastK >= firstK else { continue }
+            for k in stride(from: lastK, through: firstK, by: -1) {
+                guard let p = lane.assigned[k] else { continue }
+                let x = geo.mouthX + CGFloat(Double(k) * sp - lane.scroll) * u
+                if FB.smooth(Double((geo.rightX + 8 * u - x) / (90 * u))) > 0.001 { out[id] = p; break }
+            }
+        }
+        return out
     }
 
     private func sync(_ plan: ChompPlan, first: Bool) {
@@ -432,6 +613,28 @@ struct ChompPainter {
     let plan: ChompPlan
     let t: Double
     let wall: Date
+    /// The pellet whose label symbol each lane has (see `ChompSim.labelPellets`).
+    var labels: [String: ChompPellet] = [:]
+
+    nonisolated static func statusColor(_ s: AgentState) -> Color {
+        switch s {
+        case .needsYou: Theme.Night.warning
+        case .finished: Theme.Night.success
+        case .idle: Theme.Night.muted
+        case .error: Theme.Night.danger
+        case .working: .clear
+        }
+    }
+
+    /// Draws a symbol laid out at the plan's lane scale, scaled to a lane that is still easing in.
+    private func drawScaled(_ g: inout GraphicsContext, _ sym: GraphicsContext.ResolvedSymbol, at p: CGPoint,
+                            anchor: UnitPoint, scale k: CGFloat) {
+        if abs(k - 1) < 0.001 { g.draw(sym, at: p, anchor: anchor); return }
+        var c = g
+        c.translateBy(x: p.x, y: p.y)
+        c.scaleBy(x: k, y: k)
+        c.draw(sym, at: .zero, anchor: anchor)
+    }
 
     func draw(_ g: inout GraphicsContext, size: CGSize) {
         let W = size.width, H = size.height
@@ -450,10 +653,9 @@ struct ChompPainter {
             drawLane(&lg, lane)
         }
         if plan.ambient, let lane = sim.lanes[ChompFace.ambientID] { drawAmbientCaption(&w, lane) }
-        if plan.hidden > 0, let last = plan.shown.last, let r = plan.targets[last.id] {
-            w.draw(Text("+\(plan.hidden) more agent\(plan.hidden == 1 ? "" : "s")")
-                    .font(Theme.allo(13 * plan.cu, .medium)).foregroundStyle(Theme.Night.muted),
-                   at: CGPoint(x: r.maxX - 4 * plan.cu, y: r.maxY + 14 * plan.cu), anchor: .topTrailing)
+        if plan.hidden > 0, let last = plan.shown.last, let r = plan.targets[last.id],
+           let more = w.resolveSymbol(id: ChompSymbol.more) {
+            w.draw(more, at: CGPoint(x: r.maxX - 4 * plan.cu, y: r.maxY + 14 * plan.cu), anchor: .topTrailing)
         }
         if plan.showClock { drawClock(&w, W: W, H: H) }
     }
@@ -482,30 +684,24 @@ struct ChompPainter {
     private func drawClock(_ g: inout GraphicsContext, W: CGFloat, H: CGFloat) {
         let cu = plan.cu
         let x = W - plan.marginX, y = H * (plan.isPreview ? 0.04 : 0.06)
-        let time = Text(wall, format: .dateTime.hour().minute())
-            .font(Theme.allo((plan.isPreview ? 30 : 46) * cu, .light).monospacedDigit())
-            .tracking(Theme.tracking(46 * cu, display: true))
-            .foregroundStyle(Theme.Night.foreground.opacity(0.92))
-        let resolved = g.resolve(time)
-        let sz = resolved.measure(in: CGSize(width: W, height: H))
-        g.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topTrailing)
-        if !plan.isPreview {
-            let date = Text(wall, format: .dateTime.weekday(.wide).month(.abbreviated).day())
-                .font(Theme.allo(14 * cu, .medium)).foregroundStyle(Theme.Night.muted)
-            g.draw(date, at: CGPoint(x: x, y: y + sz.height + 2 * cu), anchor: .topTrailing)
+        guard let time = g.resolveSymbol(id: ChompSymbol.clockTime) else { return }
+        g.draw(time, at: CGPoint(x: x, y: y), anchor: .topTrailing)
+        if !plan.isPreview, let date = g.resolveSymbol(id: ChompSymbol.clockDate) {
+            g.draw(date, at: CGPoint(x: x, y: y + time.size.height + 2 * cu), anchor: .topTrailing)
         }
     }
 
     private func drawAmbientCaption(_ g: inout GraphicsContext, _ lane: ChompLane) {
+        if plan.isPreview { return }
         let r = lane.rect
         let u = r.height / 120
-        let title = Text("No agents running")
-            .font(Theme.allo(17 * u, .semibold)).foregroundStyle(Theme.Night.secondary)
-        let sub = Text("Chomp is snacking on spare cycles until they show up.")
-            .font(Theme.allo(13 * u, .regular)).foregroundStyle(Theme.Night.muted)
-        if plan.isPreview { return }
-        g.draw(title, at: CGPoint(x: r.midX, y: r.maxY + 26 * u), anchor: .top)
-        g.draw(sub, at: CGPoint(x: r.midX, y: r.maxY + 52 * u), anchor: .top)
+        let k = plan.u > 0 ? u / plan.u : 1
+        if let title = g.resolveSymbol(id: ChompSymbol.ambientTitle) {
+            drawScaled(&g, title, at: CGPoint(x: r.midX, y: r.maxY + 26 * u), anchor: .top, scale: k)
+        }
+        if let sub = g.resolveSymbol(id: ChompSymbol.ambientSubtitle) {
+            drawScaled(&g, sub, at: CGPoint(x: r.midX, y: r.maxY + 52 * u), anchor: .top, scale: k)
+        }
     }
 
     // MARK: Lane
@@ -540,7 +736,9 @@ struct ChompPainter {
             if s.state == .working || s.state == .needsYou {
                 let period = s.state == .needsYou ? 1.4 : 2.5
                 let p = (t / period + Double(lane.seed % 100) / 100).truncatingRemainder(dividingBy: 1)
-                let rr = 17 * u * (1 + 0.55 * p)
+                // A Silicon's rounded-square avatar reaches further out than a round mark.
+                let base = 17 * u * (s.identity?.isSilicon == true ? 1.18 : 1)
+                let rr = base * (1 + 0.55 * p)
                 let a = (p < 0.2 ? p / 0.2 : (1 - p) / 0.8) * 0.6
                 g.stroke(Path(ellipseIn: CGRect(x: markC.x - rr, y: markC.y - rr, width: rr * 2, height: rr * 2)),
                          with: .color(Theme.stateColor(s.state).opacity(a)), lineWidth: 1.2 * u)
@@ -701,14 +899,22 @@ struct ChompPainter {
             let fadeOut = FB.smooth(Double((n.x - geo.mouthX - 40 * u) / (140 * u)))
             let a = fadeIn * fadeOut
             if a > 0.01 {
-                let text = Text("\(n.p.kind.glyph)  \(n.p.text)")
-                    .font(Theme.allo(13 * u, .medium))
-                    .foregroundStyle(n.p.kind.color.opacity(a))
-                let res = g.resolve(text)
-                let sz = res.measure(in: CGSize(width: 900 * u, height: 60 * u))
                 let ly = n.y - 8.5 * u - 19 * u
-                let lx = min(n.x - 9 * u, geo.rightX - sz.width)
-                g.draw(res, at: CGPoint(x: lx, y: ly), anchor: .bottomLeading)
+                if labels[lane.id] == n.p, let sym = g.resolveSymbol(id: ChompSymbol.pellet(lane.id)) {
+                    let k = plan.u > 0 ? u / plan.u : 1
+                    let lx = min(n.x - 9 * u, geo.rightX - sym.size.width * k)
+                    var lc = g
+                    lc.opacity = a
+                    drawScaled(&lc, sym, at: CGPoint(x: lx, y: ly), anchor: .bottomLeading, scale: k)
+                } else {
+                    let text = Text("\(n.p.kind.glyph)  \(n.p.text)")
+                        .font(Theme.allo(13 * u, .medium))
+                        .foregroundStyle(n.p.kind.color.opacity(a))
+                    let res = g.resolve(text)
+                    let sz = res.measure(in: CGSize(width: 900 * u, height: 60 * u))
+                    let lx = min(n.x - 9 * u, geo.rightX - sz.width)
+                    g.draw(res, at: CGPoint(x: lx, y: ly), anchor: .bottomLeading)
+                }
                 var lead = Path()
                 lead.move(to: CGPoint(x: n.x, y: ly + 3 * u))
                 lead.addLine(to: CGPoint(x: n.x, y: n.y - 8.5 * u - 4 * u))
@@ -784,8 +990,12 @@ struct ChompPainter {
             bg.fill(Path(ellipseIn: CGRect(x: rc.x - rr, y: rc.y - rr, width: rr * 2, height: rr * 2)),
                     with: .color(Color(hex: "B07D25").opacity(0.75)))
         }
-        let q = Text("?").font(Theme.allo(S * 0.66, .black)).foregroundStyle(Color(hex: "5A3A0C"))
-        bg.draw(q, at: CGPoint(x: cx, y: cy + S * 0.02), anchor: .center)
+        if let q = bg.resolveSymbol(id: ChompSymbol.question) {
+            drawScaled(&bg, q, at: CGPoint(x: cx, y: cy + S * 0.02), anchor: .center, scale: plan.laneH > 0 ? geo.laneH / plan.laneH : 1)
+        } else {
+            let q = Text("?").font(Theme.allo(S * 0.66, .black)).foregroundStyle(Color(hex: "5A3A0C"))
+            bg.draw(q, at: CGPoint(x: cx, y: cy + S * 0.02), anchor: .center)
+        }
     }
 
     private func drawFlag(_ g: inout GraphicsContext, _ geo: ChompLaneGeo, since: Double) {
@@ -825,11 +1035,14 @@ struct ChompPainter {
     struct StatusLayout {
         let x: CGFloat
         let width: CGFloat
-        let title: GraphicsContext.ResolvedText
-        let detail: GraphicsContext.ResolvedText?
+        /// Symbol scale (the lane may still be easing to its size).
+        let scale: CGFloat
+        let maxWidth: CGFloat
+        let title: GraphicsContext.ResolvedSymbol
+        let detail: GraphicsContext.ResolvedSymbol?
     }
 
-    /// Where a stopped lane's status text goes (right of its prop), resolved and measured.
+    /// Where a stopped lane's status text goes (right of its prop), with its laid-out symbols.
     private func statusLayout(_ g: inout GraphicsContext, _ s: AgentSession, _ geo: ChompLaneGeo, since: Double) -> StatusLayout? {
         guard s.state != .working, !plan.isPreview else { return nil }
         let u = geo.u
@@ -839,37 +1052,24 @@ struct ChompPainter {
         default: geo.mouthX + 0.42 * geo.laneH
         }
         let maxW = geo.rightX - x
-        guard maxW > 60 * u else { return nil }
-        let last = s.recentEvents.last.map { FBEventKind.shortText($0, max: 80) }
-        let (title, detail, color): (String, String?, Color) = switch s.state {
-        case .needsYou: (s.pendingQuestions.first?.title ?? "Needs you", s.pendingQuestions.first?.detail ?? last, Theme.Night.warning)
-        case .finished: ("Finished", last, Theme.Night.success)
-        case .idle: ("Resting", last, Theme.Night.muted)
-        case .error: ("Hit an error", last, Theme.Night.danger)
-        case .working: ("", nil, .clear)
-        }
-        let a = FB.smooth((since - 0.25) / 0.35)
-        let t1 = g.resolve(Text(FB.clip(title, 48)).font(Theme.allo(15 * u, .semibold)).foregroundStyle(color.opacity(a)))
-        let box = CGSize(width: maxW, height: 40 * u)
-        let w1 = t1.measure(in: box).width
-        var t2: GraphicsContext.ResolvedText?
-        var w2: CGFloat = 0
-        if let detail, !detail.isEmpty {
-            let r = g.resolve(Text(FB.clip(detail, 80)).font(Theme.allo(13 * u, .regular))
-                .foregroundStyle(Theme.Night.secondary.opacity(0.85 * a)))
-            w2 = r.measure(in: box).width
-            t2 = r
-        }
-        return StatusLayout(x: x, width: min(max(w1, w2), maxW), title: t1, detail: t2)
+        guard maxW > 60 * u, let title = g.resolveSymbol(id: ChompSymbol.statusTitle(s.id)) else { return nil }
+        let detail = g.resolveSymbol(id: ChompSymbol.statusDetail(s.id))
+        let k = plan.u > 0 ? u / plan.u : 1
+        let w = max(title.size.width, detail?.size.width ?? 0) * k
+        return StatusLayout(x: x, width: min(w, maxW), scale: k, maxWidth: maxW, title: title, detail: detail)
     }
 
     private func drawStatus(_ g: inout GraphicsContext, _ st: StatusLayout, _ geo: ChompLaneGeo, since: Double) {
         let u = geo.u
         let slide = CGFloat(1 - FB.smooth((since - 0.25) / 0.35)) * 14 * u
         let y = geo.mouthY + 2 * u
-        g.draw(st.title, in: CGRect(x: st.x + slide, y: y - 22 * u, width: st.width + 2, height: 22 * u))
+        var c = g
+        c.opacity = FB.smooth((since - 0.25) / 0.35)
+        // Long lines are cut at the conveyor's end (the old text rect did the same).
+        c.clip(to: Path(CGRect(x: st.x + slide, y: y - 26 * u, width: st.maxWidth + 2, height: 52 * u)))
+        drawScaled(&c, st.title, at: CGPoint(x: st.x + slide, y: y - 22 * u), anchor: .topLeading, scale: st.scale)
         if let d = st.detail {
-            g.draw(d, in: CGRect(x: st.x + slide, y: y + 1 * u, width: st.width + 2, height: 20 * u))
+            drawScaled(&c, d, at: CGPoint(x: st.x + slide, y: y + 1 * u), anchor: .topLeading, scale: st.scale)
         }
     }
 }

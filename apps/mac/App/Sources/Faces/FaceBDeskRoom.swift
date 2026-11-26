@@ -25,6 +25,14 @@ struct DeskSpace {
         g.scaleBy(x: s, y: s)
     }
 
+    /// An illustration-space rect in view coordinates, grown to whole points (pixel-aligned at any
+    /// integer scale), so a canvas framed to it lines up with one covering the whole view.
+    func viewRect(_ r: CGRect) -> CGRect {
+        let x0 = floor(ox + r.minX * s), y0 = floor(oy + r.minY * s)
+        let x1 = ceil(ox + r.maxX * s), y1 = ceil(oy + r.maxY * s)
+        return CGRect(x: x0, y: y0, width: max(1, x1 - x0), height: max(1, y1 - y0))
+    }
+
     /// The whole canvas in illustration coordinates.
     var visible: CGRect { CGRect(x: -ox / s, y: -oy / s, width: DeskSpace.width + 2 * ox / s, height: DeskSpace.height + 2 * oy / s) }
 }
@@ -432,19 +440,28 @@ extension Path {
 // MARK: - Sky (through the window)
 
 /// The sky layer: real time of day (gradient, sun or moon, stars, clouds, a little city). Runs at a
-/// low frame rate; only the window rect is drawn.
+/// low frame rate, and its canvas covers only the window glass (whole points around it), so each
+/// sky frame repaints and recomposites that rect instead of the whole screen.
 struct DeskSkyLayer: View {
     let preview: Bool
+    var paused = false
+    var clock: FacePauseClock?
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: preview ? 1.0 / 8 : 1.0 / 15)) { tl in
-            let t = FaceBClock.seconds(tl.date)
-            let wall = FaceBClock.wallDate(tl.date)
-            Canvas { g, size in
-                let space = DeskSpace(size)
-                space.apply(&g)
-                DeskSky.draw(&g, t: t, wall: wall)
+        GeometryReader { geo in
+            let space = DeskSpace(geo.size)
+            let r = space.viewRect(DeskGeo.glass)
+            TimelineView(.animation(minimumInterval: preview ? 1.0 / 8 : 1.0 / 15, paused: paused)) { tl in
+                let t = FaceBClock.seconds(clock?.date(tl.date, paused: paused) ?? tl.date)
+                let wall = FaceBClock.wallDate(tl.date)
+                Canvas(rendersAsynchronously: true) { g, _ in
+                    g.translateBy(x: -r.minX, y: -r.minY)
+                    space.apply(&g)
+                    DeskSky.draw(&g, t: t, wall: wall)
+                }
             }
+            .frame(width: r.width, height: r.height)
+            .position(x: r.midX, y: r.midY)
         }
     }
 }

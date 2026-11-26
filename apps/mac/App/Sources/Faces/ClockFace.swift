@@ -63,34 +63,52 @@ struct ClockReading {
         self.ages = ages
         self.prev = prev
     }
+
+    /// Digit `i` for drawing: while it changes (younger than `settle` seconds) its previous value
+    /// and age; once settled the same constant values every frame, so an Equatable digit view
+    /// skips re-rendering.
+    func motion(_ i: Int, settle: Double) -> (current: Int, previous: Int, age: Double) {
+        let age = ages[i]
+        guard age < settle, prev[i] != digits[i] else { return (digits[i], digits[i], .infinity) }
+        return (digits[i], prev[i], age)
+    }
 }
 
-/// Dense frames right after each tick (for the roll / flip), sparse frames otherwise. Keeps a
-/// clock that runs for hours cheap on CPU.
+/// The time display's schedule: frames at the face's frame interval for a moment after each tick
+/// (the roll / flip), then nothing until the next tick. Everything else on the face (aura, colon,
+/// agent pulse, drift) runs on its own, slower timeline, so a clock that runs for hours stays
+/// cheap.
 struct ClockFaceSchedule: TimelineSchedule {
+    /// Seconds between ticks (1 with seconds shown, else 60).
     var period: Double
+    /// How long after each tick to keep animating.
     var dense: Double
-    var idle: Double
+    /// Frame interval while animating (the face's frame interval).
+    var step: Double
+    var paused = false
 
     func entries(from startDate: Date, mode: TimelineScheduleMode) -> Entries {
-        mode == .lowFrequency
-            ? Entries(cursor: startDate, period: 1, dense: 0, idle: 1)
-            : Entries(cursor: startDate, period: period, dense: dense, idle: idle)
+        if paused { return Entries(cursor: startDate, period: period, dense: 0, step: step, once: true) }
+        return mode == .lowFrequency
+            ? Entries(cursor: startDate, period: 1, dense: 0, step: 1)
+            : Entries(cursor: startDate, period: period, dense: dense, step: step)
     }
 
     struct Entries: Sequence, IteratorProtocol {
-        var cursor: Date
+        var cursor: Date?
         let period: Double
         let dense: Double
-        let idle: Double
+        let step: Double
+        var once = false
 
         mutating func next() -> Date? {
-            let d = cursor
+            guard let d = cursor else { return nil }
+            if once { cursor = nil; return d }
             let x = d.timeIntervalSince1970
             let phase = x - floor(x / period) * period
-            var step = phase < dense ? 1.0 / 60 : Swift.min(idle, period - phase)
-            if step < 1.0 / 240 { step = 1.0 / 60 }
-            cursor = d.addingTimeInterval(step)
+            var gap = phase < dense ? Swift.max(step, 1.0 / 120) : period - phase
+            if gap < 1.0 / 240 { gap = Swift.max(step, 1.0 / 120) }
+            cursor = d.addingTimeInterval(gap)
             return d
         }
     }
@@ -101,6 +119,7 @@ struct ClockFaceView: View {
     var fixedTime: Double?
 
     @State private var start = Date()
+    @State private var clock = FacePauseClock()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -108,38 +127,32 @@ struct ClockFaceView: View {
         let use24 = ctx.bool("use24h", ClockFace.localePrefers24h)
         let showSeconds = ctx.bool("seconds", true)
         let sessions = FaceA.visibleSessions(ctx.sessions, max: ctx.isPreview ? 4 : 6)
-        let busy = style == "aura" || sessions.contains { $0.state == .working || $0.state == .needsYou }
-        let schedule = ClockFaceSchedule(period: showSeconds ? 1 : 60, dense: style == "flap" ? 0.7 : 0.75,
-                                         idle: ctx.isPreview ? 1.0 / 15 : (busy ? 1.0 / 30 : 1.0 / 8))
+        let timing = FaceTiming(start: start, fixed: fixedTime, clock: clock, paused: ctx.paused)
+        let frame = ctx.isPreview ? 1.0 / 30 : ctx.frameInterval
         GeometryReader { geo in
             let size = geo.size
             let u = FaceA.unit(for: size)
-            TimelineView(schedule) { tl in
-                let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
-                let wall = FaceA.wallDate(now: tl.date, fixed: fixedTime)
-                let reading = ClockReading(date: wall, use24h: use24)
-                ZStack {
-                    if style == "aura" { ClockAura(t: t, reduceMotion: reduceMotion, panicking: ctx.isPanicking) }
+            ZStack {
+                // The aura breathes over 8 s and drifts over ~50 s: 10 fps is plenty, and the
+                // full-screen gradient no longer repaints with every digit frame.
+                if style == "aura" {
+                    ClockAura(timing: timing, reduceMotion: reduceMotion, panicking: ctx.isPanicking)
+                }
+                // Burn-in drift, stepped once a second (a fraction of a point per step).
+                TimelineView(FacePeriodicSchedule(interval: 1, paused: ctx.paused)) { tl in
+                    let t = timing.t(tl.date)
+                    let wall = FaceA.wallDate(now: tl.date, fixed: fixedTime)
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
-                        Group {
-                            if style == "flap" {
-                                ClockFlapTime(reading: reading, use24h: use24, showSeconds: showSeconds,
-                                              width: size.width, unit: u, reduceMotion: reduceMotion)
-                            } else {
-                                ClockRollTime(reading: reading, use24h: use24, showSeconds: showSeconds, aura: style == "aura",
-                                              width: size.width, unit: u, t: t, reduceMotion: reduceMotion)
-                            }
-                        }
-                        Text(wall, format: .dateTime.weekday(.wide).month(.wide).day())
-                            .font(Theme.allo((ctx.isPreview ? 30 : 22) * u, .regular))
-                            .tracking((style == "flap" ? 2.2 : 0.4) * u)
-                            .textCase(style == "flap" ? .uppercase : nil)
-                            .foregroundStyle(Theme.Night.secondary.opacity(0.8))
-                            .padding(.top, (style == "flap" ? 34 : 10) * u)
+                        ClockTimeDisplay(style: style, use24h: use24, showSeconds: showSeconds, width: size.width, unit: u,
+                                         reduceMotion: reduceMotion, frameInterval: frame, timing: timing)
+                        ClockDateLine(day: Calendar.current.startOfDay(for: wall), flap: style == "flap",
+                                      size: (ctx.isPreview ? 30 : 22) * u, unit: u)
+                            .equatable()
                         Spacer(minLength: 0)
                         if !ctx.isPreview {
-                            ClockAgentPulse(sessions: sessions, counts: ctx.counts, t: t, unit: u, reduceMotion: reduceMotion)
+                            ClockAgentPulse(sessions: sessions, counts: ctx.counts, unit: u, reduceMotion: reduceMotion,
+                                            frameInterval: frame, timing: timing)
                                 .padding(.bottom, 84 * u)
                         } else {
                             ClockPreviewDots(sessions: sessions, unit: u).padding(.bottom, 70 * u)
@@ -148,13 +161,58 @@ struct ClockFaceView: View {
                     .frame(width: size.width, height: size.height)
                     .offset(FaceA.drift(t, amplitude: 16 * u))
                 }
-                .frame(width: size.width, height: size.height)
             }
+            .frame(width: size.width, height: size.height)
         }
         .background(Theme.Night.background)
-        .overlay(FaceAPanicWash(active: ctx.isPanicking))
+        .overlay(FaceAPanicWash(active: ctx.isPanicking, paused: ctx.paused))
         .accessibilityElement()
         .accessibilityLabel(Text(Date(), style: .time))
+    }
+}
+
+/// The date under the time. Keyed on the day, so it lays out once a day.
+struct ClockDateLine: View, Equatable {
+    let day: Date
+    let flap: Bool
+    let size: CGFloat
+    let unit: CGFloat
+
+    var body: some View {
+        Text(day, format: .dateTime.weekday(.wide).month(.wide).day())
+            .font(Theme.allo(size, .regular))
+            .tracking((flap ? 2.2 : 0.4) * unit)
+            .textCase(flap ? .uppercase : nil)
+            .foregroundStyle(Theme.Night.secondary.opacity(0.8))
+            .padding(.top, (flap ? 34 : 10) * unit)
+    }
+}
+
+/// The digits, on the tick schedule: animated only while a digit rolls or flips.
+struct ClockTimeDisplay: View {
+    let style: String
+    let use24h: Bool
+    let showSeconds: Bool
+    let width: CGFloat
+    let unit: CGFloat
+    let reduceMotion: Bool
+    let frameInterval: Double
+    let timing: FaceTiming
+
+    var body: some View {
+        let flap = style == "flap"
+        let schedule = ClockFaceSchedule(period: showSeconds ? 1 : 60, dense: flap ? 0.7 : 0.75,
+                                         step: frameInterval, paused: timing.paused)
+        TimelineView(schedule) { tl in
+            let reading = ClockReading(date: FaceA.wallDate(now: tl.date, fixed: timing.fixed), use24h: use24h)
+            if flap {
+                ClockFlapTime(reading: reading, use24h: use24h, showSeconds: showSeconds,
+                              width: width, unit: unit, reduceMotion: reduceMotion)
+            } else {
+                ClockRollTime(reading: reading, use24h: use24h, showSeconds: showSeconds, aura: style == "aura",
+                              width: width, unit: unit, reduceMotion: reduceMotion, timing: timing)
+            }
+        }
     }
 }
 
@@ -167,36 +225,19 @@ struct ClockRollTime: View {
     let aura: Bool
     let width: CGFloat
     let unit: CGFloat
-    let t: Double
     let reduceMotion: Bool
+    let timing: FaceTiming
 
     var body: some View {
         let big = min(width * 0.2, 300 * unit * 1.02)
         let small = big * 0.27
-        let bigWeight: Theme.Weight = aura ? .extraLight : .thin
-        let bigFont = Theme.allo(big, bigWeight)
-        let smallFont = Theme.allo(small, .light)
-        let fill: AnyShapeStyle = aura
-            ? AnyShapeStyle(LinearGradient(colors: [.white, Color(hex: "E6DDF6")], startPoint: .top, endPoint: .bottom))
-            : AnyShapeStyle(Theme.Night.foreground.opacity(0.94))
-        let secFill: AnyShapeStyle = aura
-            ? AnyShapeStyle(LinearGradient(colors: [FaceA.lavender.color(), FaceA.peach.color()], startPoint: .leading, endPoint: .trailing))
-            : AnyShapeStyle(Theme.Night.muted)
-        let colonA = reduceMotion ? 0.7 : 0.5 + 0.35 * (0.5 + 0.5 * cos(t * .pi))
 
         HStack(alignment: .lastTextBaseline, spacing: 0) {
-            if reading.digits[0] >= 0 {
-                ClockRollDigit(reading: reading, index: 0, font: bigFont, weight: bigWeight, size: big, fill: fill, reduceMotion: reduceMotion)
-            }
-            ClockRollDigit(reading: reading, index: 1, font: bigFont, weight: bigWeight, size: big, fill: fill, reduceMotion: reduceMotion)
-            Text(":")
-                .font(bigFont)
-                .foregroundStyle(fill)
-                .opacity(colonA)
-                .offset(y: -big * 0.06)
-                .padding(.horizontal, big * 0.015)
-            ClockRollDigit(reading: reading, index: 2, font: bigFont, weight: bigWeight, size: big, fill: fill, reduceMotion: reduceMotion)
-            ClockRollDigit(reading: reading, index: 3, font: bigFont, weight: bigWeight, size: big, fill: fill, reduceMotion: reduceMotion)
+            if reading.digits[0] >= 0 { digit(0, big) }
+            digit(1, big)
+            ClockColon(size: big, aura: aura, reduceMotion: reduceMotion, timing: timing).equatable()
+            digit(2, big)
+            digit(3, big)
             if showSeconds || !use24h {
                 VStack(alignment: .leading, spacing: small * 0.25) {
                     if !use24h {
@@ -208,8 +249,8 @@ struct ClockRollTime: View {
                     }
                     if showSeconds {
                         HStack(spacing: 0) {
-                            ClockRollDigit(reading: reading, index: 4, font: smallFont, weight: .light, size: small, fill: secFill, reduceMotion: reduceMotion)
-                            ClockRollDigit(reading: reading, index: 5, font: smallFont, weight: .light, size: small, fill: secFill, reduceMotion: reduceMotion)
+                            digit(4, small, seconds: true)
+                            digit(5, small, seconds: true)
                         }
                     }
                 }
@@ -219,22 +260,67 @@ struct ClockRollTime: View {
         }
         .fixedSize()
     }
+
+    private func digit(_ i: Int, _ size: CGFloat, seconds: Bool = false) -> some View {
+        let m = reading.motion(i, settle: 0.9)
+        return ClockRollDigit(current: m.current, previous: m.previous, age: m.age, size: size,
+                              weight: seconds ? .light : (aura ? .extraLight : .thin),
+                              fill: seconds ? (aura ? .siliconSweep : .muted) : (aura ? .auraFace : .foreground),
+                              reduceMotion: reduceMotion)
+            .equatable()
+    }
+}
+
+/// How a clock numeral is painted.
+enum ClockInk: Equatable {
+    case foreground, muted, auraFace, siliconSweep
+
+    var style: AnyShapeStyle {
+        switch self {
+        case .foreground: AnyShapeStyle(Theme.Night.foreground.opacity(0.94))
+        case .muted: AnyShapeStyle(Theme.Night.muted)
+        case .auraFace: AnyShapeStyle(LinearGradient(colors: [.white, Color(hex: "E6DDF6")], startPoint: .top, endPoint: .bottom))
+        case .siliconSweep: AnyShapeStyle(LinearGradient(colors: [FaceA.lavender.color(), FaceA.peach.color()],
+                                                          startPoint: .leading, endPoint: .trailing))
+        }
+    }
+}
+
+/// The colon between hours and minutes, pulsing gently on its own 10 fps timeline (a 2 s cycle).
+struct ClockColon: View, Equatable {
+    let size: CGFloat
+    let aura: Bool
+    let reduceMotion: Bool
+    let timing: FaceTiming
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 10, paused: timing.paused || reduceMotion)) { tl in
+            let t = timing.t(tl.date)
+            Text(":")
+                .font(Theme.allo(size, aura ? .extraLight : .thin))
+                .foregroundStyle((aura ? ClockInk.auraFace : .foreground).style)
+                .opacity(reduceMotion ? 0.7 : 0.5 + 0.35 * (0.5 + 0.5 * cos(t * .pi)))
+                .offset(y: -size * 0.06)
+                .padding(.horizontal, size * 0.015)
+        }
+    }
 }
 
 /// One digit that rolls up into its new value on a soft spring, like an odometer drum: it is
 /// masked to its own cap-height band, so outgoing and incoming glyphs never leave the numeral.
-struct ClockRollDigit: View {
-    let reading: ClockReading
-    let index: Int
-    let font: Font
-    let weight: Theme.Weight
+/// Equatable, and settled digits get a constant age, so only a rolling digit re-renders.
+struct ClockRollDigit: View, Equatable {
+    let current: Int
+    let previous: Int
+    /// Seconds since the digit changed while it rolls, else ∞.
+    let age: Double
     let size: CGFloat
-    let fill: AnyShapeStyle
+    let weight: Theme.Weight
+    let fill: ClockInk
     let reduceMotion: Bool
 
     var body: some View {
-        let cur = reading.digits[index], prev = reading.prev[index]
-        let age = reading.ages[index]
+        let font = Theme.allo(size, weight)
         let ct = Theme.ctAllo(size, weight: Theme.weightValue(weight))
         let ascent = CTFontGetAscent(ct), cap = CTFontGetCapHeight(ct), leading = CTFontGetLeading(ct)
         let pad = size * 0.085
@@ -243,19 +329,19 @@ struct ClockRollDigit: View {
         let travel = band * 0.98
         ZStack {
             Text("0").font(font).monospacedDigit().hidden()
-            if age < 0.9, prev != cur {
+            if age < 0.9, previous != current {
                 let e = reduceMotion ? FaceA.smoothstep(0, 0.3, age) : FaceA.spring(age, response: 0.46, damping: 0.78)
                 let blur = reduceMotion ? 0 : max(0, sin(min(1, e) * .pi)) * size * 0.018
-                digit(prev)
+                digit(previous, font)
                     .offset(y: -e * travel)
                     .opacity(max(0, 1 - e * 1.1))
                     .blur(radius: blur)
-                digit(cur)
+                digit(current, font)
                     .offset(y: (1 - e) * travel)
                     .opacity(min(1, max(0, e * 1.2)))
                     .blur(radius: blur)
             } else {
-                digit(cur)
+                digit(current, font)
             }
         }
         .mask(alignment: .top) {
@@ -267,8 +353,8 @@ struct ClockRollDigit: View {
         }
     }
 
-    private func digit(_ d: Int) -> some View {
-        Text(d < 0 ? "" : "\(d)").font(font).monospacedDigit().foregroundStyle(fill)
+    private func digit(_ d: Int, _ font: Font) -> some View {
+        Text(d < 0 ? "" : "\(d)").font(font).monospacedDigit().foregroundStyle(fill.style)
     }
 }
 
@@ -317,9 +403,10 @@ struct ClockFlapTime: View {
     }
 
     private func flap(_ i: Int, _ w: CGFloat, _ h: CGFloat) -> some View {
-        let d = reading.digits[i], p = reading.prev[i]
-        return ClockFlapDigit(current: d < 0 ? "" : "\(d)", previous: p < 0 ? "" : "\(p)", age: reading.ages[i],
-                              width: w, height: h, reduceMotion: reduceMotion)
+        let m = reading.motion(i, settle: ClockFlapDigit.duration)
+        return ClockFlapDigit(current: m.current < 0 ? "" : "\(m.current)", previous: m.previous < 0 ? "" : "\(m.previous)",
+                              age: m.age, width: w, height: h, reduceMotion: reduceMotion)
+            .equatable()
     }
 }
 
@@ -336,8 +423,8 @@ struct ClockFlapColon: View {
 }
 
 /// A real split-flap: the old top half falls forward on its hinge, then the new bottom half
-/// swings down and lands with a little bounce.
-struct ClockFlapDigit: View {
+/// swings down and lands with a little bounce. Equatable: a settled card doesn't re-render.
+struct ClockFlapDigit: View, Equatable {
     let current: String
     let previous: String
     let age: Double
@@ -428,34 +515,37 @@ struct ClockFlapDigit: View {
 
 // MARK: - Aura
 
-/// Breathing silicon-gradient light behind the numerals.
+/// Breathing silicon-gradient light behind the numerals, on its own 10 fps timeline.
 struct ClockAura: View {
-    let t: Double
+    let timing: FaceTiming
     let reduceMotion: Bool
     let panicking: Bool
 
     var body: some View {
-        Canvas { g, size in
-            let w = size.width, h = size.height
-            let tt = reduceMotion ? t * 0.3 : t
-            let breath = 0.86 + 0.14 * sin(tt * 2 * .pi / 8)
-            let rect = Path(CGRect(origin: .zero, size: size))
-            let lav = panicking ? FaceA.red : FaceA.lavender
-            let pea = panicking ? FaceA.red : FaceA.peach
-            // Deeper, more saturated versions of the silicon pair read as color (not grey) on black.
-            let deepLav = panicking ? lav : FaceA.RGB(0x8E74D9)
-            let deepPea = panicking ? pea : FaceA.RGB(0xD9925A)
-            let c1 = CGPoint(x: w * (0.34 + 0.05 * cos(tt * 2 * .pi / 47)), y: h * (0.38 + 0.05 * sin(tt * 2 * .pi / 47)))
-            let c2 = CGPoint(x: w * (0.66 + 0.05 * cos(tt * 2 * .pi / 53 + 2)), y: h * (0.48 + 0.05 * sin(tt * 2 * .pi / 53 + 2)))
-            let c3 = CGPoint(x: w * (0.5 + 0.08 * sin(tt * 2 * .pi / 71)), y: h * (0.3 + 0.04 * cos(tt * 2 * .pi / 61)))
-            let rad = max(w, h) * 0.42
-            g.blendMode = .plusLighter
-            g.fill(rect, with: .radialGradient(Gradient(colors: [deepLav.color(0.34 * breath), deepLav.color(0.1 * breath), .clear]),
-                                               center: c1, startRadius: 0, endRadius: rad * (1 + 0.06 * sin(tt / 3))))
-            g.fill(rect, with: .radialGradient(Gradient(colors: [deepPea.color(0.28 * breath), deepPea.color(0.08 * breath), .clear]),
-                                               center: c2, startRadius: 0, endRadius: rad * (1 + 0.06 * cos(tt / 3.4))))
-            g.fill(rect, with: .radialGradient(Gradient(colors: [FaceA.accent.color(0.06 * breath), .clear]),
-                                               center: c3, startRadius: 0, endRadius: rad * 0.8))
+        TimelineView(.animation(minimumInterval: 1.0 / 10, paused: timing.paused)) { tl in
+            let t = timing.t(tl.date)
+            Canvas(rendersAsynchronously: true) { g, size in
+                let w = size.width, h = size.height
+                let tt = reduceMotion ? t * 0.3 : t
+                let breath = 0.86 + 0.14 * sin(tt * 2 * .pi / 8)
+                let rect = Path(CGRect(origin: .zero, size: size))
+                let lav = panicking ? FaceA.red : FaceA.lavender
+                let pea = panicking ? FaceA.red : FaceA.peach
+                // Deeper, more saturated versions of the silicon pair read as color (not grey) on black.
+                let deepLav = panicking ? lav : FaceA.RGB(0x8E74D9)
+                let deepPea = panicking ? pea : FaceA.RGB(0xD9925A)
+                let c1 = CGPoint(x: w * (0.34 + 0.05 * cos(tt * 2 * .pi / 47)), y: h * (0.38 + 0.05 * sin(tt * 2 * .pi / 47)))
+                let c2 = CGPoint(x: w * (0.66 + 0.05 * cos(tt * 2 * .pi / 53 + 2)), y: h * (0.48 + 0.05 * sin(tt * 2 * .pi / 53 + 2)))
+                let c3 = CGPoint(x: w * (0.5 + 0.08 * sin(tt * 2 * .pi / 71)), y: h * (0.3 + 0.04 * cos(tt * 2 * .pi / 61)))
+                let rad = max(w, h) * 0.42
+                g.blendMode = .plusLighter
+                g.fill(rect, with: .radialGradient(Gradient(colors: [deepLav.color(0.34 * breath), deepLav.color(0.1 * breath), .clear]),
+                                                   center: c1, startRadius: 0, endRadius: rad * (1 + 0.06 * sin(tt / 3))))
+                g.fill(rect, with: .radialGradient(Gradient(colors: [deepPea.color(0.28 * breath), deepPea.color(0.08 * breath), .clear]),
+                                                   center: c2, startRadius: 0, endRadius: rad * (1 + 0.06 * cos(tt / 3.4))))
+                g.fill(rect, with: .radialGradient(Gradient(colors: [FaceA.accent.color(0.06 * breath), .clear]),
+                                                   center: c3, startRadius: 0, endRadius: rad * 0.8))
+            }
         }
         .allowsHitTesting(false)
     }
@@ -463,26 +553,29 @@ struct ClockAura: View {
 
 // MARK: - Agent pulse
 
+/// One equalizer per agent (mark, bars, title) and the summary line. The marks, titles and summary
+/// are static; only the bars and the heartline animate, each on its own timeline.
 struct ClockAgentPulse: View {
     let sessions: [AgentSession]
     let counts: AgentCounts
-    let t: Double
     let unit: CGFloat
     let reduceMotion: Bool
+    let frameInterval: Double
+    let timing: FaceTiming
 
     var body: some View {
         VStack(spacing: 20 * unit) {
             if sessions.isEmpty {
-                ClockHeartline(t: t, unit: unit, reduceMotion: reduceMotion)
+                ClockHeartline(unit: unit, reduceMotion: reduceMotion, frameInterval: frameInterval, timing: timing)
                     .frame(width: 320 * unit, height: 34 * unit)
             } else {
                 HStack(alignment: .top, spacing: 30 * unit) {
                     ForEach(sessions) { s in
                         VStack(spacing: 9 * unit) {
                             HStack(spacing: 9 * unit) {
-                                ProviderMark(provider: s.provider, size: 22 * unit)
-                                ClockEqualizer(state: s.state, seed: Double(FaceA.hash(s.id) % 1000) / 37, t: t,
-                                               unit: unit, reduceMotion: reduceMotion)
+                                FaceAgentMark(s, size: 22 * unit)
+                                ClockEqualizer(state: s.state, seed: Double(FaceA.hash(s.id) % 1000) / 37,
+                                               unit: unit, reduceMotion: reduceMotion, frameInterval: frameInterval, timing: timing)
                                     .frame(width: 9 * 5.4 * unit, height: 28 * unit)
                             }
                             Text(FaceA.title(s, max: 18))
@@ -502,73 +595,88 @@ struct ClockAgentPulse: View {
     }
 }
 
-/// Nine little bars per agent, symmetric about the middle, animated by state.
+/// Nine little bars per agent, symmetric about the middle, animated by state. Working, waiting and
+/// failing bars move quickly (face frame rate); finished bars sweep slowly (20 fps); idle bars
+/// are still.
 struct ClockEqualizer: View {
     let state: AgentState
     let seed: Double
-    let t: Double
     let unit: CGFloat
     let reduceMotion: Bool
+    let frameInterval: Double
+    let timing: FaceTiming
 
     var body: some View {
-        Canvas { g, size in
-            let n = 9
-            let bw = size.width / CGFloat(n) * 0.56
-            let step = size.width / CGFloat(n)
-            let tt = reduceMotion ? t * 0.25 : t
-            let rgb = FaceA.stateRGB(state)
-            for i in 0..<n {
-                let x = Double(i)
-                var v: Double
-                switch state {
-                case .working:
-                    let env = 0.55 + 0.45 * exp(-pow((x - 4) / 3.2, 2))
-                    v = 0.16 + 0.84 * env * abs(FaceA.wave(tt * 3.3 + x * 0.62, seed + x * 0.9))
-                case .needsYou:
-                    let pulse = 0.5 + 0.5 * sin(tt * 2 * .pi / 1.3 - x * 0.18)
-                    v = 0.18 + 0.62 * pulse * exp(-pow((x - 4) / 3.4, 2))
-                case .finished:
-                    let pos = (tt.truncatingRemainder(dividingBy: 4.2)) / 4.2 * 14 - 2.5
-                    v = 0.12 + 0.3 * exp(-pow(x - pos, 2) / 1.6)
-                case .error:
-                    v = 0.14 + 0.26 * abs(sin(tt * 7 + x * 2.1 + seed))
-                case .idle:
-                    v = 0.1
+        let interval = switch state {
+        case .working, .needsYou, .error: frameInterval
+        case .finished, .idle: max(frameInterval, 1.0 / 20)
+        }
+        TimelineView(.animation(minimumInterval: interval, paused: timing.paused || state == .idle)) { tl in
+            let t = timing.t(tl.date)
+            Canvas { g, size in
+                let n = 9
+                let bw = size.width / CGFloat(n) * 0.56
+                let step = size.width / CGFloat(n)
+                let tt = reduceMotion ? t * 0.25 : t
+                let rgb = FaceA.stateRGB(state)
+                for i in 0..<n {
+                    let x = Double(i)
+                    var v: Double
+                    switch state {
+                    case .working:
+                        let env = 0.55 + 0.45 * exp(-pow((x - 4) / 3.2, 2))
+                        v = 0.16 + 0.84 * env * abs(FaceA.wave(tt * 3.3 + x * 0.62, seed + x * 0.9))
+                    case .needsYou:
+                        let pulse = 0.5 + 0.5 * sin(tt * 2 * .pi / 1.3 - x * 0.18)
+                        v = 0.18 + 0.62 * pulse * exp(-pow((x - 4) / 3.4, 2))
+                    case .finished:
+                        let pos = (tt.truncatingRemainder(dividingBy: 4.2)) / 4.2 * 14 - 2.5
+                        v = 0.12 + 0.3 * exp(-pow(x - pos, 2) / 1.6)
+                    case .error:
+                        v = 0.14 + 0.26 * abs(sin(tt * 7 + x * 2.1 + seed))
+                    case .idle:
+                        v = 0.1
+                    }
+                    let hgt = max(bw, size.height * v)
+                    let rect = CGRect(x: step * CGFloat(i) + (step - bw) / 2, y: (size.height - hgt) / 2, width: bw, height: hgt)
+                    g.fill(Path(roundedRect: rect, cornerRadius: bw / 2),
+                           with: .color(rgb.color(0.55 + 0.45 * min(1, v * 1.3))))
                 }
-                let hgt = max(bw, size.height * v)
-                let rect = CGRect(x: step * CGFloat(i) + (step - bw) / 2, y: (size.height - hgt) / 2, width: bw, height: hgt)
-                g.fill(Path(roundedRect: rect, cornerRadius: bw / 2),
-                       with: .color(rgb.color(0.55 + 0.45 * min(1, v * 1.3))))
             }
         }
     }
 }
 
-/// With nothing running: a calm line with a soft swell travelling across it now and then.
+/// With nothing running: a calm line with a soft swell travelling across it now and then
+/// (20 fps; still with Reduce Motion).
 struct ClockHeartline: View {
-    let t: Double
     let unit: CGFloat
     let reduceMotion: Bool
+    let frameInterval: Double
+    let timing: FaceTiming
 
     var body: some View {
-        Canvas { g, size in
-            let w = Double(size.width), h = Double(size.height)
-            let period = 5.5
-            let ph = (t.truncatingRemainder(dividingBy: period)) / period
-            let pos = -0.2 + ph * 1.4
-            var path = Path()
-            let n = 90
-            for k in 0...n {
-                let x = Double(k) / Double(n)
-                let bump = reduceMotion ? 0 : exp(-pow((x - pos) / 0.06, 2)) * sin((x - pos) * 60) * 0.42
-                let y = h / 2 - bump * h
-                if k == 0 { path.move(to: CGPoint(x: x * w, y: y)) } else { path.addLine(to: CGPoint(x: x * w, y: y)) }
+        TimelineView(.animation(minimumInterval: max(frameInterval, 1.0 / 20), paused: timing.paused || reduceMotion)) { tl in
+            let t = timing.t(tl.date)
+            Canvas { g, size in
+                let w = Double(size.width), h = Double(size.height)
+                let period = 5.5
+                let ph = (t.truncatingRemainder(dividingBy: period)) / period
+                let pos = -0.2 + ph * 1.4
+                var path = Path()
+                let n = 90
+                for k in 0...n {
+                    let x = Double(k) / Double(n)
+                    let bump = reduceMotion ? 0 : exp(-pow((x - pos) / 0.06, 2)) * sin((x - pos) * 60) * 0.42
+                    let y = h / 2 - bump * h
+                    if k == 0 { path.move(to: CGPoint(x: x * w, y: y)) } else { path.addLine(to: CGPoint(x: x * w, y: y)) }
+                }
+                g.stroke(path, with: .linearGradient(
+                    Gradient(stops: [.init(color: .clear, location: 0), .init(color: FaceA.lavender.color(0.75), location: 0.25),
+                                     .init(color: FaceA.peach.color(0.75), location: 0.75), .init(color: .clear, location: 1)]),
+                    startPoint: .zero, endPoint: CGPoint(x: w, y: 0)),
+                    style: StrokeStyle(lineWidth: max(1, 1.5 * Double(unit)), lineCap: .round, lineJoin: .round))
             }
-            g.stroke(path, with: .linearGradient(
-                Gradient(stops: [.init(color: .clear, location: 0), .init(color: FaceA.lavender.color(0.75), location: 0.25),
-                                 .init(color: FaceA.peach.color(0.75), location: 0.75), .init(color: .clear, location: 1)]),
-                startPoint: .zero, endPoint: CGPoint(x: w, y: 0)),
-                style: StrokeStyle(lineWidth: max(1, 1.5 * Double(unit)), lineCap: .round, lineJoin: .round))
         }
     }
 }

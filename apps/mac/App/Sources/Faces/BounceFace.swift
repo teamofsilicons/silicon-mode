@@ -29,41 +29,48 @@ struct BounceFaceView: View {
 
     @State private var world = BounceWorld()
     @State private var start = Date()
+    @State private var clock = FacePauseClock()
+    /// Calm scenes (nothing fast on screen) animate at `ctx.calmFrameInterval`.
+    @State private var calm = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let specs = BounceSpec.make(from: ctx)
         let titles = ctx.bool("titles", true) && !ctx.isPreview
         let sizeChoice = ctx.string("size", "medium")
+        let watermark = ctx.showClock && !ctx.isPreview
         GeometryReader { geo in
             let size = geo.size
             let u = FaceA.unit(for: size)
             let radius = BounceWorld.radius(sizeChoice, unit: u, preview: ctx.isPreview, alone: specs.first?.isMark == true)
-            ZStack {
-                if ctx.showClock && !ctx.isPreview {
-                    BounceClockWatermark(start: start, fixedTime: fixedTime, unit: u)
-                }
-                TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : ctx.frameInterval)) { tl in
-                    let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
-                    let symbolSpecs = world.sync(specs, t: t)
-                    let config = BounceWorld.Config(
-                        unit: u, radius: radius, speed: ctx.number("speed", 1),
-                        trails: ctx.bool("trails", true) && !reduceMotion, titles: titles,
-                        reduceMotion: reduceMotion, panicking: ctx.isPanicking, preview: ctx.isPreview)
-                    Canvas { g, canvasSize in
-                        world.advance(to: t, size: canvasSize, config: config, g: g)
-                        world.draw(in: &g, size: canvasSize, t: t, config: config)
-                    } symbols: {
-                        ForEach(symbolSpecs) { s in
-                            BouncePuckDisc(spec: s, radius: radius, unit: u).tag(s.id)
-                            if titles { BouncePuckLabel(spec: s, unit: u).tag(BounceWorld.labelTag(s.id)) }
-                        }
+            TimelineView(.animation(minimumInterval: ctx.animationInterval(calm: calm), paused: ctx.paused)) { tl in
+                let t = FaceA.elapsed(since: start, now: clock.date(tl.date, paused: ctx.paused), fixed: fixedTime)
+                let symbolSpecs = world.sync(specs, t: t)
+                let config = BounceWorld.Config(
+                    unit: u, radius: radius, speed: ctx.number("speed", 1),
+                    trails: ctx.bool("trails", true) && !reduceMotion, titles: titles,
+                    reduceMotion: reduceMotion, panicking: ctx.isPanicking, preview: ctx.isPreview,
+                    watermark: watermark)
+                // Opaque: the night base and the haze are painted inside, so nothing under the face
+                // needs compositing; the RenderBox pass runs off the main thread.
+                Canvas(opaque: true, rendersAsynchronously: true) { g, canvasSize in
+                    world.advance(to: t, size: canvasSize, config: config, g: g)
+                    world.draw(in: &g, size: canvasSize, t: t, config: config)
+                } symbols: {
+                    if watermark {
+                        BounceClockWatermark(minute: FaceA.minute(FaceA.wallDate(now: tl.date, fixed: fixedTime)), unit: u)
+                            .equatable()
+                            .tag(BounceWorld.watermarkTag)
+                    }
+                    ForEach(symbolSpecs) { s in
+                        BouncePuckDisc(spec: s, radius: radius, unit: u).equatable().tag(s.id)
+                        if titles { BouncePuckLabel(spec: s, unit: u).equatable().tag(BounceWorld.labelTag(s.id)) }
                     }
                 }
+                .onChange(of: world.calm) { _, quiet in calm = quiet }
             }
         }
-        .background(Theme.Night.background)
-        .overlay(FaceAPanicWash(active: ctx.isPanicking))
+        .overlay(FaceAPanicWash(active: ctx.isPanicking, paused: ctx.paused))
         .accessibilityElement()
         .accessibilityLabel("Bounce face: \(ctx.counts.running) agents running")
     }
@@ -73,6 +80,8 @@ struct BounceFaceView: View {
 struct BounceSpec: Identifiable, Equatable {
     let id: String
     let provider: String
+    /// A Silicon's identity (its puck shows the Silicon's avatar).
+    var identity: AgentIdentity?
     let title: String
     let state: AgentState
     let isMark: Bool
@@ -85,7 +94,8 @@ struct BounceSpec: Identifiable, Equatable {
             return [BounceSpec(id: markID, provider: "silicon", title: "No agents running", state: .idle, isMark: true)]
         }
         return sessions.map {
-            BounceSpec(id: $0.id, provider: $0.provider, title: FaceA.title($0, max: 30), state: $0.state, isMark: false)
+            BounceSpec(id: $0.id, provider: $0.provider, identity: $0.identity?.isSilicon == true ? $0.identity : nil,
+                       title: FaceA.title($0, max: 30), state: $0.state, isMark: false)
         }
     }
 }
@@ -105,6 +115,8 @@ final class BounceWorld {
         var reduceMotion: Bool
         var panicking: Bool
         var preview: Bool
+        /// Draw the big clock watermark (its symbol is tagged `watermarkTag`).
+        var watermark = false
     }
 
     typealias V = SIMD2<Double>
@@ -119,6 +131,8 @@ final class BounceWorld {
         var stateSince: Double
         // Box around the disc (+ label) in points: left/right/top/bottom extents from center.
         var ext = (l: 0.0, r: 0.0, t: 0.0, b: 0.0)
+        /// Size of the title symbol, refreshed from each frame's draw (nil until first resolved).
+        var labelSize: CGSize?
         // Squash on impact.
         var hitT = -10.0
         var hitN = V(1, 0)
@@ -160,8 +174,19 @@ final class BounceWorld {
     private var rng = FaceA.RNG(seed: 0x5111_C0DE)
     private var lastSize = CGSize.zero
     private var aimedFirst = false
+    /// The specs of the last sync and the symbol list it produced (unchanged specs skip the work).
+    private var lastSpecs: [BounceSpec]?
+    private var symbolSpecs: [BounceSpec] = []
+    private var calmGate = FaceCalmGate()
+
+    /// True while nothing on screen moves fast enough to need the full frame rate.
+    private(set) var calm = false
+
+    /// Pucks slower than this (points per second, at unit 1) look the same at 20 fps.
+    static let calmSpeed = 62.0
 
     static func labelTag(_ id: String) -> String { "label:" + id }
+    static let watermarkTag = "bounce.watermark"
 
     static func radius(_ choice: String, unit: CGFloat, preview: Bool, alone: Bool) -> CGFloat {
         let base: CGFloat = switch choice {
@@ -178,6 +203,8 @@ final class BounceWorld {
     /// needs a symbol (alive + leaving).
     func sync(_ specs: [BounceSpec], t: Double) -> [BounceSpec] {
         if t + 1e-6 < simT { reset() }
+        // Nothing to do while the specs are unchanged and no puck is leaving.
+        if let last = lastSpecs, last == specs, !pucks.contains(where: { $0.dying != nil }) { return symbolSpecs }
         let ids = Set(specs.map(\.id))
         for i in pucks.indices where pucks[i].dying == nil && !ids.contains(pucks[i].spec.id) {
             pucks[i].dying = t
@@ -192,6 +219,7 @@ final class BounceWorld {
                         if s.state == .finished { emitSoftBurst(at: pucks[i].p, t: t) }
                     }
                 }
+                if pucks[i].spec != s { pucks[i].labelSize = nil }
                 pucks[i].spec = s
             } else {
                 // Staggered entrance for the first batch; immediate for later arrivals.
@@ -201,11 +229,14 @@ final class BounceWorld {
         }
         started = true
         if rings.count > 24 { rings.removeFirst(rings.count - 24) }
-        return pucks.map(\.spec)
+        lastSpecs = specs
+        symbolSpecs = pucks.map(\.spec)
+        return symbolSpecs
     }
 
     private func reset() {
         pucks = []; rings = []; flourishes = []; corners = 0; simT = 0; started = false; aimedFirst = false
+        lastSpecs = nil; symbolSpecs = []; calmGate.reset(); calm = false
         particles = [Particle](repeating: Particle(), count: particles.count); particleHead = 0; particlesUntil = -1
         rng = FaceA.RNG(seed: 0x5111_C0DE)
     }
@@ -213,13 +244,18 @@ final class BounceWorld {
     // MARK: Step
 
     func advance(to t: Double, size: CGSize, config c: Config, g: GraphicsContext) {
-        // Box extents (label size is only known once its symbol is resolved).
+        // Box extents (label size is only known once its symbol is resolved; after that, each
+        // frame's draw refreshes it, so the symbol is resolved once per frame, not twice).
         let r = Double(c.radius)
+        if size != lastSize { for i in pucks.indices { pucks[i].labelSize = nil } }
         for i in pucks.indices {
             var halfW = r, bottom = r
-            if c.titles, let lab = g.resolveSymbol(id: Self.labelTag(pucks[i].spec.id)) {
-                halfW = max(r, Double(lab.size.width) / 2)
-                bottom = r + Double(c.unit) * 10 + Double(lab.size.height)
+            if c.titles {
+                if pucks[i].labelSize == nil { pucks[i].labelSize = g.resolveSymbol(id: Self.labelTag(pucks[i].spec.id))?.size }
+                if let lab = pucks[i].labelSize {
+                    halfW = max(r, Double(lab.width) / 2)
+                    bottom = r + Double(c.unit) * 10 + Double(lab.height)
+                }
             }
             pucks[i].ext = (halfW, halfW, r * 1.18, bottom)
         }
@@ -232,6 +268,19 @@ final class BounceWorld {
             simT += Self.dt
             step(size: size, config: c)
         }
+        calmGate.update(quiet: isQuiet(t, config: c), t: t)
+        calm = calmGate.calm
+    }
+
+    /// Quiet: every puck is slow and settled, and no burst, ring or flourish is playing.
+    private func isQuiet(_ t: Double, config c: Config) -> Bool {
+        guard !c.preview, t > particlesUntil, flourishes.isEmpty, !rings.contains(where: { t - $0.born < 1.45 }) else { return false }
+        let maxSpeed = Self.calmSpeed * Double(c.unit)
+        for q in pucks {
+            guard q.placed, q.dying == nil, t - q.born > 1.2, t - q.hitT > 0.4, t - q.stateSince > 1.2 else { return false }
+            if simd_length(q.v) > maxSpeed || targetSpeed(q.spec, c, t: t) > maxSpeed { return false }
+        }
+        return true
     }
 
     private func targetSpeed(_ s: BounceSpec, _ c: Config, t: Double) -> Double {
@@ -458,7 +507,14 @@ final class BounceWorld {
     func draw(in g: inout GraphicsContext, size: CGSize, t: Double, config c: Config) {
         let u = Double(c.unit)
         let r = Double(c.radius)
+        // The canvas is opaque: the night base comes first.
+        g.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Theme.Night.background))
         drawHaze(&g, size: size, t: t)
+        if c.watermark, let wm = g.resolveSymbol(id: Self.watermarkTag) {
+            // A huge, barely-there clock behind the pucks, drifting slowly against burn-in.
+            let d = FaceA.drift(t, amplitude: 26 * c.unit)
+            g.draw(wm, at: CGPoint(x: size.width / 2 + d.width, y: size.height / 2 + d.height), anchor: .center)
+        }
 
         // Trails (a soft tapered comet per puck, alpha by distance from the head).
         if c.trails {
@@ -479,7 +535,8 @@ final class BounceWorld {
         }
 
         // Discs and labels.
-        for q in pucks where q.placed {
+        for i in pucks.indices where pucks[i].placed {
+            let q = pucks[i]
             let a = alpha(q, t)
             guard a > 0.01 else { continue }
             let pop = scale(q, t)
@@ -490,6 +547,7 @@ final class BounceWorld {
             let sx = 1 - sq * q.hitN.x + sq * 0.5 * q.hitN.y
             let sy = 1 - sq * q.hitN.y + sq * 0.5 * q.hitN.x
             if c.titles, let lab = g.resolveSymbol(id: Self.labelTag(q.spec.id)) {
+                pucks[i].labelSize = lab.size
                 var lc = g
                 lc.opacity = a * FaceA.smoothstep(0.25, 0.7, pop)
                 let y = q.p.y + r + u * 10 + Double(lab.size.height) / 2
@@ -514,31 +572,50 @@ final class BounceWorld {
                 let path = Path(ellipseIn: CGRect(x: ring.p.x - rr, y: ring.p.y - rr, width: rr * 2, height: rr * 2))
                 layer.stroke(path, with: .color(ring.rgb.color(0.55 * pow(1 - p, 1.6))), lineWidth: max(1, 2.2 * u * (1 - p * 0.6)))
             }
-            for k in particles.indices where t <= particlesUntil {
-                let pt = particles[k]
-                let age = t - pt.born
-                guard age >= 0, age < pt.life else { continue }
-                let f = age / pt.life
-                let a = pow(1 - f, 1.4)
-                let col: Color = pt.hue < 0 ? FaceA.green.color(a * 0.9) : FaceA.silicon(pt.hue, a)
-                let s = pt.size * (1 - f * 0.55)
-                if pt.sparkle {
-                    let len = s * 3.2
-                    let ang = pt.spin * age
-                    var path = Path()
-                    for k2 in 0..<2 {
-                        let aa = ang + Double(k2) * .pi / 2
-                        let dx = cos(aa) * len, dy = sin(aa) * len
-                        path.move(to: CGPoint(x: pt.p.x - dx, y: pt.p.y - dy))
-                        path.addLine(to: CGPoint(x: pt.p.x + dx, y: pt.p.y + dy))
-                    }
-                    layer.stroke(path, with: .color(col), style: StrokeStyle(lineWidth: max(0.8, s * 0.45), lineCap: .round))
-                } else {
-                    layer.fill(Path(ellipseIn: CGRect(x: pt.p.x - s, y: pt.p.y - s, width: s * 2, height: s * 2)), with: .color(col))
-                }
-            }
+            if t <= particlesUntil { drawParticles(&layer, t: t) }
         }
         for fl in flourishes { drawFlourish(&g, fl, t: t, u: u, r: r, preview: c.preview) }
+    }
+
+    /// Corner-burst sparks, batched: particles are bucketed by hue and alpha (9 × 12 buckets), so
+    /// a 110-spark burst is a few dozen fills instead of one fill or stroke per spark. Sparkles
+    /// (crossed round-capped lines) are filled as capsules, which look the same as the strokes.
+    private func drawParticles(_ g: inout GraphicsContext, t: Double) {
+        let alphaLevels = 12
+        var buckets: [Int: Path] = [:]
+        for k in particles.indices {
+            let pt = particles[k]
+            let age = t - pt.born
+            guard age >= 0, age < pt.life else { continue }
+            let f = age / pt.life
+            let a = pow(1 - f, 1.4)
+            let ab = min(alphaLevels - 1, Int(a * Double(alphaLevels)))
+            guard ab > 0 || a * Double(alphaLevels) > 0.5 else { continue }
+            let hb = pt.hue < 0 ? 8 : min(7, max(0, Int(pt.hue * 8)))
+            let key = hb * alphaLevels + ab
+            let s = pt.size * (1 - f * 0.55)
+            var path = buckets[key] ?? Path()
+            if pt.sparkle {
+                let len = s * 3.2
+                let lw = max(0.8, s * 0.45)
+                let ang = pt.spin * age
+                let bar = Path(roundedRect: CGRect(x: -len - lw / 2, y: -lw / 2, width: len * 2 + lw, height: lw), cornerRadius: lw / 2)
+                for k2 in 0..<2 {
+                    let rot = CGAffineTransform(rotationAngle: ang + Double(k2) * .pi / 2)
+                        .concatenating(CGAffineTransform(translationX: pt.p.x, y: pt.p.y))
+                    path.addPath(bar, transform: rot)
+                }
+            } else {
+                path.addEllipse(in: CGRect(x: pt.p.x - s, y: pt.p.y - s, width: s * 2, height: s * 2))
+            }
+            buckets[key] = path
+        }
+        for (key, path) in buckets {
+            let hb = key / alphaLevels, ab = key % alphaLevels
+            let a = (Double(ab) + 0.5) / Double(alphaLevels)
+            let col: Color = hb == 8 ? FaceA.green.color(a * 0.9) : FaceA.silicon((Double(hb) + 0.5) / 8, a)
+            g.fill(path, with: .color(col))
+        }
     }
 
     private func alpha(_ q: Puck, _ t: Double) -> Double {
@@ -621,16 +698,13 @@ final class BounceWorld {
         switch q.spec.state {
         case .working where !q.spec.isMark:
             g.stroke(circle(ringR), with: .color(rgb.color(0.12 * a)), lineWidth: lw)
-            // Rotating comet arc.
+            // Rotating comet arc: one stroke with a conic fade (bright head, tail fading out).
             let head = t * 2 * .pi * 0.7 + Double(FaceA.hash(q.spec.id) % 628) / 100
-            let segs = 12
-            for k in 0..<segs {
-                let a0 = head - Double(k) * 0.16
-                var arc = Path()
-                arc.addArc(center: c, radius: ringR, startAngle: .radians(a0 - 0.17), endAngle: .radians(a0), clockwise: false)
-                let f = 1 - Double(k) / Double(segs)
-                g.stroke(arc, with: .color(rgb.color(0.95 * f * f * a)), style: StrokeStyle(lineWidth: lw, lineCap: .round))
-            }
+            let tail = head - Self.cometSpan
+            var arc = Path()
+            arc.addArc(center: c, radius: ringR, startAngle: .radians(tail), endAngle: .radians(head), clockwise: false)
+            g.stroke(arc, with: .conicGradient(Self.cometGradient(rgb, a), center: c, angle: .radians(tail)),
+                     style: StrokeStyle(lineWidth: lw, lineCap: .round))
         case .needsYou:
             g.stroke(circle(ringR), with: .color(rgb.color((0.35 + 0.4 * pulse) * a)), lineWidth: lw * 1.1)
             // Sonar ping.
@@ -655,6 +729,27 @@ final class BounceWorld {
                 g.stroke(circle(ringR), with: .color(rgb.color(0.28 * a)), lineWidth: lw * 0.8)
             }
         }
+    }
+
+    /// Angular length of the working comet (radians).
+    static let cometSpan = 1.93
+
+    /// The comet's conic fade, starting at its tail: alpha 0.95·(1 − d/1.92)^1.6 at angular distance
+    /// d behind the head (the old 12 overlapping segments read about that bright), held a little
+    /// past the head for the round cap, clear again before the seam.
+    static func cometGradient(_ rgb: FaceA.RGB, _ a: Double) -> Gradient {
+        let full = 2 * Double.pi
+        var stops: [Gradient.Stop] = []
+        let n = 10
+        for j in 0...n {
+            let d = cometSpan * (1 - Double(j) / Double(n))
+            let k = max(0, 1 - d / 1.92)
+            stops.append(.init(color: rgb.color(0.95 * pow(k, 1.6) * a), location: (cometSpan - d) / full))
+        }
+        let headLoc = cometSpan / full
+        stops.append(.init(color: rgb.color(0.95 * a), location: headLoc + 0.04))
+        stops.append(.init(color: rgb.color(0), location: headLoc + 0.08))
+        return Gradient(stops: stops)
     }
 
     private func drawFlourish(_ g: inout GraphicsContext, _ fl: Flourish, t: Double, u: Double, r: Double, preview: Bool) {
@@ -691,19 +786,23 @@ final class BounceWorld {
 
 // MARK: - Symbols
 
-/// The puck body: provider mark (or the Silicon mark) with a state badge.
-struct BouncePuckDisc: View {
+/// The puck body: provider mark (or the Silicon mark, or a Silicon's avatar) with a state badge.
+/// Equatable, so the per-frame symbol list only re-renders a puck when its spec changes.
+struct BouncePuckDisc: View, Equatable {
     let spec: BounceSpec
     let radius: CGFloat
     let unit: CGFloat
 
     var body: some View {
         let d = radius * 2
-        ZStack(alignment: .topTrailing) {
+        // A Silicon's avatar carries the TOS badge at its top-trailing corner, so its state badge
+        // moves to the bottom-trailing corner.
+        let silicon = spec.identity != nil && !spec.isMark
+        ZStack(alignment: silicon ? .bottomTrailing : .topTrailing) {
             if spec.isMark {
                 FaceASiliconMark(size: d)
             } else {
-                ProviderMark(provider: spec.provider, size: d)
+                FaceAgentMark(provider: spec.provider, identity: spec.identity, size: d, siliconScale: 0.82)
             }
             if let badge {
                 ZStack {
@@ -714,7 +813,7 @@ struct BouncePuckDisc: View {
                 }
                 .frame(width: d * 0.34, height: d * 0.34)
                 .overlay(Circle().strokeBorder(Theme.Night.background, lineWidth: max(1.5, d * 0.035)))
-                .offset(x: d * 0.04, y: -d * 0.04)
+                .offset(x: d * 0.04, y: silicon ? d * 0.04 : -d * 0.04)
             }
         }
         .frame(width: d, height: d)
@@ -731,7 +830,7 @@ struct BouncePuckDisc: View {
 }
 
 /// The title pill under a puck.
-struct BouncePuckLabel: View {
+struct BouncePuckLabel: View, Equatable {
     let spec: BounceSpec
     let unit: CGFloat
 
@@ -771,24 +870,18 @@ struct BouncePuckLabel: View {
     }
 }
 
-/// A huge, barely-there clock behind the pucks (drifts slowly; updates once a second).
-struct BounceClockWatermark: View {
-    let start: Date
-    let fixedTime: Double?
+/// A huge, barely-there clock behind the pucks. A Canvas symbol keyed on the minute, so it lays
+/// out once a minute; the face draws it with a slow burn-in drift.
+struct BounceClockWatermark: View, Equatable {
+    let minute: Date
     let unit: CGFloat
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { tl in
-            let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
-            let date = FaceA.wallDate(now: tl.date, fixed: fixedTime)
-            let d = FaceA.drift(t, amplitude: 26 * unit)
-            Text(date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
-                .font(Theme.allo(230 * unit, .thin))
-                .monospacedDigit()
-                .tracking(-6 * unit)
-                .foregroundStyle(.white.opacity(0.05))
-                .offset(d)
-        }
-        .allowsHitTesting(false)
+        Text(minute, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
+            .font(Theme.allo(230 * unit, .thin))
+            .monospacedDigit()
+            .tracking(-6 * unit)
+            .foregroundStyle(.white.opacity(0.05))
+            .fixedSize()
     }
 }

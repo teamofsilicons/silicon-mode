@@ -13,6 +13,7 @@ struct FaceContext {
     var isPanicking: Bool
     /// Seconds between animation frames for full-screen faces (settings.faceFrameRate).
     var frameInterval: Double = 1.0 / 30
+    var paused: Bool = false
 
     func bool(_ key: String, _ fallback: Bool = false) -> Bool { options[key]?.bool ?? fallback }
     func number(_ key: String, _ fallback: Double = 0) -> Double { options[key]?.number ?? fallback }
@@ -20,6 +21,139 @@ struct FaceContext {
 
     static let sample = FaceContext(sessions: SampleAgents.sessions, counts: AgentCounts(SampleAgents.sessions),
                                     options: [:], showClock: true, isPreview: true, isPanicking: false)
+}
+
+extension FaceContext {
+    /// Frame interval for calm scenes, where nothing on the face moves faster than about 60 pt/s
+    /// and no burst is playing: 20 fps (never faster than `frameInterval`). Slow motion looks the
+    /// same at 20 fps, and every skipped frame saves a full SwiftUI pass plus a full-screen
+    /// composite.
+    var calmFrameInterval: Double { max(frameInterval, 1.0 / 20) }
+
+    /// The interval a full-screen face animates at: previews always 30 fps, calm scenes 20 fps.
+    func animationInterval(calm: Bool) -> Double {
+        isPreview ? 1.0 / 30 : (calm ? calmFrameInterval : frameInterval)
+    }
+}
+
+// MARK: - Face time
+
+/// Face time that stands still while the face is paused (`FaceContext.paused`, e.g. under the
+/// unlock sheet), so a face resumes exactly where it stopped instead of jumping or replaying the
+/// paused seconds. One clock per face; every timeline of the face reads it.
+@MainActor
+final class FacePauseClock {
+    /// Seconds spent paused so far.
+    private var held: TimeInterval = 0
+    private var pausedAt: Date?
+
+    /// The live date minus the time spent paused (frozen while paused).
+    func date(_ now: Date, paused: Bool) -> Date {
+        if paused {
+            let at = pausedAt ?? now
+            pausedAt = at
+            return at.addingTimeInterval(-held)
+        }
+        if let at = pausedAt {
+            held += max(0, now.timeIntervalSince(at))
+            pausedAt = nil
+        }
+        return now.addingTimeInterval(-held)
+    }
+}
+
+/// Everything a face's child timelines need to agree on the animation clock.
+struct FaceTiming: Equatable {
+    let start: Date
+    /// Snapshot items pin the animation clock here.
+    let fixed: Double?
+    let clock: FacePauseClock
+    let paused: Bool
+
+    /// Seconds of (unpaused) face time at a timeline date.
+    @MainActor
+    func t(_ date: Date) -> Double {
+        FaceA.elapsed(since: start, now: clock.date(date, paused: paused), fixed: fixed)
+    }
+
+    nonisolated static func == (a: FaceTiming, b: FaceTiming) -> Bool {
+        a.start == b.start && a.fixed == b.fixed && a.clock === b.clock && a.paused == b.paused
+    }
+}
+
+/// A periodic schedule that can pause: the start date, then entries on a fixed grid (multiples of
+/// `interval` since the reference date); just the start date while paused. Never yields a date
+/// before the start, so face time never steps backwards when a timeline restarts.
+struct FacePeriodicSchedule: TimelineSchedule {
+    var interval: Double
+    var paused = false
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> Entries {
+        Entries(cursor: startDate, interval: paused ? nil : max(interval, 1.0 / 120))
+    }
+
+    struct Entries: Sequence, IteratorProtocol {
+        var cursor: Date?
+        let interval: Double?
+
+        mutating func next() -> Date? {
+            guard let d = cursor else { return nil }
+            cursor = interval.map { i in
+                Date(timeIntervalSinceReferenceDate: (floor(d.timeIntervalSinceReferenceDate / i) + 1) * i)
+            }
+            return d
+        }
+    }
+}
+
+/// Hysteresis for a face's calm state: calm only after the scene has been quiet for `settle`
+/// seconds, busy again on the first busy frame.
+struct FaceCalmGate {
+    private(set) var calm = false
+    private var quietSince: Double?
+    var settle: Double = 0.8
+
+    mutating func update(quiet: Bool, t: Double) {
+        guard quiet else { quietSince = nil; calm = false; return }
+        if quietSince == nil || t < (quietSince ?? t) { quietSince = t }
+        calm = t - (quietSince ?? t) >= settle
+    }
+
+    mutating func reset() { quietSince = nil; calm = false }
+}
+
+// MARK: - Agent marks
+
+/// A session's mark on a face: a Silicon's avatar (photo or monogram, TOS badge) through
+/// `AgentAvatarView`, anything else its provider mark. `siliconScale` shrinks the rounded-square
+/// avatar inside round puck/planet frames so its corners stay clear of the face's state rings.
+struct FaceAgentMark: View, Equatable {
+    let provider: String
+    let identity: AgentIdentity?
+    var size: CGFloat
+    var siliconScale: CGFloat = 1
+
+    init(provider: String, identity: AgentIdentity?, size: CGFloat, siliconScale: CGFloat = 1) {
+        self.provider = provider
+        self.identity = identity?.isSilicon == true ? identity : nil
+        self.size = size
+        self.siliconScale = siliconScale
+    }
+
+    init(_ session: AgentSession, size: CGFloat, siliconScale: CGFloat = 1) {
+        self.init(provider: session.provider, identity: session.identity, size: size, siliconScale: siliconScale)
+    }
+
+    var isSilicon: Bool { identity != nil }
+
+    var body: some View {
+        if let identity {
+            AgentAvatarView(provider: provider, identity: identity, size: size * siliconScale, showsState: false)
+                .frame(width: size, height: size)
+        } else {
+            ProviderMark(provider: provider, size: size)
+        }
+    }
 }
 
 /// A user-tweakable face option, rendered automatically in Settings.

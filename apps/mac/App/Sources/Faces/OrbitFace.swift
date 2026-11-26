@@ -22,10 +22,16 @@ enum OrbitFace {
 struct OrbitFaceView: View {
     let ctx: FaceContext
     var fixedTime: Double?
+    /// Draw far planets from pre-blurred images (live; snapshots opt in after preparing them).
+    var blurCache = !SnapshotHarness.isRendering
 
     @State private var start = Date()
     @State private var phases = OrbitPhases()
+    @State private var clock = FacePauseClock()
+    /// Calm scenes (everything slow, no shooting star) animate at `ctx.calmFrameInterval`.
+    @State private var calm = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         let tiltDeg = ctx.number("tilt", 66)
@@ -35,35 +41,43 @@ struct OrbitFaceView: View {
             let u = FaceA.unit(for: size) * (ctx.isPreview ? 1.45 : 1)
             let planetR = 19 * u
             let maxScale: CGFloat = 1.4
-            TimelineView(.animation(minimumInterval: ctx.isPreview ? 1 / 30 : ctx.frameInterval)) { tl in
-                let t = FaceA.elapsed(since: start, now: tl.date, fixed: fixedTime)
-                let wall = FaceA.wallDate(now: tl.date, fixed: fixedTime)
+            let blur = OrbitBlurCache.Spec(size: planetR * 2 * maxScale, pad: planetR * 0.6, radius: planetR * 0.22, scale: displayScale)
+            TimelineView(.animation(minimumInterval: ctx.animationInterval(calm: calm), paused: ctx.paused)) { tl in
+                let t = FaceA.elapsed(since: start, now: clock.date(tl.date, paused: ctx.paused), fixed: fixedTime)
+                let minute = FaceA.minute(FaceA.wallDate(now: tl.date, fixed: fixedTime))
+                let blurred = blurCache ? OrbitBlurCache.shared.images(for: planets, blur) : [:]
                 let config = OrbitRenderer.Config(
                     unit: u, planetR: planetR, symbolScale: maxScale, tilt: tiltDeg * .pi / 180,
                     speed: ctx.number("speed", 1), trails: ctx.bool("trails", true) && !reduceMotion,
                     starfield: ctx.bool("starfield", true), reduceMotion: reduceMotion,
                     panicking: ctx.isPanicking, preview: ctx.isPreview, labels: !ctx.isPreview)
-                Canvas { g, sz in
-                    OrbitRenderer(config: config, planets: planets, phases: phases).draw(&g, size: sz, t: t)
+                // Opaque: the night base is painted inside; the RenderBox pass runs off the main thread.
+                Canvas(opaque: true, rendersAsynchronously: true) { g, sz in
+                    OrbitRenderer(config: config, planets: planets, phases: phases, blurred: blurred).draw(&g, size: sz, t: t)
                 } symbols: {
-                    OrbitCoreLabel(date: wall, counts: ctx.counts, showClock: ctx.showClock, unit: u, preview: ctx.isPreview)
+                    OrbitCoreLabel(minute: minute, counts: ctx.counts, showClock: ctx.showClock, unit: u, preview: ctx.isPreview)
+                        .equatable()
                         .tag("core")
                     ForEach(planets) { p in
-                        ProviderMark(provider: p.provider, size: planetR * 2 * maxScale).tag(p.id)
-                        ProviderMark(provider: p.provider, size: planetR * 2 * maxScale)
-                            .padding(planetR * 0.6)
-                            .blur(radius: planetR * 0.22)
-                            .tag("blur:" + p.id)
+                        FaceAgentMark(provider: p.provider, identity: p.identity, size: blur.size, siliconScale: OrbitPlanet.siliconScale)
+                            .equatable()
+                            .tag(p.id)
+                        if blurred[p.id] == nil {
+                            OrbitBlurredMark(provider: p.provider, identity: p.identity, spec: blur).equatable().tag("blur:" + p.id)
+                        }
                         if !ctx.isPreview {
-                            OrbitPlanetLabel(planet: p, unit: u, trailing: false).tag("label:" + p.id)
-                            OrbitPlanetLabel(planet: p, unit: u, trailing: true).tag("labelR:" + p.id)
+                            OrbitPlanetLabel(planet: p, unit: u, trailing: false).equatable().tag("label:" + p.id)
+                            OrbitPlanetLabel(planet: p, unit: u, trailing: true).equatable().tag("labelR:" + p.id)
                         }
                     }
                 }
+                .onChange(of: phases.calm) { _, quiet in calm = quiet }
+            }
+            .onChange(of: OrbitBlurCache.Request(planets: planets, spec: blur), initial: true) { _, req in
+                if blurCache { OrbitBlurCache.shared.prepare(req) }
             }
         }
-        .background(Theme.Night.background)
-        .overlay(FaceAPanicWash(active: ctx.isPanicking))
+        .overlay(FaceAPanicWash(active: ctx.isPanicking, paused: ctx.paused))
         .accessibilityElement()
         .accessibilityLabel("Orbit face: \(ctx.counts.running) agents running")
     }
@@ -73,6 +87,8 @@ struct OrbitFaceView: View {
 struct OrbitPlanet: Identifiable, Equatable {
     let id: String
     let provider: String
+    /// A Silicon's identity (the planet shows the Silicon's avatar).
+    var identity: AgentIdentity?
     let title: String
     let state: AgentState
     /// 0 = innermost (newest) … 1 = outermost (oldest).
@@ -85,10 +101,15 @@ struct OrbitPlanet: Identifiable, Equatable {
         let byAge = visible.sorted { ($0.startedAt ?? $0.updatedAt) > ($1.startedAt ?? $1.updatedAt) }
         let n = byAge.count
         return byAge.enumerated().map { i, s in
-            OrbitPlanet(id: s.id, provider: s.provider, title: FaceA.title(s, max: 26), state: s.state,
+            OrbitPlanet(id: s.id, provider: s.provider, identity: s.identity?.isSilicon == true ? s.identity : nil,
+                        title: FaceA.title(s, max: 26), state: s.state,
                         ring: n == 1 ? 0.45 : Double(i) / Double(n - 1), seed: FaceA.hash(s.id))
         }
     }
+
+    /// A Silicon's rounded-square avatar is drawn at this fraction of the planet's diameter, so
+    /// its corners stay inside the planet's halo and state rings.
+    static let siliconScale: CGFloat = 0.88
 }
 
 /// Integrated orbital phase per planet, so speed changes (state, options) never make a planet jump.
@@ -126,6 +147,95 @@ final class OrbitPhases {
         labelAlphas[id] = (a, t)
         return a
     }
+
+    // MARK: Calm
+
+    private var calmGate = FaceCalmGate()
+    /// True while everything on screen moves slowly (see `OrbitRenderer.calmSpeed`).
+    private(set) var calm = false
+
+    func noteMotion(quiet: Bool, t: Double) {
+        calmGate.update(quiet: quiet, t: t)
+        calm = calmGate.calm
+    }
+
+    // MARK: Static geometry caches
+
+    /// Orbit ellipses only change with the layout (size, tilt, the planet set), so their front
+    /// and back halves are projected once, not 97 points per planet per frame.
+    struct OrbitKey: Equatable {
+        var width: Double, height: Double, unit: Double, tilt: Double
+        var planets: [String]
+        var preview: Bool
+    }
+    private var orbitKey: OrbitKey?
+    private var orbitCache = (front: Path(), back: Path())
+
+    func orbitPaths(_ key: OrbitKey, build: () -> (front: Path, back: Path)) -> (front: Path, back: Path) {
+        if key != orbitKey { orbitCache = build(); orbitKey = key }
+        return orbitCache
+    }
+
+    /// The starfield at rest: one path per (parallax layer, twinkle bucket), built once per size.
+    private var starKey: [Double] = []
+    private var starCache: [Path] = []
+
+    func starPaths(_ key: [Double], build: () -> [Path]) -> [Path] {
+        if key != starKey { starCache = build(); starKey = key }
+        return starCache
+    }
+}
+
+/// Pre-blurred planet marks (the depth-of-field copy of far planets): rasterized once per provider
+/// and size, so far planets draw an image instead of re-running a blur every frame. Silicons keep
+/// the live blurred symbol (their avatar can change when the photo arrives).
+@MainActor
+final class OrbitBlurCache {
+    static let shared = OrbitBlurCache()
+
+    struct Spec: Hashable {
+        var size: CGFloat
+        var pad: CGFloat
+        var radius: CGFloat
+        var scale: CGFloat
+    }
+
+    struct Request: Equatable {
+        var providers: [String]
+        var spec: Spec
+        init(planets: [OrbitPlanet], spec: Spec) {
+            providers = Array(Set(planets.filter { $0.identity == nil }.map(\.provider))).sorted()
+            self.spec = spec
+        }
+    }
+
+    private struct Key: Hashable { var provider: String; var spec: Spec }
+    private var images: [Key: Image] = [:]
+
+    /// Images for the planets that have one (by planet id).
+    func images(for planets: [OrbitPlanet], _ spec: Spec) -> [String: Image] {
+        var out: [String: Image] = [:]
+        for p in planets where p.identity == nil {
+            if let img = images[Key(provider: p.provider, spec: spec)] { out[p.id] = img }
+        }
+        return out
+    }
+
+    /// Renders the missing images (outside any view update).
+    func prepare(_ req: Request) {
+        guard req.spec.size > 1, req.spec.scale > 0 else { return }
+        if images.count > 96 { images.removeAll() }
+        for provider in req.providers {
+            let key = Key(provider: provider, spec: req.spec)
+            guard images[key] == nil else { continue }
+            let renderer = ImageRenderer(content: OrbitBlurredMark(provider: provider, identity: nil, spec: req.spec))
+            renderer.scale = req.spec.scale
+            renderer.isOpaque = false
+            if let cg = renderer.cgImage {
+                images[key] = Image(decorative: cg, scale: req.spec.scale)
+            }
+        }
+    }
 }
 
 /// Canvas renderer for the Orbit face. Pure function of (config, planets, phases, time).
@@ -147,6 +257,11 @@ struct OrbitRenderer {
     let config: Config
     let planets: [OrbitPlanet]
     let phases: OrbitPhases
+    /// Pre-blurred marks by planet id (see `OrbitBlurCache`); others use the "blur:" symbol.
+    var blurred: [String: Image] = [:]
+
+    /// Things slower than this (points per second, at unit 1) look the same at 20 fps.
+    static let calmSpeed = 62.0
 
     private struct Orbit {
         var a: Double, incl: Double, node: Double
@@ -184,8 +299,11 @@ struct OrbitRenderer {
         let aMax = max(aMin * 1.25, min(Double(size.width) * 0.42, Double(size.height) * 0.43 / max(cos(tilt), 0.12)))
         let D = aMax * 3.4
 
+        // The canvas is opaque: the night base comes first.
+        g.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Theme.Night.background))
         drawNebula(&g, size: size, t: t)
-        if config.starfield { drawStars(&g, size: size, t: t) }
+        var shootingStar = false
+        if config.starfield { shootingStar = drawStars(&g, size: size, t: t) }
 
         // Bodies.
         var bodies: [Body] = []
@@ -211,10 +329,23 @@ struct OrbitRenderer {
             bodies.append(Body(planet: p, orbit: o, theta: ph.theta, omega: ph.omega, pos: pos, z: z, s: s))
         }
 
-        // Orbits: back halves first.
-        var front = Path(), back = Path()
-        for b in bodies { orbitPaths(b.orbit, center: center, depth: D, front: &front, back: &back) }
-        if planets.isEmpty { dustOrbits(&front, &back, coreR: coreR, center: center, depth: D) }
+        // Calm when every planet (and the dust) is slow and no shooting star is crossing.
+        var fastest = 0.0
+        for b in bodies { fastest = max(fastest, abs(b.omega) * b.orbit.a * b.s) }
+        if planets.isEmpty {
+            for k in 0..<3 { let o = dustOrbit(k, coreR: coreR); fastest = max(fastest, dustOmega(o, coreR: coreR) * o.a * 1.3) }
+        }
+        phases.noteMotion(quiet: !config.preview && !shootingStar && fastest <= Self.calmSpeed * u, t: t)
+
+        // Orbits: back halves first (projected once per layout).
+        let key = OrbitPhases.OrbitKey(width: Double(size.width), height: Double(size.height), unit: u, tilt: tilt,
+                                       planets: planets.map { "\($0.id)|\($0.ring)" }, preview: config.preview)
+        let (front, back) = phases.orbitPaths(key) {
+            var front = Path(), back = Path()
+            for b in bodies { orbitPaths(b.orbit, center: center, depth: D, front: &front, back: &back) }
+            if planets.isEmpty { dustOrbits(&front, &back, coreR: coreR, center: center, depth: D) }
+            return (front, back)
+        }
         g.stroke(back, with: .color(.white.opacity(0.055)), lineWidth: max(0.6, 1 * u))
 
         let labels = config.labels ? layoutLabels(g, bodies, size: size, center: center, coreR: coreR, t: t) : [:]
@@ -328,35 +459,45 @@ struct OrbitRenderer {
         return out
     }()
 
-    private func drawStars(_ g: inout GraphicsContext, size: CGSize, t: Double) {
+    /// Draws the drifting starfield; returns true while a shooting star is crossing.
+    @discardableResult
+    private func drawStars(_ g: inout GraphicsContext, size: CGSize, t: Double) -> Bool {
         let w = Double(size.width), h = Double(size.height)
         let u = max(Double(config.unit), 0.5)
         let drift = config.reduceMotion ? [0.4, 1.0, 2.0] : [1.6, 4.2, 9.5]
         let baseA = [0.32, 0.5, 0.75]
-        var paths = [Path](repeating: Path(), count: 12)
-        for s in Self.stars {
-            let off = (t * drift[s.layer] * u).truncatingRemainder(dividingBy: w)
-            var x = s.x * w - off
-            if x < 0 { x += w }
-            let y = s.y * h
-            let r = s.size * u
-            paths[s.layer * 4 + s.bucket].addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+        // Stars sit still in their layer's path; each layer is drawn twice, shifted by its drift and
+        // by one screen width more, which wraps it around exactly like moving each star did.
+        let paths = phases.starPaths([w, h, u]) {
+            var paths = [Path](repeating: Path(), count: 12)
+            for s in Self.stars {
+                let r = s.size * u
+                paths[s.layer * 4 + s.bucket].addEllipse(in: CGRect(x: s.x * w - r, y: s.y * h - r, width: r * 2, height: r * 2))
+            }
+            return paths
         }
         for layer in 0..<3 {
-            for b in 0..<4 {
-                let tw = 0.72 + 0.28 * sin(t * (0.6 + Double(b) * 0.37) + Double(b * 7 + layer * 3))
-                g.fill(paths[layer * 4 + b], with: .color(.white.opacity(baseA[layer] * tw)))
+            let off = (t * drift[layer] * u).truncatingRemainder(dividingBy: w)
+            for shift in [-off, w - off] {
+                var lc = g
+                lc.translateBy(x: shift, y: 0)
+                for b in 0..<4 {
+                    let tw = 0.72 + 0.28 * sin(t * (0.6 + Double(b) * 0.37) + Double(b * 7 + layer * 3))
+                    lc.fill(paths[layer * 4 + b], with: .color(.white.opacity(baseA[layer] * tw)))
+                }
             }
         }
         // An occasional shooting star.
-        guard !config.reduceMotion else { return }
+        guard !config.reduceMotion else { return false }
         let period = 29.0
         let k = floor(t / period)
         let seed = UInt64(max(0, k)) &+ 0x5EED
         let startAt = 4 + FaceA.unit(seed, 1) * (period - 8)
         let local = t - k * period - startAt
         let dur = 0.95
-        guard local >= 0, local <= dur else { return }
+        // Busy (full frame rate) from a little before it starts until it's gone.
+        let crossing = local >= -0.3 && local <= dur + 0.1
+        guard local >= 0, local <= dur else { return crossing }
         let p = local / dur
         let x0 = w * (0.15 + 0.7 * FaceA.unit(seed, 2)), y0 = h * (0.05 + 0.3 * FaceA.unit(seed, 3))
         let ang = (FaceA.unit(seed, 4) < 0.5 ? 1 : -1) * (0.35 + 0.25 * FaceA.unit(seed, 5))
@@ -368,6 +509,7 @@ struct OrbitRenderer {
         var path = Path(); path.move(to: tail); path.addLine(to: head)
         g.stroke(path, with: .linearGradient(Gradient(colors: [.clear, .white.opacity(0.85 * sin(p * .pi))]), startPoint: tail, endPoint: head),
                  style: StrokeStyle(lineWidth: 1.4 * u, lineCap: .round))
+        return true
     }
 
     // MARK: Core
@@ -442,22 +584,10 @@ struct OrbitRenderer {
             do {
                 var l = g
                 l.blendMode = .plusLighter
-                // Tail: short butt-capped segments along the orbit behind the planet, tapering in
-                // width and alpha (smooth, no beads).
-                let n = 44
-                let delta = (Double(config.planetR) * 0.3) / b.orbit.a
+                // Tail: a ribbon along the orbit behind the planet, tapering in width, fading from
+                // accent to lavender. One fill (the shape of the old 44 butt-capped segments).
+                drawTail(&l, b, center: center, depth: D, fade: fade)
                 let dirSign: Double = b.omega >= 0 ? 1 : -1
-                let w = Double(config.planetR) * b.s
-                var prev = b.pos
-                for k in 1...n {
-                    let (p, _, _) = project(b.orbit, b.theta - dirSign * Double(k) * delta, center: center, depth: D)
-                    let f = Double(k - 1) / Double(n)
-                    var seg = Path(); seg.move(to: prev); seg.addLine(to: p)
-                    let col = FaceA.accent.mix(FaceA.lavender, f)
-                    l.stroke(seg, with: .color(col.color(0.5 * pow(1 - f, 1.4) * fade)),
-                             style: StrokeStyle(lineWidth: w * (1.05 - 0.9 * f), lineCap: .butt))
-                    prev = p
-                }
                 for j in 0..<14 {
                     let P = 1.7
                     let x = t / P + Double(j) / 14
@@ -522,13 +652,25 @@ struct OrbitRenderer {
             var c = pc; c.opacity = (1 - blurMix) * (0.55 + 0.45 * fade)
             c.draw(sym, at: .zero, anchor: .center)
         }
-        if blurMix > 0.01, let sym = g.resolveSymbol(id: "blur:" + b.planet.id) {
+        if blurMix > 0.01 {
             var c = pc; c.opacity = blurMix * (0.55 + 0.45 * fade)
-            c.draw(sym, at: .zero, anchor: .center)
+            if let img = blurred[b.planet.id] {
+                c.draw(img, at: .zero, anchor: .center)
+            } else if let sym = g.resolveSymbol(id: "blur:" + b.planet.id) {
+                c.draw(sym, at: .zero, anchor: .center)
+            }
         }
-        // Depth shading: a faint dark veil on far planets.
+        // Depth shading: a faint dark veil on far planets (the avatar's own shape for a Silicon).
         if depthN < 0.5 {
-            g.fill(circle(b.pos, pr), with: .color(.black.opacity((0.5 - depthN) * 0.6)))
+            let veil: Path
+            if b.planet.identity != nil {
+                let side = pr * 2 * Double(OrbitPlanet.siliconScale)
+                veil = Path(roundedRect: CGRect(x: b.pos.x - side / 2, y: b.pos.y - side / 2, width: side, height: side),
+                            cornerRadius: side * 0.28, style: .continuous)
+            } else {
+                veil = circle(b.pos, pr)
+            }
+            g.fill(veil, with: .color(.black.opacity((0.5 - depthN) * 0.6)))
         }
         if isFinished {
             g.stroke(ringArc(front: true), with: .color(FaceA.green.color(0.9 * fade)), lineWidth: max(1, 2.2 * u * b.s))
@@ -543,10 +685,58 @@ struct OrbitRenderer {
         }
     }
 
+    /// The working comet tail as one filled ribbon: 45 points along the orbit behind the planet
+    /// (the old segment ends), offset sideways by the tapering half-width, filled with a radial
+    /// fade centred on the planet (accent → lavender, alpha 0.5·(1 − f)^1.4).
+    private func drawTail(_ l: inout GraphicsContext, _ b: Body, center: CGPoint, depth D: Double, fade: Double) {
+        let n = 44
+        let delta = (Double(config.planetR) * 0.3) / b.orbit.a
+        let dirSign: Double = b.omega >= 0 ? 1 : -1
+        let w = Double(config.planetR) * b.s
+        var pts = [CGPoint](repeating: b.pos, count: n + 1)
+        for k in 1...n {
+            pts[k] = project(b.orbit, b.theta - dirSign * Double(k) * delta, center: center, depth: D).0
+        }
+        var left = [CGPoint](), right = [CGPoint]()
+        left.reserveCapacity(n + 1); right.reserveCapacity(n + 1)
+        for k in 0...n {
+            let a = pts[max(0, k - 1)], c = pts[min(n, k + 1)]
+            let len = ((c.x - a.x) * (c.x - a.x) + (c.y - a.y) * (c.y - a.y)).squareRoot()
+            guard len > 1e-6 else { continue }
+            let tx = (c.x - a.x) / len, ty = (c.y - a.y) / len
+            // Segment k (k ≥ 1) was w·(1.05 − 0.9·(k − 1)/n) wide; taper the ribbon the same way.
+            let hw = w * (1.05 - 0.9 * Double(max(0, k - 1)) / Double(n)) / 2
+            left.append(CGPoint(x: pts[k].x - ty * hw, y: pts[k].y + tx * hw))
+            right.append(CGPoint(x: pts[k].x + ty * hw, y: pts[k].y - tx * hw))
+        }
+        guard left.count > 2 else { return }
+        var ribbon = Path()
+        ribbon.addLines(left)
+        for p in right.reversed() { ribbon.addLine(to: p) }
+        ribbon.closeSubpath()
+
+        let head = b.pos
+        func dist(_ p: CGPoint) -> Double { ((p.x - head.x) * (p.x - head.x) + (p.y - head.y) * (p.y - head.y)).squareRoot() }
+        let reach = max(dist(pts[n]), 1)
+        var stops: [Gradient.Stop] = []
+        var last = -1.0
+        for k in stride(from: 0, through: n, by: 4) {
+            let f = Double(k) / Double(n)
+            let loc = min(1, max(last + 0.001, dist(pts[k]) / reach))
+            last = loc
+            stops.append(.init(color: FaceA.accent.mix(FaceA.lavender, f).color(0.5 * pow(1 - f, 1.4) * fade), location: loc))
+        }
+        l.fill(ribbon, with: .radialGradient(Gradient(stops: stops), center: head, startRadius: 0, endRadius: reach))
+    }
+
     // MARK: Empty state: a little dust that keeps the core company.
 
     private func dustOrbit(_ k: Int, coreR: Double) -> Orbit {
         Orbit(a: coreR * (1.9 + Double(k) * 0.75), incl: config.tilt + Double(k) * 0.06 - 0.06, node: Double(k) * 0.11 - 0.1)
+    }
+
+    private func dustOmega(_ o: Orbit, coreR: Double) -> Double {
+        2 * .pi / (24 * pow(o.a / coreR / 1.9, 1.5)) * config.speed * (config.reduceMotion ? 0.35 : 1)
     }
 
     private func dustOrbits(_ front: inout Path, _ back: inout Path, coreR: Double, center: CGPoint, depth: Double) {
@@ -560,8 +750,7 @@ struct OrbitRenderer {
             l.blendMode = .plusLighter
             for k in 0..<3 {
                 let o = dustOrbit(k, coreR: coreR)
-                let omega = 2 * .pi / (24 * pow(o.a / coreR / 1.9, 1.5)) * config.speed * (config.reduceMotion ? 0.35 : 1)
-                let th = Double(k) * 2.1 + t * omega
+                let th = Double(k) * 2.1 + t * dustOmega(o, coreR: coreR)
                 let (p, z, s) = project(o, th, center: center, depth: depth)
                 guard (z >= 0) == front else { continue }
                 let r = (3 + Double(k)) * u * s
@@ -580,9 +769,10 @@ struct OrbitRenderer {
 
 // MARK: - Symbols
 
-/// Text inside the core: the time (or the running count) and a quiet summary line.
-struct OrbitCoreLabel: View {
-    let date: Date
+/// Text inside the core: the time (or the running count) and a quiet summary line. Keyed on the
+/// minute, so it lays out once a minute instead of every frame.
+struct OrbitCoreLabel: View, Equatable {
+    let minute: Date
     let counts: AgentCounts
     let showClock: Bool
     let unit: CGFloat
@@ -591,7 +781,7 @@ struct OrbitCoreLabel: View {
     var body: some View {
         VStack(spacing: 3 * unit) {
             if showClock {
-                Text(date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
+                Text(minute, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
                     .font(Theme.allo(34 * unit, .light))
                     .monospacedDigit()
                     .tracking(-0.8 * unit)
@@ -622,7 +812,7 @@ struct OrbitCoreLabel: View {
     }
 }
 
-struct OrbitPlanetLabel: View {
+struct OrbitPlanetLabel: View, Equatable {
     let planet: OrbitPlanet
     let unit: CGFloat
     let trailing: Bool
@@ -639,5 +829,18 @@ struct OrbitPlanetLabel: View {
         .tracking(Theme.tracking(12 * unit))
         .lineLimit(1)
         .fixedSize()
+    }
+}
+
+/// A planet's depth-of-field copy: its mark, padded and blurred.
+struct OrbitBlurredMark: View, Equatable {
+    let provider: String
+    let identity: AgentIdentity?
+    let spec: OrbitBlurCache.Spec
+
+    var body: some View {
+        FaceAgentMark(provider: provider, identity: identity, size: spec.size, siliconScale: OrbitPlanet.siliconScale)
+            .padding(spec.pad)
+            .blur(radius: spec.radius)
     }
 }
