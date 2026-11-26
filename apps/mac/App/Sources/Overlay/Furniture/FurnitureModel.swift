@@ -231,15 +231,3 @@ struct FurniturePlan: Equatable {
         return out
     }
 }
-
-/// Ideal heights measured by pieces whose size depends on content the layer can't predict (the
-/// logs body), keyed by piece id. One per layer (per display); the layer re-plans when it changes.
-@MainActor @Observable
-final class FurnitureMeasurements {
-    private(set) var ideal: [String: CGFloat] = [:]
-
-    func report(_ pieceID: String, _ height: CGFloat) {
-        let h = height.rounded()
-        if ideal[pieceID] != h { ideal[pieceID] = h }
-    }
-}

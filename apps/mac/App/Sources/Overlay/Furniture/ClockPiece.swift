@@ -2,8 +2,9 @@ import SwiftUI
 import SiliconModeKit
 
 /// A clock on the face, in one of three styles (option `style`):
-/// - `digital`: big Allo thin time with a date line.
-/// - `analog`: a minimal dial on a glass disc; a peach seconds hand ticks only with `seconds` on.
+/// - `digital`: big Allo thin time over an SF Pro date line, like the Lock Screen.
+/// - `analog`: a minimal dial on a Liquid Glass disc; an orange seconds hand ticks only with
+///   `seconds` on.
 /// - `words`: "it's ten forty-two" with the lit words in silicon ink, and the weekday.
 ///
 /// It redraws once a minute (once a second with `seconds` on, for digital and analog), in its own
@@ -73,30 +74,27 @@ private struct DigitalClock: View {
                     .font(Theme.allo(72, .thin))
                     .tracking(Theme.tracking(72, display: true))
                     .monospacedDigit()
-                    .foregroundStyle(Theme.Night.foreground.opacity(0.95))
+                    .foregroundStyle(.primary)
                 if seconds || !use24h {
                     VStack(alignment: .leading, spacing: 0) {
                         if !use24h {
                             Text(p.hour < 12 ? "AM" : "PM")
-                                .font(Theme.allo(14, .medium))
-                                .tracking(0.6)
-                                .foregroundStyle(Theme.Night.secondary)
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
                         }
                         if seconds {
                             Text(String(format: "%02d", p.second))
-                                .font(Theme.allo(20, .light))
+                                .font(.title2.weight(.light))
                                 .monospacedDigit()
-                                .foregroundStyle(LinearGradient(colors: [Theme.Night.lavender, Theme.Night.peach],
-                                                                startPoint: .leading, endPoint: .trailing))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
             }
             .frame(height: 78)
             Text(p.date)
-                .font(Theme.allo(14, .medium))
-                .tracking(Theme.tracking(14))
-                .foregroundStyle(Theme.Night.secondary)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.secondary)
         }
         .lineLimit(1)
         .shadow(color: .black.opacity(0.45), radius: 16)
@@ -129,7 +127,7 @@ private struct AnalogClock: View {
                 var t = Path()
                 t.move(to: point(Double(i) / 12, r - 9))
                 t.addLine(to: point(Double(i) / 12, r - (major ? 19 : 14)))
-                ctx.stroke(t, with: .color(major ? Theme.Night.secondary : Theme.Night.faint),
+                ctx.stroke(t, with: .color(Color.white.opacity(major ? 0.75 : 0.3)),
                            style: StrokeStyle(lineWidth: major ? 2 : 1.2, lineCap: .round))
             }
             func hand(_ turns: Double, _ len: CGFloat, _ width: CGFloat, _ color: Color, tail: CGFloat = 6) {
@@ -138,20 +136,18 @@ private struct AnalogClock: View {
                 h.addLine(to: point(turns, len))
                 ctx.stroke(h, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
             }
-            hand(hour / 12, r * 0.5, 3.4, Theme.Night.foreground)
-            hand(minute / 60, r * 0.74, 2.2, Theme.Night.foreground.opacity(0.92))
+            hand(hour / 12, r * 0.5, 3.4, .white)
+            hand(minute / 60, r * 0.74, 2.2, Color.white.opacity(0.92))
             if seconds {
-                hand(Double(p.second) / 60, r * 0.8, 1.1, Theme.Night.peach, tail: 12)
+                hand(Double(p.second) / 60, r * 0.8, 1.1, .orange, tail: 12)
             }
             ctx.fill(Path(ellipseIn: CGRect(x: c.x - 3.2, y: c.y - 3.2, width: 6.4, height: 6.4)),
-                     with: .color(seconds ? Theme.Night.peach : Theme.Night.foreground))
+                     with: .color(seconds ? .orange : .white))
             ctx.fill(Path(ellipseIn: CGRect(x: c.x - 1.2, y: c.y - 1.2, width: 2.4, height: 2.4)),
-                     with: .color(Theme.Night.background))
+                     with: .color(.black))
         }
         .frame(width: Self.side, height: Self.side)
-        .background(Circle().fill(Color.black.opacity(0.18)))
         .hudGlass(in: Circle())
-        .hudHairline(Circle())
         .accessibilityLabel(date.formatted(date: .omitted, time: .shortened))
     }
 }
@@ -174,9 +170,8 @@ private struct WordsClock: View {
                 .font(Theme.allo(30, .medium))
                 .tracking(Theme.tracking(30, display: true))
                 .minimumScaleFactor(0.6)
-            Text("\(Text(p.weekday.lowercased()).foregroundStyle(Theme.Night.secondary)) \(Text(Self.period(p.hour)).foregroundStyle(dim))")
-                .font(Theme.allo(16, .medium))
-                .tracking(Theme.tracking(16))
+            Text("\(Text(p.weekday).foregroundStyle(.secondary)) \(Text(Self.period(p.hour)).foregroundStyle(.tertiary))")
+                .font(.title3.weight(.semibold))
         }
         .lineLimit(1)
         .multilineTextAlignment(leading ? .leading : .trailing)

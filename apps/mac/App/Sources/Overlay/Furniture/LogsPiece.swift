@@ -1,34 +1,35 @@
 import SwiftUI
 import SiliconModeKit
 
-/// The logs piece, like browser tabs: one tab per agent Silicon Mode shows (needs you, working,
-/// error, finished; most recent first), and below it every line the mode's log book holds for the
-/// selected agent, oldest at the top, in a scroll view that follows the tail.
+/// The logs piece, like Safari's tab bar: a row of capsule tabs, one per agent Silicon Mode shows
+/// (needs you, working, error, finished; most recent first), and under it every line the mode's
+/// log book holds for the selected agent, oldest at the top, in a native text view that follows the
+/// tail (`LogTextView`).
 ///
-/// - Scrolling up pauses following; a "Latest" pill appears when newer lines arrive.
+/// - The selected tab is a glass capsule that morphs from tab to tab.
+/// - Scrolling up pauses following; a "Latest" button appears when newer lines arrive.
 /// - The chevron minimises the piece to its tab strip (per piece, remembered, shared by every
 ///   display); clicking a tab or the chevron restores it.
 /// - The selected tab starts on the most recently active agent; if that agent leaves, the tab that
 ///   takes its place is selected.
+/// - Its height comes from the plan, which sizes it from line counts, never from measured content.
 struct LogsPiece: View {
     @Environment(AppModel.self) private var model
     let pieceID: String
     let budget: CGFloat
     let width: CGFloat
     let slot: FurnitureSlot
-    let measurements: FurnitureMeasurements
     var preview: FurnitureSource?
 
     @State private var selectedID: String?
-    /// Height of the selected log's content (measured live, estimated in snapshots).
-    @State private var contentHeight: CGFloat = 0
 
-    static let stripHeight: CGFloat = 44
+    /// Tabs (32) inset by 8 all round: concentric with the panel (16 + 8 = 24).
+    static let stripHeight: CGFloat = 48
     /// The smallest body worth showing (else only the strip is drawn).
-    static let minBody: CGFloat = 60
-    static let lineEstimate: CGFloat = 19
-    static let bodyPadding: CGFloat = 20
-    private static let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+    static let minBody: CGFloat = 72
+    /// Height budgeted per log line (a one-line row and the gap after it).
+    static let lineEstimate: CGFloat = 24
+    static let bodyPadding: CGFloat = 24
 
     private var ui: FurnitureUIState { .shared }
 
@@ -36,37 +37,34 @@ struct LogsPiece: View {
         let sessions = preview?.sortedSessions ?? model.modeAgents
         let minimized = preview?.logsMinimized ?? ui.logsMinimized(pieceID)
         let selected = Self.resolve(selectedID ?? preview?.selectedLogTab, in: sessions)
-        let bodyBudget = max(0, budget - Self.stripHeight)
-        let showsBody = !minimized && bodyBudget >= Self.minBody
-        let measuredContent = preview == nil ? contentHeight : Self.estimatedBody(lines: selected.map(\.recentEvents.count) ?? 0)
+        // The body takes exactly what the plan gave the piece. The plan sizes it from line counts
+        // (never from measured content), so a growing log can't feed back into its own layout.
+        let bodyHeight = max(0, budget - Self.stripHeight)
+        let showsBody = !minimized && bodyHeight >= Self.minBody
 
         VStack(spacing: 0) {
-            LogTabStrip(sessions: sessions, selectedID: selected?.id, connected: showsBody, bottomSlot: !slot.isTop,
+            LogTabStrip(sessions: sessions, selectedID: selected?.id, bottomSlot: !slot.isTop,
                         minimized: minimized, onSelect: select, onToggle: toggleMinimized)
             if showsBody {
                 Group {
                     if let selected {
-                        LogBody(session: selected, contentHeight: $contentHeight, preview: preview)
+                        LogBody(session: selected, preview: preview)
                             .id(selected.id)
                     } else {
                         LogEmptyNote(text: "Agent activity will stream in here.")
                     }
                 }
-                .frame(height: min(bodyBudget, max(Self.minBody, measuredContent)))
+                .frame(height: bodyHeight)
                 .frame(maxWidth: .infinity)
-                .background(LogTabStrip.raisedFill)
                 .transition(.opacity)
             }
         }
         .frame(width: width)
-        .clipShape(Self.shape)
-        .hudPanel(radius: 22)
+        .hudPanel()
         .onAppear {
             if selectedID == nil, preview == nil { selectedID = Self.mostRecent(sessions)?.id }
-            measurements.report(pieceID, max(Self.minBody, contentHeight))
         }
         .onChange(of: sessions.map(\.id)) { old, new in repairSelection(old: old, new: new, sessions: sessions) }
-        .onChange(of: contentHeight) { _, h in measurements.report(pieceID, max(Self.minBody, h)) }
         .animation(Theme.Motion.slow, value: minimized)
     }
 
@@ -91,12 +89,12 @@ struct LogsPiece: View {
         guard !new.contains(sel) else { return }
         guard !new.isEmpty else { selectedID = nil; return }
         let i = old.firstIndex(of: sel) ?? 0
-        selectedID = new[min(i, new.count - 1)]
+        withAnimation(Theme.Motion.slow) { selectedID = new[min(i, new.count - 1)] }
     }
 
     private func select(_ id: String) {
         guard preview == nil else { return }
-        if selectedID != id { selectedID = id }
+        if selectedID != id { withAnimation(.smooth(duration: 0.35)) { selectedID = id } }
         if ui.logsMinimized(pieceID) { withAnimation(Theme.Motion.slow) { ui.setLogsMinimized(pieceID, false) } }
     }
 
@@ -107,93 +105,75 @@ struct LogsPiece: View {
 
     // MARK: Size
 
-    /// The strip, plus the body at its measured height (up to ~42% of the screen).
-    static func demand(minimized: Bool, bodyIdeal: CGFloat?, screenHeight: CGFloat) -> FurnitureDemand {
+    /// The strip, plus a body sized from how many lines the longest tab holds (a fixed height per
+    /// line, up to ~42% of the screen). Never from measured content: a lazy stack re-estimates its
+    /// height as it scrolls, and sizing the panel from that re-lays it out forever. Sizing by the
+    /// longest tab also keeps the panel still while switching tabs.
+    static func demand(minimized: Bool, lines: Int, screenHeight: CGFloat) -> FurnitureDemand {
         if minimized { return .fixed(stripHeight) }
         let cap = max(minBody, screenHeight * 0.42 - stripHeight)
-        let body = min(cap, max(minBody, bodyIdeal ?? minBody))
+        let body = min(cap, estimatedBody(lines: lines))
         return FurnitureDemand(min: stripHeight, ideal: stripHeight + body)
     }
 
     static func estimatedBody(lines: Int) -> CGFloat {
-        lines == 0 ? minBody : CGFloat(lines) * lineEstimate + bodyPadding
+        max(minBody, CGFloat(lines) * lineEstimate + bodyPadding)
     }
 
-    /// Snapshot / preview: the body's ideal height from the selected agent's lines.
-    static func previewBodyIdeal(_ p: FurnitureSource) -> CGFloat {
-        estimatedBody(lines: resolve(p.selectedLogTab, in: p.sortedSessions)?.recentEvents.count ?? 0)
+    /// Lines in the longest tab: the log book's (live) or the sessions' recent events.
+    static func longestLog(_ sessions: [AgentSession], book: ModeLogBook?) -> Int {
+        sessions.map { s in
+            let logged = book?.events(for: s.id).count ?? 0
+            return logged > 0 ? logged : s.recentEvents.count
+        }.max() ?? 0
     }
 }
 
 // MARK: - Tab strip
 
-/// One tab per agent: avatar, short title, state glyph. The selected tab is raised and, while the
-/// body shows, joins it (same surface), like the active tab of a browser.
+/// Capsule tabs: avatar, short title, state glyph. The selected tab is a glass capsule that morphs
+/// to the tab you pick; the others are quiet labels that highlight under the pointer. Like Safari's
+/// compact tabs, they shrink to share the strip (titles truncate, the selected one keeps the most)
+/// rather than scroll: a scroll view here would add focus bookkeeping SwiftUI redoes on every change.
 struct LogTabStrip: View {
     let sessions: [AgentSession]
     let selectedID: String?
-    /// The body shows under the strip (the selected tab connects to it).
-    let connected: Bool
     let bottomSlot: Bool
     let minimized: Bool
     var onSelect: (String) -> Void
     var onToggle: () -> Void
 
-    /// The raised surface: the selected tab and the body under it.
-    static let raisedFill = Color.white.opacity(0.075)
+    @Namespace private var ns
+    /// Pointer over the strip: only then is the selected tab's glass interactive (interactive glass
+    /// animates while on screen, and the strip is on screen for hours).
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             if sessions.isEmpty {
-                HUDSectionLabel(title: "Activity")
-                    .padding(.leading, 16)
-                Spacer(minLength: 0)
-            } else if HUDRender.isSnapshot {
-                // No scroll view: start the strip one tab before the selected one, as the live
-                // strip scrolls the selected tab into view.
-                let i = sessions.firstIndex { $0.id == selectedID } ?? 0
-                HStack(spacing: 2) { tabs(Array(sessions.dropFirst(max(0, i - 1)))) }
+                HUDSectionLabel(title: "Activity", symbol: "waveform")
                     .padding(.leading, 8)
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                    .clipped()
-                    .mask(Self.edgeFade)
+                Spacer(minLength: 0)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 2) { tabs(sessions) }
-                            .padding(.horizontal, 8)
-                    }
-                    .scrollIndicators(.never)
-                    .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                    .mask(Self.edgeFade)
-                    .onChange(of: selectedID) { _, id in
-                        guard let id else { return }
-                        withAnimation(Theme.Motion.moderate) { proxy.scrollTo(id, anchor: .center) }
-                    }
-                    .onAppear { if let selectedID { proxy.scrollTo(selectedID, anchor: .center) } }
-                }
+                HStack(spacing: 2) { tabs(sessions) }
+                    .hudGlassContainer(spacing: 2)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
             toggle
-                .padding(.trailing, 9)
-                .padding(.bottom, connected ? 4 : 0)
         }
-        .frame(height: LogsPiece.stripHeight, alignment: connected ? .bottom : .center)
-    }
-
-    /// Tabs that run past either end fade out instead of being cut.
-    private static var edgeFade: some View {
-        HStack(spacing: 0) {
-            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 6)
-            Color.black
-            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 22)
-        }
+        .padding(.horizontal, 8)
+        .frame(height: LogsPiece.stripHeight)
+        .onHover { h in if !HUDRender.isSnapshot, h != hovering { hovering = h } }
     }
 
     private func tabs(_ sessions: [AgentSession]) -> some View {
         ForEach(sessions) { s in
-            LogTab(session: s, selected: s.id == selectedID, connected: connected)
-                .id(s.id)
-                .onTapGesture { onSelect(s.id) }
+            Button { onSelect(s.id) } label: {
+                LogTab(session: s, selected: s.id == selectedID, namespace: ns, interactive: hovering)
+            }
+            .buttonStyle(HUDPressStyle())
+            .focusable(false)
+            .layoutPriority(s.id == selectedID ? 1 : 0)
         }
     }
 
@@ -201,69 +181,43 @@ struct LogTabStrip: View {
         // Bottom slots minimise downward (the strip stays at the bottom); top slots upward.
         let minimise = bottomSlot ? "chevron.down" : "chevron.up"
         let restore = bottomSlot ? "chevron.up" : "chevron.down"
-        return Button(action: onToggle) {
-            Image(systemName: minimized ? restore : minimise)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(Theme.Night.muted)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Color.white.opacity(0.06)))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(minimized ? "Show logs" : "Minimise logs")
-        .accessibilityLabel(minimized ? "Show logs" : "Minimise logs")
+        return HUDCircleButton(symbol: minimized ? restore : minimise, size: LogTab.height, action: onToggle)
+            .help(minimized ? "Show logs" : "Minimise logs")
+            .accessibilityLabel(minimized ? "Show logs" : "Minimise logs")
     }
 }
 
 struct LogTab: View {
     let session: AgentSession
     let selected: Bool
-    let connected: Bool
+    let namespace: Namespace.ID
+    let interactive: Bool
     @State private var hovering = false
 
     static let height: CGFloat = 32
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             AgentAvatarView(session: session, size: 16, showsState: false)
             Text(Self.short(session.title))
-                .font(Theme.allo(12.5, selected ? .semibold : .medium))
-                .tracking(Theme.tracking(12.5))
-                .foregroundStyle(selected ? Theme.Night.foreground : Theme.Night.secondary)
+                .font(.subheadline.weight(selected ? .semibold : .medium))
+                .foregroundStyle(selected ? .primary : .secondary)
                 .lineLimit(1)
-                .fixedSize()
-            LogStateGlyph(state: session.state)
+                .truncationMode(.tail)
+            HUDStateGlyph(state: session.state, size: 11)
         }
-        .padding(.horizontal, 11)
+        .padding(.horizontal, 10)
         .frame(height: Self.height)
-        .background { background }
-        .contentShape(Rectangle())
-        .onHover { h in if !HUDRender.isSnapshot { hovering = h } }
+        .background {
+            if !selected && hovering {
+                Capsule().fill(.fill.tertiary)
+            }
+        }
+        .modifier(SelectedTabGlass(selected: selected, namespace: namespace, interactive: interactive))
+        .contentShape(Capsule())
+        .onHover { h in if !HUDRender.isSnapshot { withAnimation(Theme.Motion.fast) { hovering = h } } }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    @ViewBuilder
-    private var background: some View {
-        if selected {
-            if connected {
-                let shape = UnevenRoundedRectangle(topLeadingRadius: 11, bottomLeadingRadius: 0,
-                                                   bottomTrailingRadius: 0, topTrailingRadius: 11, style: .continuous)
-                shape.fill(LogTabStrip.raisedFill)
-                    .overlay(alignment: .top) {
-                        // Specular top edge: the tab reads as raised glass.
-                        LinearGradient(colors: [Color.white.opacity(0.22), Color.white.opacity(0)], startPoint: .top, endPoint: .bottom)
-                            .frame(height: 10)
-                            .mask(shape.stroke(Color.black, lineWidth: 1))
-                    }
-            } else {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LogTabStrip.raisedFill)
-                    .hudHairline(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-        } else if hovering {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.04))
-        }
     }
 
     /// About 18 characters.
@@ -273,53 +227,40 @@ struct LogTab: View {
     }
 }
 
-/// Working: a small activity dot. Needs you: a pulsing dot. Finished: a check. Error: "!".
-struct LogStateGlyph: View {
-    let state: AgentState
+/// The selected tab's glass capsule. One glass id moves between tabs, so the capsule morphs.
+private struct SelectedTabGlass: ViewModifier {
+    let selected: Bool
+    let namespace: Namespace.ID
+    let interactive: Bool
 
-    var body: some View {
-        Group {
-            switch state {
-            case .working:
-                Circle().fill(Theme.Night.accent).frame(width: 6, height: 6)
-            case .needsYou:
-                HUDStateDot(state: .needsYou, size: 6)
-            case .finished:
-                Image(systemName: "checkmark")
-                    .font(.system(size: 8.5, weight: .heavy))
-                    .foregroundStyle(Theme.Night.success)
-            case .error:
-                Image(systemName: "exclamationmark")
-                    .font(.system(size: 9, weight: .heavy))
-                    .foregroundStyle(Theme.Night.danger)
-            case .idle:
-                Circle().fill(Theme.Night.muted).frame(width: 6, height: 6)
+    func body(content: Content) -> some View {
+        if !selected {
+            content
+        } else if HUDRender.isSnapshot {
+            content.background {
+                Capsule().fill(Color.white.opacity(0.14))
+                    .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 0.6))
             }
+        } else {
+            content
+                .glassEffect(Glass.regular.interactive(interactive), in: .capsule)
+                .glassEffectID("selected-tab", in: namespace)
         }
-        .frame(width: 10, height: 10)
-        .accessibilityLabel(state.label)
     }
 }
 
 // MARK: - Body
 
-/// Every line of one agent, oldest first, following the tail while scrolled to the bottom.
+/// Every line of one agent, oldest first, following the tail while scrolled to the bottom. Live it
+/// is a native text view (`LogTextView`); snapshots draw the last lines flat.
 private struct LogBody: View {
     @Environment(AppModel.self) private var model
     let session: AgentSession
-    @Binding var contentHeight: CGFloat
     var preview: FurnitureSource?
 
-    @State private var position = ScrollPosition(edge: .bottom)
     @State private var following = true
     @State private var unseen = 0
-
-    private struct Metrics: Equatable {
-        var visibleBottom: CGFloat
-        var content: CGFloat
-        var container: CGFloat
-        var atBottom: Bool { visibleBottom >= content - 8 }
-    }
+    @State private var jump = 0
 
     var body: some View {
         let lines = events
@@ -328,7 +269,23 @@ private struct LogBody: View {
         } else if HUDRender.isSnapshot {
             flat(lines)
         } else {
-            scroller(lines)
+            LogTextView(events: lines, following: $following, unseen: $unseen, jump: jump)
+                // A soft scroll edge under the tab strip; the bottom corners follow the panel's.
+                .mask {
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 10)
+                        UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
+                                               bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if !following && unseen > 0 {
+                        latestButton
+                            .padding(.bottom, 12)
+                            .transition(.opacity.combined(with: .offset(y: 8)))
+                    }
+                }
+                .animation(Theme.Motion.moderate, value: !following && unseen > 0)
         }
     }
 
@@ -341,83 +298,30 @@ private struct LogBody: View {
         return logged.isEmpty ? session.recentEvents : logged
     }
 
-    private func scroller(_ lines: [AgentEvent]) -> some View {
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 5) {
-                ForEach(lines) { LogLineRow(event: $0) }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, LogsPiece.bodyPadding / 2)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                if abs(h - contentHeight) >= 1 { contentHeight = h }
-            }
-        }
-        .scrollPosition($position)
-        .scrollIndicators(.automatic)
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .onScrollGeometryChange(for: Metrics.self) { g in
-            Metrics(visibleBottom: g.visibleRect.maxY, content: g.contentSize.height, container: g.containerSize.height)
-        } action: { old, new in
-            if new.content != old.content || new.container != old.container {
-                // New lines (or a resize), not the user: stay pinned to the tail while following.
-                if following { position.scrollTo(edge: .bottom) }
-            } else if new.visibleBottom != old.visibleBottom {
-                // The user scrolled: following resumes only at the bottom.
-                let bottom = new.atBottom
-                if bottom != following { following = bottom }
-                if bottom, unseen != 0 { unseen = 0 }
-            }
-        }
-        .onChange(of: lines.count) { old, new in
-            if !following, new > old { unseen += new - old }
-        }
-        .onChange(of: lines.last?.id) { _, _ in
-            if !following, unseen == 0 { unseen = 1 }
-        }
-        .overlay(alignment: .bottom) {
-            if !following && unseen > 0 {
-                latestPill
-                    .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .offset(y: 8)))
-            }
-        }
-        .animation(Theme.Motion.moderate, value: !following && unseen > 0)
-    }
-
-    private var latestPill: some View {
+    private var latestButton: some View {
         Button {
-            following = true
-            unseen = 0
-            withAnimation(Theme.Motion.slow) { position.scrollTo(edge: .bottom) }
+            jump &+= 1
         } label: {
-            HStack(spacing: 5) {
-                Text("Latest")
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 10, weight: .bold))
-            }
-            .font(Theme.allo(12, .semibold))
-            .foregroundStyle(Theme.Night.foreground)
-            .padding(.horizontal, 13)
-            .frame(height: 28)
-            .contentShape(Capsule())
+            Label("Latest", systemImage: "arrow.down")
+                .font(.subheadline.weight(.semibold))
         }
-        .buttonStyle(.plain)
-        .hudChip(tint: Theme.Night.accent.opacity(0.28))
+        .buttonStyle(.glass)
+        .focusable(false)
         .accessibilityLabel("Jump to the latest lines")
     }
 
-    /// Snapshots can't render a scroll view: the last lines, bottom-aligned, clipped at the top.
+    /// Snapshots can't render the text view: the last lines, bottom-aligned, faded at the top.
     private func flat(_ lines: [AgentEvent]) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: LogLineRow.spacing) {
             ForEach(lines.suffix(40)) { LogLineRow(event: $0) }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .padding(.vertical, LogsPiece.bodyPadding / 2)
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottomLeading)
         .clipped()
         .mask {
             VStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 18)
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 24)
                 Color.black
             }
         }
@@ -427,75 +331,183 @@ private struct LogBody: View {
 private struct LogEmptyNote: View {
     let text: String
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "waveform")
-                .font(.system(size: 11, weight: .semibold))
-            Text(text)
-                .font(Theme.allo(12.5, .regular))
-        }
-        .foregroundStyle(Theme.Night.muted)
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        Label(text, systemImage: "waveform")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
-/// One log line: time, kind glyph, text (wrapping up to three lines).
+/// One log line as SwiftUI (snapshots; live lines are paragraphs of `LogTextView` with the same
+/// look): time, the kind as a symbol, and the text (wrapping up to three lines). Commands and file
+/// paths are set in SF Mono; everything else in SF Pro.
 struct LogLineRow: View {
     let event: AgentEvent
 
+    static let spacing: CGFloat = 8
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(HUDFormat.clock(event.at))
-                .font(HUDFont.mono(10.5))
-                .foregroundStyle(Theme.Night.faint)
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
                 .fixedSize()
-            Image(systemName: Self.symbol(event.kind, event.text))
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(color.opacity(0.85))
-                .frame(width: 12)
-            Text(event.text)
-                .font(HUDFont.mono(11.5, emphasized ? .medium : .regular))
-                .foregroundStyle(color)
-                .lineLimit(3)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            Label {
+                LogCode.text(event)
+                    .font(.callout.weight(event.kind == .user ? .medium : .regular))
+                    .foregroundStyle(textStyle)
+                    .lineSpacing(2)
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: Self.symbol(event.kind, event.text))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(iconStyle)
+            }
+            .labelStyle(LogLabelStyle())
         }
         .accessibilityElement(children: .combine)
     }
 
-    private var emphasized: Bool { [.permission, .question, .error].contains(event.kind) }
-
-    private var color: Color {
+    private var textStyle: AnyShapeStyle {
         switch event.kind {
-        case .permission, .question: Theme.Night.warning
-        case .error: Theme.Night.danger
-        case .assistant: Theme.Night.foreground.opacity(0.92)
-        case .user: Theme.Night.lavender
-        case .thinking, .status: Theme.Night.muted
-        case .tool, .toolResult: Theme.Night.secondary
+        case .permission, .question: AnyShapeStyle(HUDTint.needsYou)
+        case .error: AnyShapeStyle(HUDTint.error)
+        case .assistant, .user: AnyShapeStyle(.primary)
+        case .tool: AnyShapeStyle(.secondary)
+        case .thinking, .status, .toolResult: AnyShapeStyle(.tertiary)
         }
     }
 
-    /// The event kind (or the tool's verb) as a symbol.
+    private var iconStyle: AnyShapeStyle {
+        switch event.kind {
+        case .permission, .question: AnyShapeStyle(HUDTint.needsYou)
+        case .error: AnyShapeStyle(HUDTint.error)
+        case .user: AnyShapeStyle(HUDTint.working)
+        case .assistant, .tool: AnyShapeStyle(.secondary)
+        case .thinking, .status, .toolResult: AnyShapeStyle(.tertiary)
+        }
+    }
+
+    /// The event kind (or the tool's verb) as an SF Symbol.
     static func symbol(_ kind: AgentEvent.Kind, _ text: String) -> String {
         switch kind {
         case .user: return "person.fill"
-        case .assistant: return "text.bubble.fill"
-        case .thinking: return "ellipsis"
+        case .assistant: return "text.bubble"
+        case .thinking: return "brain"
         case .toolResult: return "arrow.turn.down.right"
         case .permission: return "hand.raised.fill"
-        case .question: return "questionmark"
-        case .status: return "circle.fill"
-        case .error: return "exclamationmark"
+        case .question: return "questionmark.bubble.fill"
+        case .status: return "info.circle"
+        case .error: return "exclamationmark.triangle.fill"
         case .tool:
             let t = text.lowercased()
-            if t.hasPrefix("ran") || t.hasPrefix("run") || t.hasPrefix("$") { return "terminal.fill" }
+            if t.hasPrefix("ran") || t.hasPrefix("run") || t.hasPrefix("$") { return "terminal" }
             if t.hasPrefix("edit") || t.hasPrefix("wrote") || t.hasPrefix("creat") || t.hasPrefix("writ") { return "pencil" }
-            if t.hasPrefix("read") || t.hasPrefix("open") { return "doc.text.fill" }
+            if t.hasPrefix("read") || t.hasPrefix("open") { return "doc.text" }
             if t.hasPrefix("search") || t.hasPrefix("grep") || t.hasPrefix("glob") || t.hasPrefix("find") { return "magnifyingglass" }
             if t.hasPrefix("fetch") || t.hasPrefix("web") { return "globe" }
-            return "wrench.adjustable.fill"
+            return "wrench.and.screwdriver"
         }
+    }
+}
+
+/// Icon and title on one baseline, the icon in a fixed column so the text lines up.
+private struct LogLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            configuration.icon.frame(width: 15)
+            configuration.title
+        }
+    }
+}
+
+/// Finds the command or file path in a tool line ("Ran: npm test", "Edited src/a.ts (+4 −1)") so it
+/// can be set in SF Mono. Descriptions ("Ran: Look for crash reports") stay in SF Pro.
+enum LogCode {
+    static func text(_ e: AgentEvent) -> Text {
+        guard e.kind == .tool || e.kind == .permission, let s = split(e.text) else { return Text(e.text) }
+        return Text("\(Text(s.lead))\(Text(s.code).font(.callout.monospaced()))\(Text(s.tail))")
+    }
+
+    private static let runLeads = ["Wants to run: ", "Ran: ", "Ran ", "Running ", "Run: ", "Run ", "$ "]
+    private static let pathLeads = ["Wants to edit ", "Read ", "Reading ", "Edited ", "Editing ", "Edit ", "Created ", "Wrote ",
+                                    "Write ", "Opened ", "Deleted "]
+    private static let commands: Set<String> = ["git", "npm", "pnpm", "yarn", "npx", "bun", "node", "deno", "swift", "xcodebuild",
+                                                "xcrun", "make", "cmake", "cargo", "go", "python", "python3", "pip", "uv", "pytest",
+                                                "ruby", "bundle", "rails", "docker", "kubectl", "terraform", "brew", "curl", "wget",
+                                                "ls", "cd", "cat", "grep", "rg", "sed", "awk", "find", "mkdir", "rm", "mv", "cp",
+                                                "chmod", "echo", "gh", "jq", "tar", "ssh", "scp", "open", "sh", "bash", "zsh"]
+
+    static func split(_ text: String) -> (lead: String, code: String, tail: String)? {
+        for lead in runLeads where text.hasPrefix(lead) {
+            let rest = String(text.dropFirst(lead.count))
+            guard looksLikeCommand(rest) else { return nil }
+            return (lead, rest, "")
+        }
+        for lead in pathLeads where text.hasPrefix(lead) {
+            let rest = text.dropFirst(lead.count)
+            let token = String(rest.prefix { !$0.isWhitespace })
+            guard looksLikePath(token) else { return nil }
+            return (lead, token, String(rest.dropFirst(token.count)))
+        }
+        return nil
+    }
+
+    static func looksLikeCommand(_ s: String) -> Bool {
+        let first = String(s.prefix { !$0.isWhitespace })
+        guard !first.isEmpty else { return false }
+        if commands.contains(first) { return true }
+        if first.hasPrefix("./") || first.hasPrefix("/") || first.hasPrefix("~/") { return true }
+        return first == first.lowercased() && (s.contains(" --") || s.contains(" -") || s.contains("|") || s.contains("&&"))
+    }
+
+    static func looksLikePath(_ s: String) -> Bool {
+        guard !s.isEmpty, !s.hasSuffix(":") else { return false }
+        if s.hasPrefix("/") || s.hasPrefix("~/") || s.hasPrefix("./") || s.hasPrefix("…/") { return true }
+        if s.contains("/") { return true }
+        // A bare file name with an extension ("main.tf", "Package.swift").
+        guard let dot = s.lastIndex(of: "."), dot != s.startIndex else { return false }
+        let ext = s[s.index(after: dot)...]
+        return (1...6).contains(ext.count) && ext.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+}
+
+// MARK: - Shared controls
+
+/// A round glass button with an SF Symbol (minimise, collapse). Its glass turns interactive only
+/// under the pointer: these sit on screen for hours.
+struct HUDCircleButton: View {
+    let symbol: String
+    var size: CGFloat = 32
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(hovering ? .primary : .secondary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: size, height: size)
+                .contentShape(Circle())
+        }
+        .buttonStyle(HUDPressStyle())
+        .focusable(false)
+        .hudGlass(in: Circle(), interactive: hovering)
+        .onHover { h in if !HUDRender.isSnapshot { withAnimation(Theme.Motion.fast) { hovering = h } } }
+    }
+}
+
+/// Quick press feedback for furniture buttons whose glass gives none at rest.
+struct HUDPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(Theme.Motion.fast, value: configuration.isPressed)
     }
 }

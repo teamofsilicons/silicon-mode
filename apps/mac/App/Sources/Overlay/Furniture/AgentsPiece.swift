@@ -3,14 +3,18 @@ import SiliconModeKit
 
 /// The agents piece: state chips ("2 agents need you · 3 working · 1 finished") over the list of
 /// the agents Silicon Mode shows: running ones plus those that finished since it was turned on,
-/// never idle ones (`AppModel.modeAgents`). The list collapses into a pill of avatars.
+/// never idle ones (`AppModel.modeAgents`). Rows read like Notification Center's; the list
+/// collapses into a glass pill of avatars.
 struct AgentsPiece: View {
     @Environment(AppModel.self) private var model
     let budget: CGFloat
     let width: CGFloat
+    /// Leading slots align left; trailing ones align right, so chips wider than the slot run
+    /// toward the middle of the screen, never off its edge.
+    var leading = true
     var preview: FurnitureSource?
 
-    static let chipsHeight: CGFloat = 32
+    static let chipsHeight: CGFloat = 30
     static let pillHeight: CGFloat = 36
     static let maxRows = 8
 
@@ -20,20 +24,21 @@ struct AgentsPiece: View {
         let sessions = preview?.sortedSessions ?? model.modeAgents
         let collapsed = preview?.agentsCollapsed ?? ui.agentsCollapsed
         let listBudget = budget - Self.chipsHeight - FurnitureMetrics.spacing
-        VStack(alignment: .leading, spacing: FurnitureMetrics.spacing) {
-            // Chips keep their natural width (they may run past the list's edge, never wrap).
-            AgentStateChips(counts: AgentCounts(sessions))
+        VStack(alignment: leading ? .leading : .trailing, spacing: FurnitureMetrics.spacing) {
+            // Chips keep their natural width (they may run past the list's edge toward the
+            // middle of the screen, never wrap).
+            AgentStateChips(counts: AgentCounts(sessions), leading: leading)
                 .fixedSize()
             if !sessions.isEmpty {
                 let fits = AgentsPieceList.maxRows(for: listBudget, count: sessions.count)
                 if (collapsed || fits == 0) && listBudget >= Self.pillHeight {
-                    AgentsPieceList(sessions: sessions, collapsed: true, maxRows: 0, width: width) { toggle() }
+                    AgentsPieceList(sessions: sessions, collapsed: true, maxRows: 0, width: width, preview: preview != nil) { toggle() }
                 } else if fits > 0 {
-                    AgentsPieceList(sessions: sessions, collapsed: false, maxRows: fits, width: width) { toggle() }
+                    AgentsPieceList(sessions: sessions, collapsed: false, maxRows: fits, width: width, preview: preview != nil) { toggle() }
                 }
             }
         }
-        .frame(width: width, alignment: .leading)
+        .frame(width: width, alignment: leading ? .leading : .trailing)
     }
 
     private func toggle() {
@@ -51,10 +56,11 @@ struct AgentsPiece: View {
 
 // MARK: - Chips
 
-/// "3 agents need you · 2 working · 4 finished · 1 failed" as state-colored glass chips with
-/// rolling numbers. No idle chip: Silicon Mode never lists idle agents.
+/// "3 agents need you · 2 working · 4 finished · 1 failed" as glass capsules with the state's
+/// symbol and rolling numbers. No idle chip: Silicon Mode never lists idle agents.
 struct AgentStateChips: View {
     let counts: AgentCounts
+    var leading = true
     @Namespace private var ns
 
     private struct Chip: Identifiable {
@@ -69,54 +75,51 @@ struct AgentStateChips: View {
     }
 
     var body: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 8) {
-                if chips.isEmpty {
-                    HStack(spacing: 7) {
-                        Image(systemName: "moon.zzz")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.Night.muted)
-                        Text("No agents running")
-                            .font(Theme.allo(13, .medium))
-                            .foregroundStyle(Theme.Night.secondary)
-                    }
-                    .padding(.horizontal, 13)
-                    .frame(height: AgentsPiece.chipsHeight)
-                    .hudChip()
-                    .glassEffectID("none", in: ns)
-                    .transition(.blurReplace)
+        HStack(spacing: 8) {
+            if chips.isEmpty {
+                Label {
+                    Text("No agents running")
+                        .foregroundStyle(.secondary)
+                } icon: {
+                    Image(systemName: "moon.zzz.fill")
+                        .foregroundStyle(.secondary)
                 }
-                ForEach(Array(chips.enumerated()), id: \.element.id) { i, chip in
-                    chipView(chip, first: i == 0)
-                        .glassEffectID(chip.state.rawValue, in: ns)
-                        .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
-                }
+                .font(.subheadline.weight(.medium))
+                .padding(.horizontal, 12)
+                .frame(height: AgentsPiece.chipsHeight)
+                .hudChip()
+                .glassEffectID("none", in: ns)
+                .transition(.blurReplace)
+            }
+            ForEach(Array(chips.enumerated()), id: \.element.id) { i, chip in
+                chipView(chip, first: i == 0)
+                    .glassEffectID(chip.state.rawValue, in: ns)
+                    .transition(.scale(scale: 0.6, anchor: leading ? .leading : .trailing).combined(with: .opacity))
             }
         }
+        .hudGlassContainer(spacing: 8)
         .animation(Theme.Motion.expressive, value: chips.map(\.n))
         .accessibilityElement(children: .combine)
     }
 
     private func chipView(_ chip: Chip, first: Bool) -> some View {
-        let c = Theme.stateColor(chip.state)
-        return HStack(spacing: 7) {
-            HUDStateDot(state: chip.state, size: 7)
+        HStack(spacing: 6) {
+            HUDStateGlyph(state: chip.state, size: 12)
             HStack(spacing: 4) {
                 Text("\(chip.n)")
-                    .font(Theme.allo(13.5, .semibold))
-                    .foregroundStyle(Theme.Night.foreground)
+                    .foregroundStyle(.primary)
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(chip.n)))
                 Text(label(chip, first: first))
-                    .font(Theme.allo(13, .medium))
-                    .foregroundStyle(Theme.Night.secondary)
+                    .foregroundStyle(.secondary)
                     .contentTransition(.interpolate)
             }
+            .font(.subheadline.weight(.semibold))
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 14)
+        .padding(.leading, 9)
+        .padding(.trailing, 12)
         .frame(height: AgentsPiece.chipsHeight)
-        .hudChip(tint: c.opacity(chip.state == .needsYou ? 0.22 : 0.10))
+        .hudChip(tint: chip.state == .needsYou ? HUDTint.needsYou.opacity(0.18) : nil)
     }
 
     private func label(_ chip: Chip, first: Bool) -> String {
@@ -140,17 +143,19 @@ struct AgentsPieceList: View {
     /// Rows that fit (only used expanded).
     let maxRows: Int
     let width: CGFloat
+    var preview = false
     var onToggle: () -> Void
     @Namespace private var ns
 
+    /// Panel inset: rows' highlight corners are concentric with the panel (24 - 8 = 16).
+    static let inset: CGFloat = 8
     static let headerHeight: CGFloat = 40
-    /// A row with its last line (73 pt), plus the gap to the next one.
-    static let rowHeight: CGFloat = 75
-    static let moreHeight: CGFloat = 30
-    static let bottomPadding: CGFloat = 8
+    /// A row (Notification Center style, 70 pt) plus the gap to the next one.
+    static let rowHeight: CGFloat = 72
+    static let moreHeight: CGFloat = 28
 
     static func height(rows: Int, more: Bool) -> CGFloat {
-        headerHeight + CGFloat(rows) * rowHeight + (more ? moreHeight : 0) + bottomPadding
+        2 * inset + headerHeight + CGFloat(rows) * rowHeight + (more ? moreHeight : 0)
     }
 
     /// How many rows fit in `budget` (0: not even one).
@@ -164,7 +169,7 @@ struct AgentsPieceList: View {
     }
 
     var body: some View {
-        GlassEffectContainer(spacing: 0) {
+        Group {
             if collapsed {
                 collapsedPill
                     .glassEffectID("agents", in: ns)
@@ -173,6 +178,7 @@ struct AgentsPieceList: View {
                     .glassEffectID("agents", in: ns)
             }
         }
+        .hudGlassContainer(spacing: 0)
         .animation(Theme.Motion.expressive, value: collapsed)
     }
 
@@ -183,9 +189,9 @@ struct AgentsPieceList: View {
         return VStack(alignment: .leading, spacing: 0) {
             header
             TimelineView(.everyMinute) { tl in
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Self.rowHeight - AgentsPieceRow.height) {
                     ForEach(shown) { s in
-                        AgentsPieceRow(session: s, now: HUDRender.isSnapshot ? Date() : tl.date)
+                        AgentsPieceRow(session: s, now: HUDRender.isSnapshot ? Date() : tl.date, preview: preview)
                             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity),
                                                     removal: .opacity.combined(with: .scale(scale: 0.96))))
                     }
@@ -197,137 +203,131 @@ struct AgentsPieceList: View {
                 .animation(Theme.Motion.slow, value: shown.map(\.state))
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.bottom, Self.bottomPadding)
+        .padding(Self.inset)
         .frame(width: width, alignment: .leading)
-        .hudPanel(radius: 22)
+        .hudPanel()
         .transition(.opacity)
     }
 
     private var header: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 8) {
-                HUDSectionLabel(title: "Agents", count: sessions.count)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Theme.Night.muted)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Color.white.opacity(0.06)))
-            }
-            .padding(.horizontal, 10)
-            .frame(height: Self.headerHeight)
-            .contentShape(Rectangle())
+        HStack(spacing: 8) {
+            HUDSectionLabel(title: "Agents", count: sessions.count)
+            Spacer(minLength: 0)
+            HUDCircleButton(symbol: "chevron.up", size: 28, action: onToggle)
+                .help("Collapse the agent list")
+                .accessibilityLabel("Collapse agent list")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Collapse agent list")
+        .padding(.leading, 8)
+        .padding(.trailing, 2)
+        .frame(height: Self.headerHeight)
     }
 
     private var collapsedPill: some View {
         Button(action: onToggle) {
-            HStack(spacing: 10) {
-                HStack(spacing: -5) {
+            HStack(spacing: 8) {
+                HStack(spacing: -6) {
                     ForEach(Array(sessions.prefix(5).enumerated()), id: \.element.id) { i, s in
                         let silicon = s.identity?.isSilicon == true
                         AgentAvatarView(session: s, size: 22, showsState: false)
                             .background {
-                                // A dark rim separates overlapping avatars (shaped like the avatar).
+                                // A thin dark rim separates overlapping avatars (shaped like the avatar).
                                 if silicon {
                                     RoundedRectangle(cornerRadius: 22 * 0.28 + 1.5, style: .continuous)
-                                        .fill(Theme.Night.background.opacity(0.9)).padding(-1.5)
+                                        .fill(Color.black.opacity(0.55)).padding(-1.5)
                                 } else {
-                                    Circle().fill(Theme.Night.background.opacity(0.9)).padding(-1.5)
+                                    Circle().fill(Color.black.opacity(0.55)).padding(-1.5)
                                 }
                             }
                             .zIndex(Double(10 - i))
                     }
                 }
                 Text(sessions.count == 1 ? "1 agent" : "\(sessions.count) agents")
-                    .font(Theme.allo(13, .medium))
-                    .foregroundStyle(Theme.Night.secondary)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .monospacedDigit()
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Theme.Night.muted)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
             }
             .padding(.leading, 8)
             .padding(.trailing, 14)
             .frame(height: AgentsPiece.pillHeight)
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HUDPressStyle())
+        .focusable(false)
         .hudChip()
         .transition(.opacity)
+        .help("Show the agent list")
         .accessibilityLabel("Show agent list")
     }
 
     private func moreRow(_ n: Int) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 26)
-            Text("\(n) more \(n == 1 ? "agent" : "agents")")
-                .font(Theme.allo(12, .medium))
-        }
-        .foregroundStyle(Theme.Night.muted)
-        .padding(.horizontal, 10)
-        .frame(height: Self.moreHeight)
+        Label("\(n) more \(n == 1 ? "agent" : "agents")", systemImage: "ellipsis.circle")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .frame(height: Self.moreHeight)
     }
 }
 
-/// One agent: avatar, title, state pill, subtitle (a Silicon's ISIs and their states, else the
-/// project), how long the current turn has run (or how long ago it finished), and its last line.
+/// One agent, like a Notification Center row: avatar; title and time; state and subtitle (a
+/// Silicon's ISIs and their states, else the project); its last line.
 struct AgentsPieceRow: View {
+    @Environment(AppModel.self) private var model
     let session: AgentSession
     let now: Date
+    var preview = false
+
+    static let height: CGFloat = 70
 
     var body: some View {
         let needs = session.state == .needsYou
-        HStack(alignment: .top, spacing: 11) {
-            AgentAvatarView(session: session, size: 26)
+        HStack(alignment: .top, spacing: 12) {
+            AgentAvatarView(session: session, size: 30, showsState: false)
                 .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(session.title)
-                        .font(Theme.allo(13.5, .medium))
-                        .tracking(Theme.tracking(13.5))
-                        .foregroundStyle(Theme.Night.foreground)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    Text(timeLabel)
-                        .font(Theme.allo(11.5, .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.Night.muted)
-                        .lineLimit(1)
-                        .fixedSize()
+                    if let time = timeLabel {
+                        Text(time)
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                 }
                 HStack(spacing: 6) {
                     HUDStatePill(state: session.state)
                     if let sub = subtitle {
                         Text(sub)
-                            .font(Theme.allo(11.5, .regular))
-                            .foregroundStyle(Theme.Night.muted)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                 }
                 if let line = lastLine {
                     Text(line)
-                        .font(HUDFont.mono(10.5))
-                        .foregroundStyle(needs ? Theme.Night.warning.opacity(0.85) : Theme.Night.secondary.opacity(0.75))
+                        .font(.subheadline)
+                        .foregroundStyle(needs ? AnyShapeStyle(HUDTint.needsYou) : AnyShapeStyle(.tertiary))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .padding(.top, 1)
                 }
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 8)
-        .frame(minHeight: 60, alignment: .top)
+        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: Self.height, alignment: .topLeading)
         .background {
             if needs {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(LinearGradient(colors: [Theme.Night.warning.opacity(0.13), Theme.Night.warning.opacity(0.03)],
-                                         startPoint: .leading, endPoint: .trailing))
+                // Concentric with the panel: 24 minus the 8 pt inset.
+                RoundedRectangle(cornerRadius: HUDMetrics.panelRadius - AgentsPieceList.inset, style: .continuous)
+                    .fill(HUDTint.needsYou.opacity(0.12))
             }
         }
         .accessibilityElement(children: .combine)
@@ -339,26 +339,29 @@ struct AgentsPieceRow: View {
         return session.projectName
     }
 
-    /// Running: elapsed time of the current turn. Finished or failed: how long ago.
-    private var timeLabel: String {
+    /// Running: elapsed time of the current turn (none when unknown). Finished or failed: how long ago.
+    private var timeLabel: String? {
         switch session.state {
         case .working, .needsYou:
-            return HUDFormat.elapsed(since: Self.turnStart(session), now: now)
+            // The log book isn't observed: it changes in the same refresh as the session itself.
+            let logged = preview ? [] : model.logBook.events(for: session.id)
+            guard let start = Self.turnStart(session, logged: logged) else { return nil }
+            return HUDFormat.elapsed(since: start, now: now)
         case .finished, .error, .idle:
             return HUDFormat.ago(session.updatedAt, now: now)
         }
     }
 
-    /// When the current turn began: a Silicon reports it (`startedAt`); otherwise the latest user
-    /// prompt in the session's recent events, else when the session started.
-    static func turnStart(_ s: AgentSession) -> Date? {
+    /// When the current turn began: a Silicon reports it (`startedAt`). Otherwise the latest user
+    /// prompt, looked up in everything the log book holds (`logged`), then in the session's recent
+    /// events. No prompt found: nil (the row shows no time rather than the session's age).
+    static func turnStart(_ s: AgentSession, logged: [AgentEvent]) -> Date? {
         if s.identity?.isSilicon == true { return s.startedAt ?? s.updatedAt }
         // A prompt starts a turn; answering the agent's question mid-turn doesn't.
-        if let prompt = s.recentEvents.last(where: { $0.kind == .user && !$0.text.hasPrefix("Answered:") }) {
-            if let start = s.startedAt, prompt.at < start { return start }
-            return prompt.at
-        }
-        return s.startedAt ?? s.updatedAt
+        let isPrompt: (AgentEvent) -> Bool = { $0.kind == .user && !$0.text.hasPrefix("Answered:") }
+        guard let prompt = logged.last(where: isPrompt) ?? s.recentEvents.last(where: isPrompt) else { return nil }
+        if let start = s.startedAt, prompt.at < start { return start }
+        return prompt.at
     }
 
     private var lastLine: String? {

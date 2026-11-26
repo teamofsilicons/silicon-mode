@@ -42,6 +42,8 @@ enum HUDSnapshots {
             layer("furniture.all", HUDSample.source(furniture: HUDSample.everyPiece)),
             piece("furniture.agents", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 760)),
             piece("furniture.agents.silicon", .agents, .topLeading, HUDSample.siliconSessions(), size: CGSize(width: 760, height: 420)),
+            // Trailing slot: rows align right and chips wider than the slot run toward the centre.
+            piece("furniture.agents.trailing", .agents, .topTrailing, HUDSample.sessions(), size: CGSize(width: 760, height: 760)),
             piece("furniture.agents.collapsed", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 260)) {
                 $0.agentsCollapsed = true
             },
@@ -197,20 +199,20 @@ enum HUDSample {
         return [
             AgentSession(provider: "claude-code", nativeID: "s1", title: "Refactor auth middleware", cwd: "/Users/you/code/api",
                          state: .working, startedAt: now.addingTimeInterval(-1820), updatedAt: now.addingTimeInterval(-3),
-                         recentEvents: [ev("Read src/auth/session.ts", .tool, 95), ev("Thinking about token refresh order", .thinking, 70),
+                         recentEvents: [ev("Move token refresh ahead of the session check", .user, 610), ev("Read src/auth/session.ts", .tool, 95), ev("Thinking about token refresh order", .thinking, 70),
                                         ev("Edited src/auth/middleware.ts (+42 −17)", .tool, 31), ev("Ran: npm test -- auth", .tool, 3)]),
             AgentSession(provider: "codex", nativeID: "s2", title: "Fix flaky checkout test", cwd: "/Users/you/code/shop",
                          state: .needsYou, startedAt: now.addingTimeInterval(-912), updatedAt: now.addingTimeInterval(-140),
-                         recentEvents: [ev("Ran: pnpm vitest checkout --repeat 20", .tool, 260), ev("3/20 runs failed: race in cart.reset()", .assistant, 200),
+                         recentEvents: [ev("Find out why checkout flakes on CI", .user, 420), ev("Ran: pnpm vitest checkout --repeat 20", .tool, 260), ev("3/20 runs failed: race in cart.reset()", .assistant, 200),
                                         ev("Wants to run: git push origin fix/checkout-flake", .permission, 140)],
                          pendingQuestions: [push]),
             AgentSession(provider: "claude-code", nativeID: "s3", title: "Dark palette rollout", cwd: "/Users/you/code/web",
                          state: .needsYou, startedAt: now.addingTimeInterval(-2400), updatedAt: now.addingTimeInterval(-40),
-                         recentEvents: [ev("Updated tokens.css with night palette", .tool, 120), ev("Asked: which screens first?", .question, 40)],
+                         recentEvents: [ev("Roll the night palette out screen by screen", .user, 1500), ev("Updated tokens.css with night palette", .tool, 120), ev("Asked: which screens first?", .question, 40)],
                          pendingQuestions: [pick]),
             AgentSession(provider: "pi", nativeID: "s4", title: "Summarize incident #4127", cwd: "/Users/you/notes",
                          state: .working, startedAt: now.addingTimeInterval(-300), updatedAt: now.addingTimeInterval(-9),
-                         recentEvents: [ev("Fetched 214 log lines from pagerduty", .tool, 50), ev("Drafting timeline section", .status, 9)]),
+                         recentEvents: [ev("Summarize incident #4127 for the postmortem", .user, 290), ev("Fetched 214 log lines from pagerduty", .tool, 50), ev("Drafting timeline section", .status, 9)]),
             AgentSession(provider: "opencode", nativeID: "s5", title: "Write migration for invoices", cwd: "/Users/you/code/billing",
                          state: .finished, startedAt: now.addingTimeInterval(-3700), updatedAt: now.addingTimeInterval(-420),
                          recentEvents: [ev("Created migrations/0042_invoices.sql", .tool, 600), ev("Done: migration + 18 tests pass", .assistant, 420)]),
@@ -219,7 +221,7 @@ enum HUDSample {
                          recentEvents: [ev("error: sending 'self' risks causing data races", .error, 800)]),
             AgentSession(provider: "gemini", nativeID: "s7", title: "Tighten prod IAM policies", cwd: "/Users/you/code/infra",
                          state: .needsYou, startedAt: now.addingTimeInterval(-640), updatedAt: now.addingTimeInterval(-20),
-                         recentEvents: [ev("Wants to edit terraform/prod/main.tf", .permission, 20)],
+                         recentEvents: [ev("Tighten the prod IAM policies to least privilege", .user, 630), ev("Wants to edit terraform/prod/main.tf", .permission, 20)],
                          pendingQuestions: [edit]),
         ]
     }

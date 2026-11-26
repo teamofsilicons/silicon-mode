@@ -3,7 +3,8 @@ import AppKit
 import SiliconModeKit
 
 // Building blocks shared by the face furniture (agents, logs, questions, clock, system), the
-// chrome and the question cards.
+// chrome and the question cards. The look follows macOS 26: Liquid Glass containers with
+// concentric corners, SF Pro in semantic text styles, hierarchical foregrounds, SF Symbols.
 
 // MARK: - Formatting
 
@@ -39,39 +40,71 @@ enum HUDFormat {
     static func providerName(_ id: String) -> String { ProviderCatalog.info(for: id).name }
 }
 
-// MARK: - Fonts
+// MARK: - Fonts and metrics
 
 enum HUDFont {
+    /// SF Mono, only for commands and file paths.
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
     }
 }
 
-// MARK: - Glass panel
+enum HUDMetrics {
+    /// Corner radius of every furniture panel; what sits inside uses `ConcentricRectangle` or
+    /// radius minus its inset, so corners stay concentric.
+    static let panelRadius: CGFloat = 24
+    /// Inner padding of a panel (HIG spacing: 8, 12, 16, 20).
+    static let panelPadding: CGFloat = 12
+}
+
+/// State colours and symbols: the system palette, as Notification Center and widgets use it.
+enum HUDTint {
+    static let needsYou = Color.orange
+    static let working = Color.blue
+    static let finished = Color.green
+    static let error = Color.red
+
+    static func state(_ s: AgentState) -> Color {
+        switch s {
+        case .needsYou: needsYou
+        case .working: working
+        case .finished: finished
+        case .error: error
+        case .idle: .secondary
+        }
+    }
+
+    /// The SF Symbol for a state (working usually shows a live activity indicator instead).
+    static func symbol(_ s: AgentState) -> String {
+        switch s {
+        case .needsYou: "bell.badge.fill"
+        case .working: "ellipsis.circle.fill"
+        case .finished: "checkmark.circle.fill"
+        case .error: "exclamationmark.circle.fill"
+        case .idle: "moon.zzz.fill"
+        }
+    }
+}
+
+// MARK: - Glass
 
 extension View {
-    /// A HUD panel: Liquid Glass in a continuous rounded rect, with a hairline so it still reads
-    /// as a surface over pure black. Offscreen (snapshots) glass drops its content, so there it
-    /// falls back to a flat smoked fill.
-    func hudPanel(radius: CGFloat = 20, tint: Color? = nil, interactive: Bool = false) -> some View {
+    /// A furniture panel: Liquid Glass in a continuous rounded rect. It also becomes the container
+    /// shape, so `ConcentricRectangle`s inside follow its corners. Offscreen (snapshots) glass
+    /// draws nothing, so there it falls back to a flat stand-in.
+    func hudPanel(radius: CGFloat = HUDMetrics.panelRadius, tint: Color? = nil, interactive: Bool = false) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return self
-            .background(shape.fill(Color.black.opacity(0.18)))
+            .containerShape(shape)
             .hudGlass(in: shape, tint: tint, interactive: interactive)
-            .hudHairline(shape)
     }
 
-    /// Capsule variant (chips).
-    func hudChip(tint: Color? = nil) -> some View {
-        self
-            .background(Capsule().fill(Color.black.opacity(0.18)))
-            .hudGlass(in: Capsule(), tint: tint)
-            .hudHairline(Capsule())
+    /// Capsule variant (chips, pills).
+    func hudChip(tint: Color? = nil, interactive: Bool = false) -> some View {
+        hudGlass(in: Capsule(), tint: tint, interactive: interactive)
     }
 
-    /// The specular hairline around a HUD surface. The gradient is a plain gradient fill (a GPU
-    /// gradient layer) masked by a solid stroke; a gradient *stroke* would be painted on the CPU
-    /// into a 64-bit backing store again on every frame of any resize or entrance animation.
+    /// A thin specular hairline around a surface (the unlock card keeps it).
     func hudHairline<S: InsettableShape>(_ shape: S, lineWidth: CGFloat = 0.75) -> some View {
         overlay {
             HUDEdge.gradient
@@ -80,19 +113,43 @@ extension View {
         }
     }
 
+    /// Liquid Glass live; a flat stand-in in snapshots.
     @ViewBuilder
     func hudGlass(in shape: some Shape, tint: Color? = nil, interactive: Bool = false) -> some View {
         if HUDRender.isSnapshot {
-            self.background {
-                ZStack {
-                    shape.fill(Color(white: 0.12).opacity(0.86))
-                    if let tint { shape.fill(tint) }
-                    shape.fill(LinearGradient(colors: [Color.white.opacity(0.06), .clear], startPoint: .top, endPoint: .center))
-                }
-            }
+            self.background { HUDGlassStandIn(shape: shape, tint: tint) }
         } else {
-            self.glassEffect(interactive ? .regular.tint(tint).interactive() : .regular.tint(tint), in: shape)
+            self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
         }
+    }
+
+    /// Glass grouped for morphing and shared sampling live; passthrough in snapshots.
+    @ViewBuilder
+    func hudGlassContainer(spacing: CGFloat) -> some View {
+        if HUDRender.isSnapshot {
+            self
+        } else {
+            GlassEffectContainer(spacing: spacing) { self }
+        }
+    }
+}
+
+/// What snapshots draw instead of Liquid Glass over a dark face: a smoky translucent fill, a
+/// slightly lighter top, a specular rim and a soft shadow.
+private struct HUDGlassStandIn<S: Shape>: View {
+    let shape: S
+    let tint: Color?
+
+    var body: some View {
+        ZStack {
+            shape.fill(Color(white: 0.2).opacity(0.62))
+            if let tint { shape.fill(tint) }
+            shape.fill(LinearGradient(colors: [Color.white.opacity(0.07), .clear], startPoint: .top, endPoint: .center))
+            shape.stroke(LinearGradient(colors: [Color.white.opacity(0.34), Color.white.opacity(0.05), Color.white.opacity(0.12)],
+                                        startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
     }
 }
 
@@ -104,23 +161,59 @@ enum HUDEdge {
 
 // MARK: - Small pieces
 
-/// Small capsule with the agent's state ("Needs you", "Working"…).
+/// An agent's state as a small tinted capsule: symbol and label ("Needs You", "Working"…).
 struct HUDStatePill: View {
     let state: AgentState
 
     var body: some View {
-        let c = Theme.stateColor(state)
+        let c = HUDTint.state(state)
         HStack(spacing: 4) {
-            Circle().fill(c).frame(width: 5, height: 5)
+            HUDStateGlyph(state: state, size: 10)
             Text(state.label)
-                .font(Theme.allo(10.5, .semibold))
-                .tracking(0.1)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
         }
         .foregroundStyle(c)
         .padding(.horizontal, 7)
         .frame(height: 18)
-        .background(Capsule().fill(c.opacity(0.14)))
-        .overlay(Capsule().strokeBorder(c.opacity(0.22), lineWidth: 0.5))
+        .background(c.opacity(0.16), in: .capsule)
+        .fixedSize()
+    }
+}
+
+/// A state as an SF Symbol in its colour; working is a live activity indicator.
+struct HUDStateGlyph: View {
+    let state: AgentState
+    var size: CGFloat = 12
+
+    var body: some View {
+        Group {
+            if state == .working {
+                HUDActivity(size: size)
+            } else {
+                Image(systemName: HUDTint.symbol(state))
+                    .symbolRenderingMode(.hierarchical)
+                    .font(.system(size: size, weight: .semibold))
+                    .foregroundStyle(HUDTint.state(state))
+            }
+        }
+        .frame(width: size + 2, height: size + 2)
+        .accessibilityLabel(state.label)
+    }
+}
+
+/// The system's small activity indicator (an arc spinner in snapshots, which can't draw it).
+struct HUDActivity: View {
+    var size: CGFloat = 12
+
+    var body: some View {
+        if HUDRender.isSnapshot {
+            HUDSpinner(size: size, color: .white.opacity(0.7))
+        } else {
+            ProgressView()
+                .controlSize(size >= 14 ? .small : .mini)
+                .frame(width: size, height: size)
+        }
     }
 }
 
@@ -131,7 +224,7 @@ struct HUDStateDot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let c = Theme.stateColor(state)
+        let c = HUDTint.state(state)
         ZStack {
             if state == .needsYou && !reduceMotion && !HUDRender.isSnapshot {
                 HUDPulse(color: NSColor(c), size: size * 3.2)
@@ -190,26 +283,32 @@ struct HUDPulse: NSViewRepresentable {
     }
 }
 
-/// Section header used inside panels ("Agents", "System", "Waiting on you").
+/// A panel's title row: "Agents 4", "Waiting on You 2" (headline, with an optional tinted symbol
+/// and a secondary count).
 struct HUDSectionLabel: View {
     let title: String
     var count: Int? = nil
-    var color: Color = Theme.Night.muted
+    var symbol: String? = nil
+    var tint: Color? = nil
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(title.uppercased())
-                .font(Theme.allo(10.5, .semibold))
-                .tracking(0.9)
-                .foregroundStyle(color)
+            if let symbol {
+                Image(systemName: symbol)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(tint ?? .secondary)
+            }
+            Text(title)
+                .foregroundStyle(.primary)
             if let count {
                 Text("\(count)")
-                    .font(Theme.allo(10.5, .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(count)))
-                    .foregroundStyle(color.opacity(0.8))
+                    .foregroundStyle(.secondary)
             }
         }
+        .font(.headline)
+        .lineLimit(1)
     }
 }
 

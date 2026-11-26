@@ -4,7 +4,7 @@ import QuartzCore
 import SiliconModeKit
 
 /// What always stays on screen in Silicon Mode (it isn't furniture): bottom right, the Unlock /
-/// Turn off control with the hide-furniture toggle (and, while furniture is hidden and an agent
+/// Turn Off control with the hide-furniture toggle (and, while furniture is hidden and an agent
 /// needs you, an "N need you" pill); bottom left, the lid angle.
 ///
 /// It dims while the pointer is idle, further (to 0.25) when furniture is hidden, so the face reads
@@ -22,13 +22,22 @@ struct SiliconModeChrome: View {
         let idle = stage.pointerIdle && preview == nil
         let dim = idle ? (hidden ? 0.25 : 0.45) : 1
         let peek = preview?.questionsPeek ?? stage.questionsPeek
+        // The pill opens the placed Questions piece. Without one (the user removed it) there is
+        // nothing to open: it is only a count, and never shows answerable cards.
+        let questionsPlaced = (preview?.furnitureSource.settings ?? model.settings).furniture.contains { $0.kind == .questions }
 
         ZStack {
-            HStack(spacing: 10) {
+            HStack(spacing: ChromeMetrics.spacing) {
                 if hidden && pending > 0 {
-                    NeedYouPill(count: pending, peeking: peek) { togglePeek() }
-                        .opacity(idle ? 0.75 : 1)
-                        .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .trailing)))
+                    Group {
+                        if questionsPlaced {
+                            NeedYouPill(count: pending, peeking: peek) { togglePeek() }
+                        } else {
+                            NeedYouCount(count: pending)
+                        }
+                    }
+                    .opacity(idle ? 0.75 : 1)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .trailing)))
                 }
                 FurnitureToggle(hidden: hidden) { setHidden(!hidden) }
                     .opacity(dim)
@@ -43,13 +52,16 @@ struct SiliconModeChrome: View {
                 .opacity(dim)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.leading, 30)
-                .padding(.bottom, 32)
+                .padding(.bottom, 34)
         }
         .animation(.easeInOut(duration: 0.6), value: dim)
         .animation(Theme.Motion.slow, value: hidden && pending > 0)
         .onChange(of: pending) { _, n in
             // The peek ends when nobody waits any more.
             if n == 0, stage.questionsPeek, preview == nil { stage.questionsPeek = false }
+        }
+        .onChange(of: questionsPlaced) { _, placed in
+            if !placed, stage.questionsPeek, preview == nil { stage.questionsPeek = false }
         }
     }
 
@@ -67,6 +79,12 @@ struct SiliconModeChrome: View {
     }
 }
 
+enum ChromeMetrics {
+    /// Height of every chrome control (capsules and the circular toggle).
+    static let height: CGFloat = 42
+    static let spacing: CGFloat = 12
+}
+
 // MARK: - Hide toggle and the "N need you" pill
 
 /// Eye: furniture shows (click hides it). Eye with a slash: hidden (click shows it).
@@ -78,14 +96,15 @@ private struct FurnitureToggle: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: hidden ? "eye.slash" : "eye")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.title3.weight(.medium))
                 .contentTransition(.symbolEffect(.replace))
-                .foregroundStyle(hovering ? Theme.Night.foreground : Theme.Night.secondary)
-                .frame(width: 36, height: 36)
+                .foregroundStyle(hovering ? .primary : .secondary)
+                .frame(width: ChromeMetrics.height, height: ChromeMetrics.height)
                 .contentShape(Circle())
         }
         .buttonStyle(ChromePressStyle())
-        .overlayGlass(tint: hovering ? Color.white.opacity(0.06) : nil, interactive: false, in: Circle())
+        .focusable(false)
+        .chromeGlass(in: Circle(), hovering: hovering)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(hidden ? "Show face furniture" : "Hide face furniture")
         .accessibilityLabel(hidden ? "Show face furniture" : "Hide face furniture")
@@ -98,35 +117,66 @@ private struct NeedYouPill: View {
     let count: Int
     let peeking: Bool
     var action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                HUDStateDot(state: .needsYou, size: 7)
-                Text("\(count) need\(count == 1 ? "s" : "") you")
-                    .font(Theme.allo(13, .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.Night.foreground)
-                    .contentTransition(.numericText(value: Double(count)))
+                NeedYouLabel(count: count)
                 Image(systemName: peeking ? "xmark" : "chevron.up")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .foregroundStyle(Theme.Night.muted)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
                     .contentTransition(.symbolEffect(.replace))
             }
-            .padding(.leading, 13)
-            .padding(.trailing, 14)
-            .frame(height: 36)
+            .padding(.leading, 14)
+            .padding(.trailing, 16)
+            .frame(height: ChromeMetrics.height)
             .contentShape(Capsule())
         }
         .buttonStyle(ChromePressStyle())
-        .overlayGlass(tint: Theme.Night.warning.opacity(0.2), interactive: false, in: Capsule())
+        .focusable(false)
+        .chromeGlass(in: Capsule(), tint: HUDTint.needsYou.opacity(0.22), hovering: hovering)
+        .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(peeking ? "Hide the questions" : "Show the questions")
         .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
         .accessibilityHint(peeking ? "Hides the questions" : "Shows the questions")
     }
 }
 
-/// Press feedback for the chrome (its glass is not interactive, so it gives none of its own).
+/// The count alone, for when no Questions piece is placed: nothing to open, so not a button.
+private struct NeedYouCount: View {
+    let count: Int
+
+    var body: some View {
+        NeedYouLabel(count: count)
+            .padding(.horizontal, 16)
+            .frame(height: ChromeMetrics.height)
+            .chromeGlass(in: Capsule(), tint: HUDTint.needsYou.opacity(0.14), hovering: false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
+    }
+}
+
+private struct NeedYouLabel: View {
+    let count: Int
+
+    var body: some View {
+        Label {
+            Text("\(count) need\(count == 1 ? "s" : "") you")
+                .monospacedDigit()
+                .contentTransition(.numericText(value: Double(count)))
+        } icon: {
+            Image(systemName: "bell.badge.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(HUDTint.needsYou)
+        }
+        .font(.headline)
+        .foregroundStyle(.primary)
+    }
+}
+
+/// Press feedback for the chrome (its glass is interactive only under the pointer, so at rest it
+/// gives none of its own).
 private struct ChromePressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -135,13 +185,18 @@ private struct ChromePressStyle: ButtonStyle {
     }
 }
 
+private extension View {
+    /// Liquid Glass for the chrome. Interactive glass animates while it is on screen, and the
+    /// chrome is on screen for hours, so it turns interactive only while the pointer is over it.
+    func chromeGlass<S: InsettableShape>(in shape: S, tint: Color? = nil, hovering: Bool) -> some View {
+        overlayGlass(tint: tint, interactive: hovering, in: shape)
+    }
+}
+
 // MARK: - Control (grace / locked)
 
-/// Bottom-right glass control. During the grace period: "Turn off · no PIN for 0:42" with a
+/// Bottom-right glass control. During the grace period: "Turn Off · No PIN for 0:42" with a
 /// draining ring. Once locked it morphs into "Unlock".
-///
-/// The glass is not interactive: interactive glass steps a flex spring on every frame while it is
-/// on screen, and this control is on screen for hours. Hover tints it instead.
 struct SiliconModeControl: View {
     @Environment(AppModel.self) private var model
     let stage: OverlayStage
@@ -161,53 +216,53 @@ struct SiliconModeControl: View {
     private var showsUnlock: Bool { locked || grace == nil }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: ChromeMetrics.spacing) {
             if showsUnlock {
                 if !stage.pointerIdle || preview != nil {
                     Text("Press any key")
-                        .alloText(12, .medium)
-                        .foregroundStyle(Theme.Night.muted)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                         .transition(.opacity)
                 }
                 Button(action: unlock) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .contentTransition(.symbolEffect(.replace))
-                        Text("Unlock").alloText(14, .semibold)
-                    }
-                    .padding(.horizontal, 18)
-                    .frame(height: 42)
-                    .contentShape(Capsule())
+                    Label("Unlock", systemImage: "lock.fill")
+                        .font(.headline)
+                        .contentTransition(.symbolEffect(.replace))
+                        .padding(.horizontal, 20)
+                        .frame(height: ChromeMetrics.height)
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(ChromePressStyle())
-                .foregroundStyle(Theme.Night.foreground)
-                .overlayGlass(tint: Theme.Night.accent.opacity(hovering ? 0.32 : 0.2), interactive: false, in: Capsule())
+                .focusable(false)
+                .foregroundStyle(.white)
+                .chromeGlass(in: Capsule(), tint: Color.accentColor.opacity(hovering ? 0.75 : 0.6), hovering: hovering)
                 .glassEffectID("control", in: ns)
             } else if let g = grace {
                 Button(action: { model.turnOff() }) {
                     HStack(spacing: 10) {
-                        GraceRing(endsAt: graceEndsAt, total: graceTotal, fraction: g / graceTotal)
+                        GraceRing(endsAt: graceEndsAt, total: graceTotal, remaining: g)
                             .frame(width: 18, height: 18)
-                        Text("Turn off").alloText(14, .semibold)
-                            .foregroundStyle(Theme.Night.foreground)
-                        Text("·").foregroundStyle(Theme.Night.faint)
-                        Text("no PIN for \(Self.clock(g))")
-                            .alloText(13, .medium)
+                        Text("Turn Off")
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        Text("No PIN for \(Self.clock(g))")
+                            .font(.subheadline)
                             .monospacedDigit()
-                            .foregroundStyle(Theme.Night.secondary)
+                            .foregroundStyle(.secondary)
+                            .contentTransition(.numericText(countsDown: true))
                     }
-                    .padding(.leading, 12)
+                    .padding(.leading, 13)
                     .padding(.trailing, 18)
-                    .frame(height: 42)
+                    .frame(height: ChromeMetrics.height)
                     .contentShape(Capsule())
                 }
                 .buttonStyle(ChromePressStyle())
-                .overlayGlass(tint: hovering ? Color.white.opacity(0.06) : nil, interactive: false, in: Capsule())
+                .focusable(false)
+                .chromeGlass(in: Capsule(), hovering: hovering)
                 .glassEffectID("control", in: ns)
             }
         }
-        .overlayGlassContainer(spacing: 10)
+        .overlayGlassContainer(spacing: ChromeMetrics.spacing)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .animation(.spring(duration: 0.5, bounce: 0.2), value: showsUnlock)
         .animation(.easeInOut(duration: 0.3), value: stage.pointerIdle)
@@ -227,30 +282,35 @@ struct SiliconModeControl: View {
 
 // MARK: - Grace ring
 
-/// Small draining ring for the grace period. Live, Core Animation drains it in the render server
-/// (one strokeEnd animation over the remaining grace), so no SwiftUI frame or CPU gradient paint
-/// happens while it runs; snapshots draw it statically.
+/// A small ring that drains over the grace period: full at the start, emptying clockwise from
+/// 12 o'clock. Live, Core Animation drains it in the render server (no SwiftUI frames, no CPU
+/// paints); snapshots draw it statically.
 struct GraceRing: View {
-    /// Monotonic time the grace period ends (nil: draw `fraction` statically).
+    /// Monotonic time the grace period ends (nil: draw `remaining / total` statically).
     let endsAt: Double?
     let total: Double
-    let fraction: Double
+    /// Whole seconds left (changes once a second, which re-syncs the live ring).
+    let remaining: Double
+
+    static let lineWidth: CGFloat = 2.4
 
     var body: some View {
         if let endsAt, !OverlayRender.isSnapshot {
-            // The stroke straddles the 18 pt circle, as the SwiftUI ring did.
-            GraceRingLayer(endsAt: endsAt, total: total)
-                .padding(-1.5)
+            GraceRingLayer(endsAt: endsAt, total: total, tick: remaining)
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
         } else {
+            let f = total > 0 ? max(0, min(1, remaining / total)) : 0
             ZStack {
-                Circle().stroke(.white.opacity(0.16), lineWidth: 2.2)
+                Circle().stroke(Color.white.opacity(0.22), lineWidth: Self.lineWidth)
+                // From 12 o'clock clockwise; the part already used up is cut from the start.
                 Circle()
-                    .trim(from: 0, to: max(0, min(1, fraction)))
-                    .stroke(LinearGradient(colors: [Theme.Night.lavender, Theme.Night.peach], startPoint: .top, endPoint: .bottom),
-                            style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+                    .trim(from: 1 - f, to: 1)
+                    .stroke(Color.white.opacity(0.92), style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
+            .padding(Self.lineWidth / 2)
+            .accessibilityHidden(true)
         }
     }
 }
@@ -258,107 +318,101 @@ struct GraceRing: View {
 private struct GraceRingLayer: NSViewRepresentable {
     let endsAt: Double
     let total: Double
+    /// Not drawn: a new value each second makes SwiftUI call `updateNSView`, which re-checks the ring.
+    let tick: Double
 
     func makeNSView(context: Context) -> GraceRingView { GraceRingView() }
 
     func updateNSView(_ v: GraceRingView, context: Context) { v.sync(endsAt: endsAt, total: total) }
 }
 
-/// Track + lavender→peach gradient masked by an arc from 12 o'clock, clockwise, whose `strokeEnd`
-/// animates to 0 at the end of the grace period. Re-synced whenever SwiftUI updates it (about once
-/// a second, with the label) if the deadline moved or the animation drifted (Core Animation's clock
-/// stops while the Mac sleeps; the grace period's doesn't).
+/// Track plus an arc drawn clockwise from 12 o'clock. The used-up share is cut from the arc's start
+/// (`strokeStart`), so the gap opens at 12 and sweeps clockwise, like a timer.
+///
+/// - The layer's model value is always set to the current share, so the ring is right even if the
+///   animation were ever dropped (the window re-hosted, the layer tree rebuilt).
+/// - One linear `strokeStart` animation runs to the end of the grace period in the render server.
+///   It starts in the layer's own time (no absolute `beginTime`), and is re-added once a second
+///   (when SwiftUI updates the view with the label) if it is missing or has drifted (Core
+///   Animation's clock stops while the Mac sleeps; the grace period's doesn't).
 final class GraceRingView: NSView {
     private let track = CAShapeLayer()
-    private let gradient = CAGradientLayer()
     private let arc = CAShapeLayer()
-    private let lineWidth: CGFloat = 2.2
-
     private var endsAt: Double = -1
     private var total: Double = 0
-    private var animStart: CFTimeInterval = 0
-    private var animFrom: Double = 0
-    private var animDuration: Double = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        guard let root = layer else { return }
-        root.masksToBounds = false
-        track.fillColor = nil
-        track.strokeColor = NSColor.white.withAlphaComponent(0.16).cgColor
-        track.lineWidth = lineWidth
-        root.addSublayer(track)
-
-        // macOS layers are y-up: (0.5, 1) is the top.
-        gradient.colors = [NSColor(Theme.Night.lavender).cgColor, NSColor(Theme.Night.peach).cgColor]
-        gradient.startPoint = CGPoint(x: 0.5, y: 1)
-        gradient.endPoint = CGPoint(x: 0.5, y: 0)
-        arc.fillColor = nil
-        arc.strokeColor = NSColor.black.cgColor
-        arc.lineWidth = lineWidth
+        layer?.masksToBounds = false
+        for l in [track, arc] {
+            l.fillColor = nil
+            l.lineWidth = GraceRing.lineWidth
+            l.actions = ["strokeStart": NSNull(), "path": NSNull(), "bounds": NSNull(), "position": NSNull()]
+            layer?.addSublayer(l)
+        }
+        track.strokeColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        arc.strokeColor = NSColor.white.withAlphaComponent(0.92).cgColor
         arc.lineCap = .round
-        arc.strokeEnd = 0
-        gradient.mask = arc
-        root.addSublayer(gradient)
+        arc.strokeStart = 0
+        arc.strokeEnd = 1
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        // Added sublayers don't inherit the screen scale: without this the ring is drawn at 1x.
+        let scale = window?.backingScaleFactor ?? 2
+        track.contentsScale = scale
+        arc.contentsScale = scale
+    }
 
     override func layout() {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let b = bounds
-        let r = min(b.width, b.height) / 2 - 1.5
+        let r = max(0, min(b.width, b.height) / 2 - GraceRing.lineWidth / 2)
         let c = CGPoint(x: b.midX, y: b.midY)
         track.frame = b
-        track.path = CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2), transform: nil)
-        gradient.frame = b
         arc.frame = b
-        // From 12 o'clock, clockwise on screen (y-up: decreasing angle).
+        track.path = CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2), transform: nil)
+        // Layers here are y-up: 12 o'clock is +π/2, and clockwise on screen is decreasing angle.
         let p = CGMutablePath()
-        p.addArc(center: c, radius: r, startAngle: .pi / 2, endAngle: .pi / 2 - 2 * .pi, clockwise: true)
+        p.addRelativeArc(center: c, radius: r, startAngle: .pi / 2, delta: -2 * .pi)
         arc.path = p
         CATransaction.commit()
     }
 
-    /// Where the running animation should be right now.
-    private func animatedValue(at t: CFTimeInterval) -> Double {
-        guard animDuration > 0 else { return animFrom }
-        return animFrom * max(0, 1 - (t - animStart) / animDuration)
-    }
-
     func sync(endsAt: Double, total: Double) {
         let remaining = max(0, endsAt - MonotonicClock.now())
-        let target = total > 0 ? min(1, remaining / total) : 0
-        let now = CACurrentMediaTime()
-        let drift = abs(animatedValue(at: now) - target)
-        guard endsAt != self.endsAt || total != self.total || drift > 0.01 else { return }
-        self.endsAt = endsAt
-        self.total = total
-        animStart = now
-        animFrom = target
-        animDuration = remaining
+        let share = total > 0 ? min(1, remaining / total) : 0
+        let start = CGFloat(1 - share)
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        arc.strokeStart = start
+
+        let running = arc.animation(forKey: "drain") != nil
+        let shown = arc.presentation()?.strokeStart ?? start
+        let changed = endsAt != self.endsAt || total != self.total
+        guard changed || !running || abs(shown - start) > 0.01 else { return }
+        self.endsAt = endsAt
+        self.total = total
         arc.removeAnimation(forKey: "drain")
-        arc.strokeEnd = 0
-        if remaining > 0, target > 0 {
-            let a = CABasicAnimation(keyPath: "strokeEnd")
-            a.fromValue = target
-            a.toValue = 0
-            a.duration = remaining
-            a.beginTime = now
-            a.timingFunction = CAMediaTimingFunction(name: .linear)
-            a.fillMode = .both
-            a.isRemovedOnCompletion = false
-            // About a tenth of a point per second on an 18 pt ring: a slow rate is plenty.
-            a.preferredFrameRateRange = CAFrameRateRange(minimum: 4, maximum: 15, preferred: 10)
-            arc.add(a, forKey: "drain")
-        }
-        CATransaction.commit()
+        guard remaining > 0 else { return }
+        let a = CABasicAnimation(keyPath: "strokeStart")
+        a.fromValue = start
+        a.toValue = 1
+        a.duration = remaining
+        a.timingFunction = CAMediaTimingFunction(name: .linear)
+        a.fillMode = .forwards
+        a.isRemovedOnCompletion = false
+        // About a tenth of a point per second on an 18 pt ring: a slow rate is plenty.
+        a.preferredFrameRateRange = CAFrameRateRange(minimum: 4, maximum: 15, preferred: 10)
+        arc.add(a, forKey: "drain")
     }
 }
 
@@ -371,19 +425,19 @@ struct SiliconModeAngleReadout: View {
 
     var body: some View {
         let angle = preview?.angle ?? model.angle
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             LidGlyph(angle: angle ?? 90)
-                .stroke(Theme.Night.muted, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                .stroke(.tertiary, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
                 .frame(width: 16, height: 12)
                 .animation(.spring(duration: 0.4, bounce: 0.1), value: angle)
             Text(angle.map { "\(Int($0.rounded()))°" } ?? "—")
-                .alloText(11, .medium)
+                .font(.caption)
                 .monospacedDigit()
+                .foregroundStyle(.tertiary)
                 .contentTransition(.numericText())
                 .animation(.spring(duration: 0.3), value: angle)
         }
-        .foregroundStyle(Theme.Night.muted)
-        .opacity(0.7)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(angle.map { "Lid angle \(Int($0)) degrees" } ?? "Lid angle unavailable")
     }
 }
