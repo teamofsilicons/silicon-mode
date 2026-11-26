@@ -234,12 +234,14 @@ struct AgentsPieceList: View {
         .padding(.trailing, roomless ? 16 : 14)
         .frame(height: AgentsPiece.pillHeight)
         .contentShape(Capsule())
-        .animation(AgentSummaryMotion.change, value: counts)
-        .animation(AgentSummaryMotion.change, value: sessions.prefix(AgentsAvatarStack.maxShown).map(\.id))
+        let avatars = sessions.prefix(AgentsAvatarStack.maxShown).map(\.id)
 
+        // The animations go outside the glass, so the capsule resizes with the crossfade.
         if roomless {
             content
                 .hudChip(tint: HUDTint.panelDim)
+                .animation(AgentSummaryMotion.change, value: counts)
+                .animation(AgentSummaryMotion.change, value: avatars)
                 .transition(.opacity)
                 .help("No room for the agent list in this corner. It opens once there is space.")
                 .accessibilityElement(children: .ignore)
@@ -249,6 +251,8 @@ struct AgentsPieceList: View {
                 .buttonStyle(HUDPressStyle())
                 .focusable(false)
                 .hudChip(tint: HUDTint.panelDim)
+                .animation(AgentSummaryMotion.change, value: counts)
+                .animation(AgentSummaryMotion.change, value: avatars)
                 .transition(.opacity)
                 .help("Show the agent list")
                 .accessibilityLabel("Show agent list: \(AgentSummary.plain(counts))")
