@@ -42,45 +42,55 @@ public final class AiderProvider: AgentProvider, @unchecked Sendable {
 
     static func parse(path: String, cwd: String, maxEvents: Int) -> ParsedSession? {
         let mtime = FileStamp.of(path)?.date ?? Date()
-        let lines = MoreFiles.tailLines(path, maxBytes: 128 << 10)
+        // Ids are byte offsets in the file: stable as it grows (window positions are not).
+        let lines = MoreFiles.tailLinesWithOffsets(path, maxBytes: 128 << 10)
         // Only the last session in the file.
-        var start = 0
+        var start: Int?
         var started: Date?
-        for (i, l) in lines.enumerated() where l.hasPrefix("# aider chat started at ") {
+        for (i, l) in lines.enumerated() where l.line.hasPrefix("# aider chat started at ") {
             start = i
-            started = MoreDates.parse(String(l.dropFirst("# aider chat started at ".count)).trimmingCharacters(in: .whitespaces))
+            started = MoreDates.parse(String(l.line.dropFirst("# aider chat started at ".count)).trimmingCharacters(in: .whitespaces))
                 .map { $0.addingTimeInterval(TimeInterval(-TimeZone.current.secondsFromGMT(for: $0))) }
         }
         var events = EventList(prefix: "aider:\(cwd)", fallback: mtime)
         var activity: TurnActivity = .unknown
-        var assistant = ""
         var firstPrompt: String?
-        func flush(_ i: Int) {
+        var assistant = ""
+        /// Offset of the assistant block's first line: its id stays put while the block grows.
+        var assistantAt: UInt64?
+        // A window opening mid-file (no session header in it) may start inside an assistant block whose
+        // real first line is out of view; that block's id would slide with the window, so it's skipped
+        // (unless the window holds nothing else).
+        var leadingPartial = start == nil && (lines.first?.offset ?? 0) > 0
+        func flush() {
+            defer { assistant = ""; assistantAt = nil; leadingPartial = false }
             let t = assistant.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { events.add("a\(i)", at: nil, .assistant, t); activity = .ended }
-            assistant = ""
+            guard !leadingPartial, !t.isEmpty, let at = assistantAt else { return }
+            events.add("a\(at)", at: nil, .assistant, t); activity = .ended
         }
-        for (i, raw) in lines.enumerated().dropFirst(start) {
+        for (off, raw) in lines.dropFirst(start ?? 0) {
             let l = String(raw)
             if l.hasPrefix("# aider chat started") { continue }
             if l.hasPrefix("#### ") {
-                flush(i)
+                flush()
                 let prompt = String(l.dropFirst(5))
                 if firstPrompt == nil { firstPrompt = prompt }
-                events.add("u\(i)", at: nil, .user, prompt)
+                events.add("u\(off)", at: nil, .user, prompt)
                 activity = .running
             } else if l.hasPrefix("> ") {
-                flush(i)
+                flush()
                 let t = String(l.dropFirst(2))
                 if t.hasPrefix("Applied edit to ") || t.hasPrefix("Commit ") || t.hasPrefix("Running ") || t.hasPrefix("Added ") {
-                    events.add("t\(i)", at: nil, .tool, t)
+                    events.add("t\(off)", at: nil, .tool, t)
                 }
                 if t.hasPrefix("Tokens:") { activity = .ended }
             } else {
+                if assistantAt == nil { assistantAt = off }
                 assistant += l + " "
             }
         }
-        flush(lines.count)
+        leadingPartial = false
+        flush()
         return ParsedSession(nativeID: "\(cwd)#\(Int(started?.timeIntervalSince1970 ?? 0))",
                              title: firstPrompt.map { EventText.clip($0, max: 80) } ?? MoreText.folder(cwd), cwd: cwd,
                              startedAt: started, updatedAt: mtime, events: events.tail(maxEvents), activity: activity)

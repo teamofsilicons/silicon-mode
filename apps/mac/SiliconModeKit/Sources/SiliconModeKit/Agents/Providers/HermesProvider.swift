@@ -173,7 +173,9 @@ public final class HermesProvider: AgentProvider, @unchecked Sendable {
         var answered = Set<String>()
         for row in rows.reversed() {
             let at = row["timestamp"].double.flatMap(MoreDates.epoch)
-            let mid = row["id"].string ?? UUID().uuidString
+            // No id: hash the row's content (stable across scans, unlike a random UUID).
+            let mid = row["id"].string
+                ?? MoreHash.id(["role", "timestamp", "content", "tool_calls", "tool_call_id"].map { row[$0].string ?? "" }.joined(separator: "|"))
             switch row["role"].string ?? "" {
             case "user":
                 events.add(mid, at: at, .user, row["content"].string)

@@ -121,10 +121,17 @@ public final class OmniProvider: AgentProvider, @unchecked Sendable {
         var lastAt: Date?
         var firstPrompt: String?
         var model: String?
+        var seen: [String: Int] = [:]
         for line in lines {
             guard let e = J.parse(line) else { continue }
             let at = e["at"].date
-            let id = e["seq"].int.map(String.init) ?? UUID().uuidString
+            // seq, else a hash of the line: the same id on every scan (the sync ledger dedupes by id).
+            let id: String
+            if let seq = e["seq"].int { id = String(seq) } else {
+                let h = MoreHash.id(line), n = seen[h, default: 0]
+                seen[h] = n + 1
+                id = n == 0 ? h : "\(h)~\(n)" // byte-identical lines
+            }
             if let m = e["model"].text { model = m }
             switch e["type"].string ?? "" {
             case "user", "start", "injected":

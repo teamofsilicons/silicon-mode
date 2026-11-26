@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 extension AgentProviders {
     /// Hermes, OpenClaw, Gemini / Antigravity, Silicon interpreter, Omni, file-based CLIs, process fallback.
@@ -240,6 +241,33 @@ enum MoreFiles {
         return lines
     }
 
+    /// `tailLines` with each line's absolute byte offset in the file. Unlike a position inside the
+    /// tail window, the offset never moves as the file grows, so it makes a stable event id.
+    /// A partial first line (window opening mid-line) is dropped; a final line without `\n` is kept.
+    static func tailLinesWithOffsets(_ path: String, maxBytes: Int = 256 << 10) -> [(offset: UInt64, line: Substring)] {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { try? fh.close() }
+        guard let end = try? fh.seekToEnd() else { return [] }
+        // Mid-file, read one byte early: if it is a newline, the window opens on a whole line.
+        let base = end > UInt64(maxBytes) ? end - UInt64(maxBytes) - 1 : 0
+        try? fh.seek(toOffset: base)
+        guard let data = try? fh.readToEnd(), !data.isEmpty else { return [] }
+        var i = data.startIndex
+        if base > 0 {
+            guard let nl = data[i...].firstIndex(of: 0x0A) else { return [] }
+            i = data.index(after: nl)
+        }
+        var out: [(offset: UInt64, line: Substring)] = []
+        while i < data.endIndex {
+            let nl = data[i...].firstIndex(of: 0x0A) ?? data.endIndex
+            if nl > i {
+                out.append((base + UInt64(i - data.startIndex), Substring(String(decoding: data[i..<nl], as: UTF8.self))))
+            }
+            i = nl == data.endIndex ? nl : data.index(after: nl)
+        }
+        return out
+    }
+
     /// First `maxBytes` of a file as lines (for headers like the first user prompt).
     static func headLines(_ path: String, maxBytes: Int = 64 << 10) -> [Substring] {
         guard let fh = FileHandle(forReadingAtPath: path) else { return [] }
@@ -260,6 +288,15 @@ enum MoreFiles {
             url = parent
         }
         return dir
+    }
+}
+
+/// Content-derived event ids for records that carry no id of their own (never a random UUID:
+/// the sync ledger dedupes by id, so an id must be the same on every scan).
+enum MoreHash {
+    /// `l` + the first 8 bytes of SHA-256(text), hex.
+    static func id<S: StringProtocol>(_ text: S) -> String {
+        "l" + SHA256.hash(data: Data(text.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
 
