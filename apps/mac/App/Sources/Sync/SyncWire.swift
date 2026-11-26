@@ -229,14 +229,14 @@ enum SyncMapper {
         }
     }
 
-    /// Privacy: the full cwd never leaves the Mac — only the project folder name.
+    /// Privacy: the full cwd never leaves the Mac — only the project folder name. Provider ids that
+    /// could carry a path (Aider, Kiro build theirs from the cwd) go as a hash (`SyncIDs.providerSessionID`).
     static func sessionRow(_ s: AgentSession, deviceID: String) -> WireSession {
         let provider = SyncIDs.wireProvider(s.provider)
-        let native = String(s.nativeID.prefix(200))
         return WireSession(
-            id: SyncIDs.session(deviceID: deviceID, provider: provider, nativeID: native),
+            id: SyncIDs.session(deviceID: deviceID, provider: provider, nativeID: s.nativeID),
             provider: provider,
-            providerSessionID: native,
+            providerSessionID: SyncIDs.providerSessionID(s.nativeID),
             title: SyncRedactor.clean(s.title).syncNilIfEmpty?.clippedScalars(300),
             project: s.projectName.map { $0.clippedScalars(200) },
             model: s.model.map { $0.clippedScalars(120) },
@@ -272,8 +272,10 @@ enum SyncMapper {
     static func questionRow(_ q: AgentQuestion, deviceID: String, sessionUUID: String?) -> WireQuestion {
         let kind: String = switch q.kind { case .permission: "permission"; case .question: "question"; case .input: "input" }
         let opts: [WireQuestionOption] = q.answerable ? q.options.prefix(12).map { o in
-            WireQuestionOption(id: String(o.id.prefix(64)), label: o.label.clippedScalars(120),
-                              role: role(o, kind: q.kind), detail: o.detail.map { SyncRedactor.clean($0).clippedScalars(200) })
+            // Labels can quote the command or path being approved ("Yes, allow `curl -u admin:…`").
+            let label = SyncRedactor.clean(o.label)
+            return WireQuestionOption(id: String(o.id.prefix(64)), label: (label.isEmpty ? o.id : label).clippedScalars(120),
+                                      role: role(o, kind: q.kind), detail: o.detail.map { SyncRedactor.clean($0).clippedScalars(200) })
         } : []
         let title = SyncRedactor.clean(q.title).clippedScalars(300)
         return WireQuestion(
@@ -324,29 +326,90 @@ enum SyncMapper {
 // MARK: - Redaction
 
 /// Agent logs can contain secrets. Before anything leaves the Mac: home paths become `~`, and
-/// well-known credential shapes (API keys, tokens, JWTs, private keys, `password=…`) become `•••`.
+/// credential shapes become `•••`: private keys, JWTs, provider keys and tokens (OpenAI/Anthropic
+/// `sk-…`, Stripe, GitHub, GitLab, Slack, AWS, Google, npm, Hugging Face, …), passwords in URLs,
+/// `Authorization`/`Cookie` headers, `Bearer`/`Basic` credentials, secret-named CLI flags, query
+/// parameters and assignments (`password=…`, `"token": "…"`, `--password …`).
+/// Order matters: specific shapes first, then the generic key/value rules.
 enum SyncRedactor {
     private struct Rules: @unchecked Sendable {
         let patterns: [(NSRegularExpression, String)]
     }
 
+    /// Words that make a key, flag or parameter secret-bearing.
+    private static let secretKey = #"(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?key|account[_-]?key|shared[_-]?access[_-]?(?:key|signature)|credentials?|cookie)"#
+
+    static let specs: [(String, String)] = [
+        // Key material.
+        (#"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)"#, "•••private key•••"),
+        (#"\bAGE-SECRET-KEY-1[0-9A-Z]{50,}"#, "•••"),
+        // Passwords and tokens inside URLs: scheme://user:password@host, https://<token>@host.
+        (#"(?i)\b([a-z][a-z0-9+.\-]{1,30}://)[^\s/?#@:'"]{0,128}:[^\s/?#'"]{0,256}@"#, "$1•••@"),
+        (#"(?i)\b(https?://)(?=[A-Za-z0-9_.~\-]{0,256}\d)[A-Za-z0-9_.~\-]{20,256}@"#, "$1•••@"),
+        (#"\b(hooks\.slack\.com/(?:services|workflows|triggers)/)[A-Za-z0-9/_\-]+"#, "$1•••"),
+        (#"\b(discord(?:app)?\.com/api/webhooks/\d+/)[A-Za-z0-9_\-]+"#, "$1•••"),
+        // Headers.
+        (#"(?i)\b((?:proxy-)?authorization)(["']?\s*[:=]\s*["']?)(?:(?:basic|bearer|token|digest|negotiate|ntlm|apikey|api-key|sso-key)\s+)?[^\s"',;}]+"#, "$1$2•••"),
+        (#"(?i)\b((?:set-)?cookie)(["']?\s*:\s*["']?)[^\r\n"']+"#, "$1$2•••"),
+        (#"(?i)\b(bearer)\s+(?:(?=[A-Za-z0-9._~+/=\-]{0,512}\d)[A-Za-z0-9._~+/=\-]{12,}|[A-Za-z0-9._~+/=\-]{16,})"#, "$1 •••"),
+        (#"\b([Bb]asic)\s+(?=[A-Za-z0-9+/]*[0-9+/])[A-Za-z0-9+/]{12,}={0,2}"#, "$1 •••"),
+        // JWTs (and the header.payload part of unsigned ones).
+        (#"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]*)?"#, "•••"),
+        // Provider keys and tokens.
+        (#"\b(?:sk|pk|rk)-(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{16,}"#, "•••"),                    // OpenAI, Anthropic, OpenRouter, …
+        (#"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}"#, "•••"),                             // Stripe
+        (#"\bwhsec_[A-Za-z0-9+/=]{16,}"#, "•••"),                                               // Stripe webhooks
+        (#"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"#, "•••"),              // GitHub
+        (#"\bgl(?:pat|dt|rt|ptt|cbt|imt|ft|soat|oas|agent)-[A-Za-z0-9_\-]{16,}"#, "•••"),        // GitLab
+        (#"\bGR1348941[A-Za-z0-9_\-]{16,}"#, "•••"),                                            // GitLab runner registration
+        (#"\b(?:xoxe\.)?xox[a-z]-[A-Za-z0-9\-]{10,}"#, "•••"),                                  // Slack
+        (#"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA|APKA|ASCA|A3T[A-Z0-9])[0-9A-Z]{16}\b"#, "•••"), // AWS key ids
+        (#"\bAIza[0-9A-Za-z_\-]{30,}"#, "•••"),                                                 // Google API keys
+        (#"\bGOCSPX-[A-Za-z0-9_\-]{20,}"#, "•••"),                                              // Google OAuth client secrets
+        (#"\bya29\.[A-Za-z0-9_\-]{20,}"#, "•••"),                                               // Google OAuth access tokens
+        (#"(?<![A-Za-z0-9])1//0[A-Za-z0-9_\-]{20,}"#, "•••"),                                   // Google OAuth refresh tokens
+        (#"\b(?:npm|hf|gsk|r8)_[A-Za-z0-9]{30,}"#, "•••"),                                      // npm, Hugging Face, Groq, Replicate
+        (#"\bxai-[A-Za-z0-9]{30,}"#, "•••"),                                                    // xAI
+        (#"\bpypi-[A-Za-z0-9_\-]{40,}"#, "•••"),                                                // PyPI
+        (#"\bdckr_(?:pat|oat)_[A-Za-z0-9_\-]{20,}"#, "•••"),                                    // Docker Hub
+        (#"\blin_(?:api|oauth)_[A-Za-z0-9]{30,}"#, "•••"),                                      // Linear
+        (#"\bsbp_[a-f0-9]{30,}"#, "•••"),                                                       // Supabase
+        (#"\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}"#, "•••"),                                      // Shopify
+        (#"\bdo[opr]_v1_[a-f0-9]{64}"#, "•••"),                                                 // DigitalOcean
+        (#"\b(?:ntn|secret)_[A-Za-z0-9]{40,}"#, "•••"),                                         // Notion
+        (#"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"#, "•••"),                            // SendGrid
+        (#"\bSK[0-9a-fA-F]{32}\b"#, "•••"),                                                     // Twilio
+        (#"\bkey-[0-9a-f]{32}\b"#, "•••"),                                                      // Mailgun
+        (#"\bPMAK-[A-Za-z0-9\-]{20,}"#, "•••"),                                                 // Postman
+        (#"\bATATT3[A-Za-z0-9_=\-]{20,}"#, "•••"),                                              // Atlassian
+        (#"\bfigd_[A-Za-z0-9_\-]{20,}"#, "•••"),                                                // Figma
+        (#"\b\d{8,10}:AA[A-Za-z0-9_\-]{30,}"#, "•••"),                                          // Telegram bots
+        (#"\b(?:cs_secret|csr|slt|sar|sifr|cis)_[A-Za-z0-9_\-]{12,}"#, "•••"),                  // Silicon Cells / Accounts
+        // Query parameters.
+        (#"(?i)([?&](?:access_token|refresh_token|id_token|token|api_key|apikey|key|secret|client_secret|password|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|code)=)[^&#\s"']+"#, "$1•••"),
+        // CLI flags: --password x, --token=x, curl -u user:pass, sshpass -p x.
+        (#"(?i)((?:^|\s)--?"# + secretKey + #"(?:\s+|=))("[^"]*"|'[^']*'|[^\s"']+)"#, "$1•••"),
+        (#"((?:^|\s)(?:-u|--user)\s+)(["']?)[^\s:"']+:[^\s"']+"#, "$1$2•••"),
+        (#"\b(sshpass\s+-p\s*)\S+"#, "$1•••"),
+        // Assignments: PASSWORD=x, "token": "x", api_key: x, x-api-key: x.
+        (#"(?i)\b([A-Za-z0-9_.\-]{0,64}"# + secretKey + #")(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&"'}<>]+)"#, "$1$2•••"),
+    ]
+
+    /// Longer input is cut before matching (everything sent is clipped to ≤ 8000 anyway).
+    static let maxInput = 12_000
+
     private static let rules: Rules = {
-        let specs: [(String, String)] = [
-            (#"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)"#, "•••private key•••"),
-            (#"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"#, "•••"),
-            (#"\b(sk|pk|rk)-(live|test|proj|ant|or)?-?[A-Za-z0-9_-]{16,}"#, "•••"),
-            (#"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"#, "•••"),
-            (#"\b(xox[abprs]-[A-Za-z0-9-]{10,})"#, "•••"),
-            (#"\b(AKIA|ASIA)[0-9A-Z]{16}\b"#, "•••"),
-            (#"\bAIza[0-9A-Za-z_-]{30,}"#, "•••"),
-            (#"\b(cs_secret|csr|slt|sar|sifr|cis)_[A-Za-z0-9_-]{12,}"#, "•••"),
-            (#"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}"#, "$1 •••"),
-            (#"(?i)\b([A-Z0-9_]*(password|passwd|secret|token|api[_-]?key|access[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;]+)"#, "$1$3•••"),
-        ]
-        return Rules(patterns: specs.compactMap { p, r in
-            (try? NSRegularExpression(pattern: p)).map { ($0, r) }
+        Rules(patterns: specs.compactMap { p, r in
+            guard let re = try? NSRegularExpression(pattern: p) else {
+                SyncLog.error("redaction rule does not compile: \(p)")
+                return nil
+            }
+            return (re, r)
         })
     }()
+
+    /// Every rule compiles (harness check: a typo must not silently drop a rule).
+    static var allRulesCompile: Bool { rules.patterns.count == specs.count }
 
     private static let home = NSHomeDirectory()
 
@@ -366,7 +429,7 @@ enum SyncRedactor {
     }
 
     private static func compute(_ s: String) -> String {
-        var out = s
+        var out = s.unicodeScalars.count > maxInput ? String(String.UnicodeScalarView(s.unicodeScalars.prefix(maxInput))) : s
         if !home.isEmpty, home != "/" { out = out.replacingOccurrences(of: home, with: "~") }
         for (re, tpl) in rules.patterns {
             let range = NSRange(out.startIndex..., in: out)

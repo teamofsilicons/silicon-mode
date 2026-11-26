@@ -4,7 +4,8 @@
 // Build + run (from apps/mac):
 //   xcrun swiftc -swift-version 6 -D SYNC_HARNESS -module-name SiliconModeKit -parse-as-library \
 //     $(find SiliconModeKit/Sources -name '*.swift') App/Sources/Sync/*.swift -o /tmp/sync-harness
-//   /tmp/sync-harness            # offline checks (ids, mapping, redaction, ledger, loopback server, keychain)
+//   /tmp/sync-harness            # offline checks (ids, mapping, redaction, ledger, loopback server, keychain,
+//                                #   and sign-in / sign-out / CloudSync against an in-process fake cell)
 //   /tmp/sync-harness --live     # + live end-to-end against the Silicon Cell (needs `silicon-accounts` signed in)
 //
 // Account card snapshots (light + dark PNGs of every SyncPreviews variant):
@@ -27,6 +28,14 @@ struct SyncHarnessMain {
             exit(0)
         }
         #endif
+        if let i = CommandLine.arguments.firstIndex(of: "--serve-pages") {
+            // Manual browser check of the loopback pages: open the printed start URL in a browser; the
+            // "cell" redirects straight back to the callback with a fake fragment, and each completion is
+            // printed with whether it carried the tab's flow key (bound). Serves for N seconds (default 120).
+            let seconds = (i + 1 < CommandLine.arguments.count ? Int(CommandLine.arguments[i + 1]) : nil) ?? 120
+            await servePages(seconds: seconds)
+            exit(0)
+        }
         let live = CommandLine.arguments.contains("--live")
         let h = Harness()
         await h.offline()
@@ -34,6 +43,23 @@ struct SyncHarnessMain {
         print("\n\(h.passed) passed, \(h.failed) failed")
         exit(h.failed == 0 ? 0 : 1)
     }
+}
+
+@MainActor
+func servePages(seconds: Int) async {
+    setvbuf(stdout, nil, _IOLBF, 0)   // line by line, also when piped to a file
+    let port: UInt16 = 47_395
+    let fakeCell = URL(string: "http://127.0.0.1:\(port)/auth/callback#access_token=demo&refresh_token=csr_demo&expires_at=2000000000")!
+    let server = LoopbackAuthServer(port: port, signInURL: fakeCell) { fragment, _, bound in
+        print("COMPLETE bound=\(bound) fragment=\(fragment)")
+        return LoopbackResult(ok: bound, title: bound ? "Bound to this tab" : "Not bound",
+                              message: "bound=\(bound)", name: "Demo", handle: "c:demo")
+    }
+    do { try await server.start() } catch { print("listen failed: \(error)"); return }
+    print("START \(server.startURL.absoluteString)")
+    print("CALLBACK http://127.0.0.1:\(port)/auth/callback#access_token=other&refresh_token=csr_other")
+    try? await Task.sleep(for: .seconds(seconds))
+    server.stop()
 }
 
 @MainActor
@@ -94,6 +120,10 @@ final class Harness {
         let r = SyncRedactor.clean("export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuv in \(NSHomeDirectory())/code; Bearer abcdefghijklmnopqrstuvwxyz; ghp_abcdefghijklmnopqrstuvwxyz0123")
         check("secrets redacted", !r.contains("sk-proj") && !r.contains("ghp_") && !r.contains("abcdefghijklmnopqrstuvwxyz") && r.contains("~/code"), r)
         check("summary ≤ 500 scalars", SyncMapper.eventSummary(String(repeating: "é", count: 900)).unicodeScalars.count <= 500)
+        redactionChecks()
+
+        section("provider session ids")
+        providerSessionIDChecks()
 
         section("ledger")
         var l = SyncLedger(deviceID: dev)
@@ -104,6 +134,7 @@ final class Harness {
         l.acknowledge(events: Array(l.outbox.prefix(2)))
         _ = l.enqueue(sessionUUID: "S", events: evs + [.init(id: "e4", at: "t", kind: "log", summary: "s", detail: nil)])
         check("contiguous after ack", l.outbox.map(\.seq) == [3, 4])
+        ledgerChecks()
 
         section("usage rows")
         let tracker = UsageTracker(url: nil)
@@ -118,6 +149,8 @@ final class Harness {
 
         section("loopback server")
         await loopbackChecks()
+        section("loopback HTTP parsing (hostile input)")
+        await parserChecks()
 
         section("keychain store")
         let ks = KeychainSessionStore(service: "ai.tos.mode.session.harness.\(UUID().uuidString.prefix(8))")
@@ -125,37 +158,50 @@ final class Harness {
         do { try ks.save(a); check("keychain round trip", ks.load() == a) } catch { check("keychain save", false, "\(error)") }
         ks.clear()
         check("keychain cleared", ks.load() == nil)
+
+        await fakeCellChecks()
     }
 
     private func loopbackChecks() async {
         let port: UInt16 = 47_391
-        let got = SyncLock<String?>(nil)
-        let server = LoopbackAuthServer(port: port) { frag, _ in
-            got.value = frag
+        let got = SyncLock<[(String, Bool)]>([])
+        let server = LoopbackAuthServer(port: port) { frag, _, bound in
+            got.value.append((frag, bound))
             return LoopbackResult(ok: true, title: "You're signed in", message: "m", name: "N", handle: "si:x")
         }
         do { try await server.start() } catch { check("listener start", false, "\(error)"); return }
         let base = "http://127.0.0.1:\(port)"
+        let key = server.flowKey
         let (page, resp) = await httpGet("\(base)/auth/callback")
         check("page served", resp?.statusCode == 200 && page.contains("Finishing sign-in"))
         check("CSP + no-store", (resp?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "").contains("script-src 'nonce-")
               && resp?.value(forHTTPHeaderField: "Cache-Control") == "no-store")
-        let secret = Self.secret(in: page)
-        check("secret embedded", secret != nil && secret == server.pageSecret)
+        let (root, _) = await httpGet("\(base)/")
+        check("no secret in any page", !page.contains(key) && !root.contains(key))
+        let (start, startResp) = await httpGet("\(base)/auth/start")
+        check("start page → cell sign-in, no flow key", startResp?.statusCode == 200 && start.contains("auth/sign-in?redirect_to=")
+              && start.contains("sessionStorage.setItem") && !start.contains(key))
+        check("start URL carries the key only in its fragment", server.startURL.fragment == key && server.startURL.path == "/auth/start")
         let body = try! JSONSerialization.data(withJSONObject: ["fragment": "access_token=x", "query": ""])
-        let noSecret = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base])
-        check("POST without secret → 403", noSecret.1 == 403)
-        let badOrigin = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": "https://evil.example", "X-Silicon-Mode": secret ?? ""])
+        let noHeader = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base])
+        check("POST without the header → 403", noHeader.1 == 403)
+        let badOrigin = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": "https://evil.example", "X-Silicon-Mode": key])
         check("cross-origin POST → 403", badOrigin.1 == 403)
-        let ok = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base, "X-Silicon-Mode": secret ?? ""])
-        check("POST → handler", ok.1 == 200 && got.value == "access_token=x" && ok.0.contains("\"ok\":true"), "\(ok)")
+        let form = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base, "X-Silicon-Mode": key, "Content-Type": "text/plain"])
+        check("non-JSON POST → 415", form.1 == 415)
+        let unbound = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base, "X-Silicon-Mode": "none"])
+        check("POST without the key → handler, unbound", unbound.1 == 200 && got.value.last.map { $0 == ("access_token=x", false) } == true)
+        let wrong = await httpPost("\(base)/auth/complete", body: body, headers: ["X-Silicon-Mode": String(key.reversed())])
+        check("wrong key → unbound", wrong.1 == 200 && got.value.last?.1 == false)
+        let ok = await httpPost("\(base)/auth/complete", body: body, headers: ["Origin": base, "X-Silicon-Mode": key])
+        check("POST with the key → handler, bound", ok.1 == 200 && got.value.last.map { $0 == ("access_token=x", true) } == true
+              && ok.0.contains("\"ok\":true"), "\(ok)")
+        let replay = await httpPost("\(base)/auth/complete", body: body, headers: ["X-Silicon-Mode": key])
+        check("flow key is single use", replay.1 == 409, "\(replay.1)")
+        server.retire()
+        let late = await httpPost("\(base)/auth/complete", body: body, headers: ["X-Silicon-Mode": "none"])
+        check("retired listener refuses completions", late.1 == 410 && got.value.count == 3, "\(late.1)")
         server.stop()
-    }
-
-    static func secret(in page: String) -> String? {
-        guard let r = page.range(of: #""X-Silicon-Mode":""#) else { return nil }
-        let rest = page[r.upperBound...]
-        return rest.firstIndex(of: "\"").map { String(rest[..<$0]) }
     }
 
     // MARK: Live
@@ -175,16 +221,20 @@ final class Harness {
         let store = KeychainSessionStore(service: service)
         let client = CellClient(store: store)
         let account = AccountManager(client: client)
+        account.confirmUnboundSignIn = { _ in false }
         let fragment = "access_token=\(t1.accessToken)&refresh_token=\(t1.refreshToken)&expires_at=\(Int(t1.expiresAt.timeIntervalSince1970))"
         var browserResult = ""
         account.openURL = { url in
-            // Simulated browser: the cell would 302 to redirect_to#<fragment>; load our page, run its "script".
+            // Simulated browser: open the start page (its script keeps the fragment's flow key in the tab),
+            // the cell would 302 the same tab to redirect_to#<fragment>; load our page, run its "script".
             Task { @MainActor in
-                let (page, _) = await self.httpGet(CellConfig.loopbackRedirect)
-                guard let secret = Self.secret(in: page) else { browserResult = "no secret"; return }
+                let key = url.fragment ?? ""
+                let (start, _) = await self.httpGet(url.absoluteString)
+                guard start.contains("auth/sign-in"), !key.isEmpty else { browserResult = "no start page"; return }
+                _ = await self.httpGet(CellConfig.loopbackRedirect)
                 let body = try! JSONSerialization.data(withJSONObject: ["fragment": fragment, "query": ""])
                 let r = await self.httpPost("http://127.0.0.1:\(CellConfig.loopbackPort)/auth/complete", body: body,
-                                            headers: ["Origin": CellConfig.loopbackOrigin, "X-Silicon-Mode": secret])
+                                            headers: ["Origin": CellConfig.loopbackOrigin, "X-Silicon-Mode": key])
                 browserResult = r.0
             }
         }
@@ -353,7 +403,7 @@ final class Harness {
         check("mode locked synced", st2.first?["mode"] as? String == "locked", "\(st2)")
 
         await cleanup(account: account, client: client, deviceID: dev, store: store)
-        try? FileManager.default.removeItem(at: ledgerURL)
+        SyncLedgerStore(url: ledgerURL).deleteAll()
         UserDefaults.standard.removePersistentDomain(forName: suite)
     }
 
@@ -370,18 +420,24 @@ final class Harness {
             let st = await rest(c2, "device_status", ["device_id": "eq.\(deviceID)", "select": "online"])
             check("Mac marked offline on sign-out", st.first?["online"] as? Bool == false, "\(st)")
         }
-        // handleCallback path (bounce page → ai.tos.mode://auth/callback#…) with this session.
+        // handleCallback path (bounce page → ai.tos.mode://auth/callback#…), used when the loopback port
+        // is taken: hold the port, then the account must be confirmed.
+        let blocker = LoopbackAuthServer(port: CellConfig.loopbackPort) { _, _, _ in LoopbackResult(ok: false, title: "", message: "") }
+        try? await blocker.start()
         let acc2 = AccountManager(client: CellClient(store: MemorySessionStore()))
         acc2.openURL = { _ in }
+        var confirmed: [String] = []
+        acc2.confirmUnboundSignIn = { a in confirmed.append(a.id); return true }
         await acc2.startSignIn(openBrowser: false)
         if let t3 = await mintSession() {
             let frag = "access_token=\(t3.accessToken)&refresh_token=\(t3.refreshToken)&expires_at=\(Int(t3.expiresAt.timeIntervalSince1970))"
             acc2.handleCallback(URL(string: "ai.tos.mode://auth/callback#\(frag)")!)
             let ok = await waitUntil(15) { acc2.isSignedIn }
-            check("ai.tos.mode://auth/callback sign-in", ok, "\(acc2.state)")
+            check("ai.tos.mode://auth/callback sign-in (confirmed)", ok && confirmed.count == 1, "\(acc2.state)")
             acc2.signOut()
             _ = await waitUntil(5) { !acc2.isSignedIn }
         }
+        blocker.stop()
         // Delete test devices (this run + leftovers from earlier runs).
         let mine = await rest(c2, "devices", ["name": "eq.Silicon Mode Sync Harness", "select": "id"])
         var deleted = 0

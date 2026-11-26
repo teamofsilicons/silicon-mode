@@ -1,20 +1,104 @@
 import Foundation
 
-/// The page the browser lands on after the cell's hosted sign-in (http://127.0.0.1:47291/auth/callback).
+/// The loopback sign-in pages (http://127.0.0.1:47291): `/auth/start`, which the app opens first, and
+/// `/auth/callback`, where the cell's hosted sign-in lands. Neither page contains a secret: the
+/// per-attempt flow key reaches the browser only in the start URL's fragment and lives in that tab's
+/// sessionStorage until the callback page sends it back (see LoopbackAuthServer).
 /// Silicon Accounts look: flat paper, neutral greys, Allo (ROND 20, served from the app bundle),
 /// the silicon gradient, faint warm shadows. A half-open laptop glyph whose lid settles at the
 /// "Silicon Mode angle" when sign-in completes. No third-party anything: tokens pass through here.
 enum LoopbackPage {
+    /// sessionStorage key holding the flow key between the two pages (same tab, same origin).
+    static let storageKey = "silicon-mode.flow"
+
     static func csp(nonce: String) -> String {
         "default-src 'none'; script-src 'nonce-\(nonce)'; style-src 'unsafe-inline'; font-src 'self'; "
             + "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
 
-    static func html(secret: String, nonce: String) -> String {
+    /// Stashes the flow key from the fragment, then continues to the cell's hosted sign-in.
+    static func startHTML(nonce: String, signInURL: URL) -> String {
+        page(nonce: nonce, title: "Opening Silicon Accounts…", message: "Taking you to Silicon Accounts to sign in.",
+             script: startScript.replacingOccurrences(of: "__SIGNIN__", with: jsString(signInURL.absoluteString)))
+    }
+
+    /// Hands the fragment (and the flow key, if this tab has it) back to the app.
+    static func callbackHTML(nonce: String) -> String {
+        page(nonce: nonce, title: "Finishing sign-in…", message: "Handing your Silicon account to Silicon Mode.",
+             script: callbackScript)
+    }
+
+    private static func page(nonce: String, title: String, message: String, script: String) -> String {
         template
-            .replacingOccurrences(of: "__SECRET__", with: secret)
+            .replacingOccurrences(of: "__TITLE__", with: title)
+            .replacingOccurrences(of: "__MESSAGE__", with: message)
+            .replacingOccurrences(of: "__SCRIPT__", with: (common + script).replacingOccurrences(of: "__KEY__", with: storageKey))
             .replacingOccurrences(of: "__NONCE__", with: nonce)
     }
+
+    /// A JavaScript string literal (JSON-encoded), safe inside a <script> element.
+    static func jsString(_ s: String) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: [s], options: [.withoutEscapingSlashes])) ?? Data(#"[""]"#.utf8)
+        let array = String(decoding: data, as: UTF8.self)
+        return String(array.dropFirst().dropLast())
+            .replacingOccurrences(of: "<", with: #"<"#)
+            .replacingOccurrences(of: ">", with: #">"#)
+            .replacingOccurrences(of: "&", with: #"&"#)
+            .replacingOccurrences(of: "\u{2028}", with: #" "#)
+            .replacingOccurrences(of: "\u{2029}", with: #" "#)
+    }
+
+    private static let common = #"""
+  var root = document.documentElement;
+  function swap(id, text){ var el = document.getElementById(id); el.textContent = text; el.classList.remove("swap"); void el.offsetWidth; el.classList.add("swap"); }
+  function show(r){
+    if (r.pending) { swap("t", r.title || "Check Silicon Mode"); swap("m", r.message || ""); return; }
+    root.setAttribute("data-state", r.ok ? "ok" : "error");
+    swap("t", r.title || (r.ok ? "You're signed in" : "Sign-in didn't finish"));
+    swap("m", r.message || "");
+    if (r.ok && (r.name || r.handle)) {
+      document.getElementById("who").hidden = false;
+      document.getElementById("wn").textContent = r.name || "";
+      document.getElementById("wh").textContent = r.handle || "";
+      document.getElementById("av").textContent = ((r.name || r.handle || "?").trim().charAt(0) || "?").toUpperCase();
+    }
+    document.title = r.ok ? "Signed in · Silicon Mode" : "Silicon Mode";
+  }
+
+"""#
+
+    private static let startScript = #"""
+  var key = location.hash ? location.hash.slice(1) : "";
+  try { history.replaceState(null, "", "/auth/start"); } catch (e) {}
+  if (!key) {
+    show({ok:false, title:"Start from Silicon Mode", message:"Open the Silicon Mode menu bar and choose Sign in."});
+    return;
+  }
+  // Blocked storage only costs the automatic finish: Silicon Mode then asks you to confirm the account.
+  try { sessionStorage.setItem("__KEY__", key); } catch (e) {}
+  location.replace(__SIGNIN__);
+
+"""#
+
+    private static let callbackScript = #"""
+  var frag = location.hash ? location.hash.slice(1) : "";
+  var q = location.search ? location.search.slice(1) : "";
+  try { history.replaceState(null, "", "/auth/callback"); } catch (e) {}
+  if (!frag && !q) {
+    show({ok:false, title:"Nothing to finish here", message:"This page completes a sign-in started from Silicon Mode. Start again from the menu bar."});
+    return;
+  }
+  // The flow key the start page left in this tab: it ties these tokens to the sign-in this Mac started.
+  var key = null;
+  try { key = sessionStorage.getItem("__KEY__"); sessionStorage.removeItem("__KEY__"); } catch (e) {}
+  fetch("/auth/complete", {method:"POST", cache:"no-store", credentials:"omit", referrerPolicy:"no-referrer",
+    headers:{"Content-Type":"application/json","X-Silicon-Mode": key || "none"},
+    body:JSON.stringify({fragment:frag, query:q})})
+    .then(function(r){ return r.json(); })
+    .then(show)
+    .catch(function(){ show({ok:false, title:"Silicon Mode isn't listening", message:"This sign-in window has closed. Start again from the Silicon Mode menu bar."}); });
+
+"""#
 
     private static let template = #"""
 <!doctype html>
@@ -116,42 +200,15 @@ p{font-size:15px;line-height:1.45;color:var(--muted);letter-spacing:-.01em;margi
       </svg>
     </span>
   </div>
-  <h1 id="t">Finishing sign-in…</h1>
-  <p id="m">Handing your Silicon account to Silicon Mode.</p>
+  <h1 id="t">__TITLE__</h1>
+  <p id="m">__MESSAGE__</p>
   <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
   <div class="who" id="who" hidden><span class="av" id="av"></span><b id="wn"></b><span id="wh"></span></div>
   <div class="foot"><span class="g"></span>Silicon Mode · this page only talks to your Mac</div>
 </main>
 <script nonce="__NONCE__">
 (function(){
-  var frag = location.hash ? location.hash.slice(1) : "";
-  var q = location.search ? location.search.slice(1) : "";
-  try { history.replaceState(null, "", "/auth/callback"); } catch (e) {}
-  var root = document.documentElement;
-  function swap(id, text){ var el = document.getElementById(id); el.textContent = text; el.classList.remove("swap"); void el.offsetWidth; el.classList.add("swap"); }
-  function show(r){
-    root.setAttribute("data-state", r.ok ? "ok" : "error");
-    swap("t", r.title || (r.ok ? "You're signed in" : "Sign-in didn't finish"));
-    swap("m", r.message || "");
-    if (r.ok && (r.name || r.handle)) {
-      document.getElementById("who").hidden = false;
-      document.getElementById("wn").textContent = r.name || "";
-      document.getElementById("wh").textContent = r.handle || "";
-      document.getElementById("av").textContent = ((r.name || r.handle || "?").trim().charAt(0) || "?").toUpperCase();
-    }
-    document.title = r.ok ? "Signed in · Silicon Mode" : "Silicon Mode";
-  }
-  if (!frag && !q) {
-    show({ok:false, title:"Nothing to finish here", message:"This page completes a sign-in started from Silicon Mode. Start again from the menu bar."});
-    return;
-  }
-  fetch("/auth/complete", {method:"POST", cache:"no-store", credentials:"omit", referrerPolicy:"no-referrer",
-    headers:{"Content-Type":"application/json","X-Silicon-Mode":"__SECRET__"},
-    body:JSON.stringify({fragment:frag, query:q})})
-    .then(function(r){ return r.json(); })
-    .then(show)
-    .catch(function(){ show({ok:false, title:"Silicon Mode isn't listening", message:"This sign-in window has closed. Start again from the Silicon Mode menu bar."}); });
-})();
+__SCRIPT__})();
 </script>
 </body>
 </html>

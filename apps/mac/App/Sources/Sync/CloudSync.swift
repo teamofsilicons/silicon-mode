@@ -34,9 +34,12 @@ struct SyncLocalState: Sendable {
 ///
 /// - One RPC per flush (`push_batch`): agent changes are coalesced for 2 s; mode changes, new or
 ///   vanished questions and consumed answers flush after 300 ms; a heartbeat (status + usage) every 60 s.
-/// - Idempotent: deterministic UUIDv5 ids, per-session contiguous event seqs persisted in a ledger,
-///   an outbox that is resent until acknowledged, absolute usage totals.
+/// - Idempotent: deterministic UUIDv5 ids, per-session contiguous event seqs persisted in a ledger
+///   (one per device id; a new one first reads the server's state for that device), an outbox that is
+///   resent until acknowledged, absolute usage totals.
 /// - Offline: exponential backoff (2 s … 5 min), retried immediately when the network returns.
+///   Errors never drop queued data, except rows the server itself refuses (a data SQLSTATE): the
+///   batch is pushed again in parts and only those rows are dropped or held back (`isolate`).
 /// - Answers: realtime `answers` INSERT (socket open only while Silicon Mode is active or questions
 ///   are pending) + every push_batch reply. Applied via the host, then reported `consumed`.
 /// - Privacy: never sends cwd paths (project folder name only); text is redacted (SyncRedactor).
@@ -98,9 +101,10 @@ final class CloudSync {
     @ObservationIgnored private var lastPushAt: ContinuousClock.Instant?
     /// After the offline marker (sign-out, system sleep) nothing else may push `online: true`.
     @ObservationIgnored private var suspended = false
+    /// Between willSleep and didWake (suspended for that reason, not for a sign-out).
+    @ObservationIgnored private var asleep = false
     @ObservationIgnored private var backoffUntil: ContinuousClock.Instant?
     @ObservationIgnored private var failures = 0
-    @ObservationIgnored private var poisonCount = 0
     @ObservationIgnored private var lastStatusKey: String?
     @ObservationIgnored private var lastMode: SyncLocalState.Mode?
     @ObservationIgnored private var modeSince = Date()
@@ -115,6 +119,8 @@ final class CloudSync {
     @ObservationIgnored private var networkWasDown = false
     @ObservationIgnored private var sessionObserver: UUID?
 
+    /// `ledgerURL`: ledgers live next to it as `cloud-sync-<device id>.json` (the file itself is the
+    /// single ledger older builds used; it is migrated by the device it belongs to).
     init(client: CellClient = .shared, defaults: UserDefaults = .standard,
          ledgerURL: URL = HookWire.supportDirectory.appendingPathComponent("cloud-sync.json")) {
         self.client = client
@@ -141,6 +147,10 @@ final class CloudSync {
         let should = signedIn && (host?.cloudSyncEnabled ?? false)
         if should, running, let u = account?.account?.uuid, u != userUUID {
             stop(markOffline: false)   // a different account: start over
+        } else if should, running, suspended, !asleep {
+            // Signed in (again) while still suspended by a sign-out's offline marker: start over, or
+            // nothing would ever push again.
+            stop(markOffline: false)
         }
         if should && !running { start() }
         else if !should && running { stop(markOffline: signedIn) }
@@ -185,7 +195,7 @@ final class CloudSync {
         registeredThisRun = false
         heartbeatDue = true
         lastStatusKey = nil
-        failures = 0; poisonCount = 0; backoffUntil = nil
+        failures = 0; backoffUntil = nil
         suspended = false
         deviceID = defaults.string(forKey: Keys.device(user.uuid))
         if let d = deviceID {
@@ -320,11 +330,18 @@ final class CloudSync {
         var backfilled = false
     }
 
+    /// The account or device changed while a request was in flight: drop this flush quietly.
+    private struct Superseded: Error {}
+
     private func performFlush() async {
         guard running, !isPaused, !suspended, let host else { return }
         do {
             let dev = try await ensureDevice()
             guard running, deviceID == dev, ledger != nil else { return }
+            if ledger?.needsReconcile == true {
+                try await reconcile(deviceID: dev)
+                guard running, deviceID == dev, ledger != nil else { return }
+            }
             let heartbeat = heartbeatDue
             let answerSync = answerSyncDue
             let local = host.syncLocalState()
@@ -334,7 +351,19 @@ final class CloudSync {
             answerSyncDue = false
             let body = try batch.rpcBody()
             let data: Data
-            do { data = try await client.rpc("push_batch", body) } catch { if answerSync { answerSyncDue = true }; throw error }
+            do {
+                data = try await client.rpc("push_batch", body)
+            } catch let e as CellError where e.isDataRejection || e.httpStatus == 413 {
+                // The server refuses some of the data itself: resending it as is can only fail again.
+                lastPushAt = .now
+                guard running, deviceID == dev else { return }
+                SyncLog.error("push_batch rejected the data (\(e)); isolating the offending rows")
+                await isolate(batch, commit, deviceID: dev, heartbeat: heartbeat)
+                return
+            } catch {
+                if answerSync { answerSyncDue = true }
+                throw error
+            }
             lastPushAt = .now
             guard running, deviceID == dev else { return }
             apply(commit, heartbeat: heartbeat)
@@ -343,6 +372,8 @@ final class CloudSync {
                 receive(r.answers)
             }
             updateRealtime()
+        } catch is Superseded {
+            return
         } catch let e as CellError {
             await handleFailure(e)
         } catch {
@@ -351,17 +382,25 @@ final class CloudSync {
     }
 
     private func markSynced() {
-        failures = 0; poisonCount = 0; backoffUntil = nil
+        failures = 0; backoffUntil = nil
         if status != .synced { status = .synced }
         let now = Date()
         if lastSyncedAt.map({ now.timeIntervalSince($0) > 5 }) ?? true { lastSyncedAt = now }
     }
 
+    /// Anything but a data rejection (handled by `isolate`) only delays: nothing queued is dropped.
+    /// Token refresh trouble (`refresh_in_progress`, an odd response), proxies (403/404 without a
+    /// SQLSTATE), register_device hiccups and transport errors all back off and retry the same data.
     private func handleFailure(_ e: CellError) async {
         guard running else { return }
         switch e {
-        case .sessionEnded, .notSignedIn:
+        case .sessionEnded:
             return   // AccountManager flips to signed-out; reevaluate() stops us.
+        case .notSignedIn:
+            // No stored session although an account is shown: it was lost underneath us. Say so
+            // (signed out) instead of going quiet while the account still looks signed in.
+            if account?.isSignedIn == true { account?.sessionLost() }
+            return
         case .http(_, "P0002", _):
             await handleUnknownDevice()
             return
@@ -373,24 +412,148 @@ final class CloudSync {
             saveLedger()
             retryLater(transient: false)
         default:
-            if e.isRetryable {
-                retryLater(transient: true)
-            } else {
-                // A payload the server keeps rejecting must not wedge sync forever.
-                poisonCount += 1
-                SyncLog.error("push_batch rejected: \(e)")
-                if poisonCount >= 3, var l = ledger {
-                    l.outbox.removeAll()
-                    for k in l.pendingUpdates.keys { l.close(question: k) }
-                    l.pendingUpdates.removeAll()
-                    l.pendingConsumed.removeAll()
-                    ledger = l
-                    saveLedger()
-                    poisonCount = 0
+            if !e.isRetryable { SyncLog.error("sync request failed: \(e)") }
+            retryLater(transient: e.isRetryable)
+        }
+    }
+
+    // MARK: Isolating rejected data
+
+    /// One push of part of a batch during isolation.
+    private enum ProbeOutcome { case accepted, refused, halted(IsolationHalt) }
+    /// Why an isolation run stopped early.
+    private enum IsolationHalt { case failed(CellError), superseded }
+
+    /// The server rejected the batch's data (a check/format violation, too large…). Push it again in
+    /// parts, splitting any refused part until single rows: everything else is kept and acknowledged,
+    /// and only the rows the server refuses on their own are dropped (events, updates, usage) or held
+    /// back (a session row is quarantined until it changes; a question is closed). Parts go in FK order:
+    /// session rows, events, questions, question updates, consumed answers, status, usage.
+    /// A non-data failure stops the run; what's left stays queued for the next flush.
+    private func isolate(_ b: WirePushBatch, _ c: Commit, deviceID dev: String, heartbeat: Bool) async {
+        var answers: [CloudAnswer] = []
+        var seenAnswers = Set<String>()
+        let base = WirePushBatch(deviceID: dev, appVersion: b.appVersion)
+        let appVersion = SyncDeviceInfo.appVersion
+
+        func probe(_ part: WirePushBatch) async -> ProbeOutcome {
+            guard running, deviceID == dev else { return .halted(.superseded) }
+            guard let body = try? part.rpcBody() else { return .refused }
+            do {
+                let data = try await client.rpc("push_batch", body)
+                if let r = try? JSONDecoder().decode(WirePushResponse.self, from: data) {
+                    for a in r.answers where seenAnswers.insert(a.id).inserted { answers.append(a) }
                 }
-                retryLater(transient: false)
+                return running && deviceID == dev ? .accepted : .halted(.superseded)
+            } catch let e as CellError {
+                return e.isDataRejection || e.httpStatus == 413 ? .refused : .halted(.failed(e))
+            } catch {
+                return .halted(.failed(.decoding(String(describing: error))))
             }
         }
+
+        /// Push `items`; on refusal split in halves down to single items, which `drop` gives up on.
+        func bisect<T>(_ items: [T], _ fill: (inout WirePushBatch, [T]) -> Void,
+                       accepted: ([T]) -> Void, drop: (T) -> Void) async -> IsolationHalt? {
+            guard !items.isEmpty else { return nil }
+            var part = base
+            fill(&part, items)
+            switch await probe(part) {
+            case .accepted:
+                accepted(items)
+                return nil
+            case .halted(let h):
+                return h
+            case .refused:
+                if items.count == 1 { drop(items[0]); return nil }
+                let mid = items.count / 2
+                if let h = await bisect(Array(items[..<mid]), fill, accepted: accepted, drop: drop) { return h }
+                return await bisect(Array(items[mid...]), fill, accepted: accepted, drop: drop)
+            }
+        }
+
+        func halt(_ h: IsolationHalt) async {
+            saveLedger()
+            guard running, deviceID == dev else { return }
+            if !answers.isEmpty { receive(answers) }
+            if case .failed(let e) = h { await handleFailure(e) }
+        }
+
+        // 0. If even an empty batch is refused, the problem isn't in our rows (a server-side change):
+        //    drop nothing, back off and try again later.
+        switch await probe(base) {
+        case .accepted: break
+        case .halted(let h): await halt(h); return
+        case .refused:
+            SyncLog.error("push_batch refuses even an empty batch; keeping everything queued")
+            retryLater(transient: false)
+            return
+        }
+
+        // 1. Session rows (an ended row that is refused is simply forgotten).
+        let ended = Set(c.ended)
+        if let h = await bisect(b.sessions, { $0.sessions = $1 },
+                                accepted: { self.apply(Commit(sessions: $0, ended: c.ended), heartbeat: false) },
+                                drop: { row in
+                                    SyncLog.error("push_batch refuses session \(row.id) (\(row.provider)); holding it back")
+                                    if ended.contains(row.id) { self.ledger?.live[row.id] = nil }
+                                    else { self.ledger?.quarantine(row, appVersion: appVersion) }
+                                }) { await halt(h); return }
+
+        // 2. Events of sessions the server has.
+        let held = Set(ledger.map { Array($0.quarantined.keys) } ?? [])
+        let known = Set(ledger.map { Array($0.confirmed.keys) } ?? [])
+        let events = b.events.filter { known.contains($0.sessionID) && !held.contains($0.sessionID) }
+        if let h = await bisect(events, { $0.events = $1 },
+                                accepted: { self.apply(Commit(events: $0), heartbeat: false) },
+                                drop: { ev in
+                                    SyncLog.error("push_batch refuses event \(ev.sessionID)#\(ev.seq); dropping it")
+                                    self.ledger?.acknowledge(events: [ev])
+                                }) { await halt(h); return }
+
+        // 3. Questions (a held-back session is left out of the row so the FK can't fail).
+        struct PendingQuestion { var row: WireQuestion; var ref: (String, SyncLedger.PushedQuestion) }
+        let questions: [PendingQuestion] = zip(b.questions, c.questions).map { q, ref in
+            var q = q
+            if let s = q.sessionID, held.contains(s) { q.sessionID = nil }
+            return PendingQuestion(row: q, ref: ref)
+        }
+        if let h = await bisect(questions, { p, qs in p.questions = qs.map { $0.row } },
+                                accepted: { qs in self.apply(Commit(questions: qs.map { $0.ref }), heartbeat: false) },
+                                drop: { q in
+                                    SyncLog.error("push_batch refuses question \(q.row.id); not sending it again")
+                                    self.ledger?.close(question: q.row.id)
+                                }) { await halt(h); return }
+
+        // 4. Question updates and consumed answers.
+        if let h = await bisect(b.questionUpdates, { $0.questionUpdates = $1 },
+                                accepted: { us in
+                                    let m = Dictionary(us.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
+                                    self.apply(Commit(updates: m), heartbeat: false)
+                                },
+                                drop: { u in
+                                    self.ledger?.pendingUpdates[u.id] = nil
+                                    self.ledger?.close(question: u.id)
+                                }) { await halt(h); return }
+        if let h = await bisect(b.consumed, { $0.consumed = $1 },
+                                accepted: { cs in self.apply(Commit(consumed: cs.map { $0.id }), heartbeat: false) },
+                                drop: { self.ledger?.pendingConsumed[$0.id] = nil }) { await halt(h); return }
+
+        // 5. Status, then usage rows (a refused usage row is given up; it is resent next hour anyway).
+        if let st = b.status {
+            var part = base
+            part.status = st
+            switch await probe(part) {
+            case .accepted: apply(Commit(statusKey: c.statusKey), heartbeat: false)
+            case .refused: SyncLog.error("push_batch refuses the status row")
+            case .halted(let h): await halt(h); return
+            }
+        }
+        if let h = await bisect(b.usage, { $0.usage = $1 }, accepted: { _ in }, drop: { _ in }) { await halt(h); return }
+        apply(Commit(backfilled: c.backfilled), heartbeat: heartbeat)
+        markSynced()
+        if !answers.isEmpty { receive(answers) }
+        updateRealtime()
     }
 
     private func retryLater(transient: Bool) {
@@ -442,7 +605,7 @@ final class CloudSync {
     }
 
     private func ensureDevice() async throws -> String {
-        guard let user = userUUID else { throw CellError.notSignedIn }
+        guard let user = userUUID else { throw Superseded() }
         let info = deviceInfo()
         let infoKey = "\(info.name)|\(info.model ?? "")|\(info.osVersion)|\(info.appVersion)|\(info.timezone)"
         if let d = deviceID, registeredThisRun || defaults.string(forKey: Keys.deviceInfo(user)) == infoKey {
@@ -459,7 +622,7 @@ final class CloudSync {
         guard let id = (try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)) as? String,
               UUID(uuidString: id) != nil else { throw CellError.decoding("register_device") }
         let dev = id.lowercased()
-        guard running, userUUID == user else { throw CellError.notSignedIn }
+        guard running, userUUID == user else { throw Superseded() }
         if dev != deviceID || ledger == nil {
             deviceID = dev
             var l = ledgerStore.load(deviceID: dev)
@@ -470,6 +633,61 @@ final class CloudSync {
         defaults.set(infoKey, forKey: Keys.deviceInfo(user))
         registeredThisRun = true
         return dev
+    }
+
+    /// A new, empty ledger for a device the server may already know (its file was lost, a reinstall,
+    /// or an older build kept one file for every account): read what the server has for this device
+    /// first. Seqs then continue after the server's (push_batch keeps only the newest `tail_limit` per
+    /// session, so restarting at 1 would have the new events deleted on arrival), events it already
+    /// has aren't sent twice, and sessions/questions left live or pending get ended or resolved.
+    private func reconcile(deviceID dev: String) async throws {
+        func rows(_ table: String, _ q: [String: String]) async throws -> [[String: Any]] {
+            let items = q.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+            let data = try await client.send("GET", "rest/v1/\(table)", query: items)
+            guard let r = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                throw CellError.decoding(table)
+            }
+            return r
+        }
+        let events = try await rows("events", ["device_id": "eq.\(dev)", "select": "session_id,seq,kind,summary",
+                                               "order": "seq.desc", "limit": "5000"])
+        let sessions = try await rows("agent_sessions", ["device_id": "eq.\(dev)", "ended_at": "is.null", "limit": "1000",
+            "select": "id,provider,provider_session_id,title,project,model,state,waiting_reason,started_at,last_event_at,meta"])
+        let questions = try await rows("questions", ["device_id": "eq.\(dev)", "state": "eq.pending",
+                                                     "select": "id,session_id", "limit": "1000"])
+        guard running, deviceID == dev, var l = ledger else { throw Superseded() }
+        guard l.needsReconcile else { return }
+
+        func str(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        for r in events {
+            guard let sid = str(r["session_id"])?.lowercased(), let seq = (r["seq"] as? NSNumber)?.int64Value else { continue }
+            var s = l.seqs[sid] ?? .init()
+            if s.next <= seq { s.next = seq + 1 }
+            l.seqs[sid] = s
+            if let kind = str(r["kind"]), let summary = r["summary"] as? String {
+                l.serverTail[sid, default: []].append(SyncLedger.tailKey(kind: kind, summary: summary))
+            }
+        }
+        let now = Date()
+        for r in sessions {
+            guard let id = str(r["id"])?.lowercased(), let provider = str(r["provider"]),
+                  let psid = str(r["provider_session_id"]) else { continue }
+            let meta = (r["meta"] as? [String: Any] ?? [:]).compactMapValues { $0 as? String }
+            let row = WireSession(id: id, provider: provider, providerSessionID: psid, title: str(r["title"]),
+                                  project: str(r["project"]), model: str(r["model"]), state: str(r["state"]) ?? "working",
+                                  waitingReason: str(r["waiting_reason"]), startedAt: str(r["started_at"]),
+                                  lastEventAt: str(r["last_event_at"]) ?? SyncTime.iso(now), endedAt: nil, meta: meta)
+            if l.live[id] == nil { l.live[id] = .init(row: row, sentAt: .distantPast) }
+            l.confirmed[id] = now
+        }
+        for r in questions {
+            guard let id = str(r["id"])?.lowercased(), l.pushedQuestions[id] == nil, !l.closedQuestions.contains(id) else { continue }
+            l.pushedQuestions[id] = .init(localID: "", sessionUUID: str(r["session_id"])?.lowercased())
+        }
+        l.needsReconcile = false
+        ledger = l
+        saveLedger()
+        SyncLog.info("reconciled a new ledger: \(events.count) events, \(sessions.count) live sessions, \(questions.count) pending questions")
     }
 
     // MARK: Building a batch
@@ -484,10 +702,17 @@ final class CloudSync {
         var current: [String: WireSession] = [:]
         var sessionUUIDByLocal: [String: String] = [:]
         var included = Set<String>()
+        var held = Set<String>()
+        let appVersion = SyncDeviceInfo.appVersion
         for s in local.sessions {
             let row = SyncMapper.sessionRow(s, deviceID: dev)
-            current[row.id] = row
             sessionUUIDByLocal[s.id] = row.id
+            // Two local sessions, one row (same provider + id, e.g. two Aider processes sharing a
+            // history file): send it once, or the upsert fails (21000) and blocks the whole batch.
+            guard current[row.id] == nil else { continue }
+            current[row.id] = row
+            // Held back after the server refused it: leave it (and its events) out until it changes.
+            if l.isQuarantined(row, appVersion: appVersion) { held.insert(row.id); continue }
             let prev = l.live[row.id]
             let changed = prev == nil || prev!.row.significantKey != row.significantKey
             let touched = !changed && prev!.row.lastEventAt != row.lastEventAt && now.timeIntervalSince(prev!.sentAt) > 30
@@ -518,9 +743,10 @@ final class CloudSync {
         var pendingNow = Set<String>()
         for s in local.sessions {
             for q in s.pendingQuestions {
-                let suuid = sessionUUIDByLocal[s.id]
+                // A held-back session has no row server-side: send its questions without the link.
+                let suuid = sessionUUIDByLocal[s.id].flatMap { held.contains($0) ? nil : $0 }
                 let row = SyncMapper.questionRow(q, deviceID: dev, sessionUUID: suuid)
-                pendingNow.insert(row.id)
+                guard pendingNow.insert(row.id).inserted else { continue }
                 guard l.pushedQuestions[row.id] == nil, l.pendingUpdates[row.id] == nil,
                       !l.closedQuestions.contains(row.id) else { continue }
                 b.questions.append(row)
@@ -559,12 +785,12 @@ final class CloudSync {
         if heartbeat, let host {
             var rows = host.usageBuckets(days: nil).compactMap(SyncMapper.usageRow)
             if !l.usageBackfilled {
-                let recent = Set(rows.map(\.hourStart))
                 rows += host.usageBuckets(days: usageBackfillDays).compactMap(SyncMapper.usageRow)
-                    .filter { !recent.contains($0.hourStart) }
                 c.backfilled = true
             }
-            b.usage = rows
+            // One row per hour (ON CONFLICT DO UPDATE can't touch a row twice in one statement).
+            var seenHours = Set<String>()
+            b.usage = rows.filter { seenHours.insert($0.hourStart).inserted }
         }
 
         ledger = l
@@ -779,6 +1005,7 @@ final class CloudSync {
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.asleep = true
                 guard let self, self.running, let dev = self.deviceID, let local = self.host?.syncLocalState() else { return }
                 self.suspended = true
                 self.flushTimer?.cancel(); self.flushTimer = nil; self.flushAt = nil
@@ -788,6 +1015,7 @@ final class CloudSync {
         }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.asleep = false
                 guard let self, self.running else { return }
                 self.suspended = false
                 self.heartbeatDue = true
