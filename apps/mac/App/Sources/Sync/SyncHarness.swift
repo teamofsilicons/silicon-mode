@@ -7,6 +7,11 @@
 //   /tmp/sync-harness            # offline checks (ids, mapping, redaction, ledger, loopback server, keychain)
 //   /tmp/sync-harness --live     # + live end-to-end against the Silicon Cell (needs `silicon-accounts` signed in)
 //
+// Account card snapshots (light + dark PNGs of every SyncPreviews variant):
+//   xcrun swiftc -swift-version 6 -D SYNC_HARNESS -D SYNC_HARNESS_UI -module-name SiliconModeKit -parse-as-library \
+//     $(find SiliconModeKit/Sources -name '*.swift') App/Sources/Design/Theme.swift App/Sources/Sync/*.swift -o /tmp/sync-ui
+//   /tmp/sync-ui --snapshots App/Resources/Fonts/AlloVariable.ttf /tmp/sync-shots
+//
 // The live run signs in through the real loopback page (a simulated browser POSTs the fragment),
 // pushes realistic batches through CloudSync, answers questions via rpc/answer_question and checks
 // they arrive over realtime / the push reply, then signs out and deletes its test device.

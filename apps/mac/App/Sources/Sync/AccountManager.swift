@@ -58,6 +58,7 @@ final class AccountManager {
     @ObservationIgnored private var signInURL: URL?
     @ObservationIgnored private var observers: [UUID: @MainActor (Bool) -> Void] = [:]
     @ObservationIgnored private var restoring = false
+    @ObservationIgnored private var completing = false
     /// Sign-in window (the cell's own flow cookie also lives 10 min).
     @ObservationIgnored var signInTimeout: Duration = .seconds(600)
 
@@ -214,6 +215,12 @@ final class AccountManager {
             return LoopbackResult(ok: false, title: "Sign-in didn't finish",
                                   message: "The sign-in response was incomplete. Start again from the Silicon Mode menu bar.")
         case .tokens(let session):
+            guard !completing else {
+                return LoopbackResult(ok: false, title: "Already finishing",
+                                      message: "Silicon Mode is finishing this sign-in in another tab.")
+            }
+            completing = true
+            defer { completing = false }
             do {
                 let previous = account
                 try await client.adopt(session)

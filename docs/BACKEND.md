@@ -282,6 +282,7 @@ POST /rest/v1/rpc/answer_question
 {"p_question":"<question id>","p_option":"allow","p_text":null,"p_from":"android","p_by":"<this device id or null>"}
 → {"ok":true,"answer_id":"…"}
 → {"ok":false,"reason":"already_answered" | "answered" | "resolved_on_mac" | "expired" | "cancelled" | "invalid_option" | "not_found"}
+   # "pending" as a reason = past expires_at but not yet swept by the job (treat as expired)
 ```
 - Send `p_option` (an `options[].id`) and/or `p_text` (only if `allow_text`). `p_from` ∈ `iphone` ·
   `android` · `web` (· `mac`).
@@ -294,9 +295,11 @@ POST /rest/v1/rpc/answer_question
 ## 8. What the Mac listens to
 
 `answers` INSERT with `device_id=eq.<mac>` — the socket is open only while Silicon Mode is active or
-questions are pending (+30 s linger); otherwise answers arrive with the next `push_batch` reply (the
-Mac polls every 15 s while questions are pending and the socket is down). Each answer is applied
-exactly once (ids remembered across launches).
+questions are pending (+30 s linger). Every `push_batch` reply also carries unconsumed answers, and
+while questions are pending the Mac makes sure a push happens at least every 15 s (30 s while the
+socket is live) as a safety net. Each answer is applied exactly once (ids remembered across launches;
+an answer seen before but never reported is closed out as `stale`). After sign-out or system sleep
+the Mac pushes `online: false` and sends nothing else until it is back.
 
 ---
 

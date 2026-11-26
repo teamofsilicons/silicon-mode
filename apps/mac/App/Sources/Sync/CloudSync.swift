@@ -96,6 +96,8 @@ final class CloudSync {
     /// The next flush must reach the server even with nothing to send (it returns pending answers).
     @ObservationIgnored private var answerSyncDue = false
     @ObservationIgnored private var lastPushAt: ContinuousClock.Instant?
+    /// After the offline marker (sign-out, system sleep) nothing else may push `online: true`.
+    @ObservationIgnored private var suspended = false
     @ObservationIgnored private var backoffUntil: ContinuousClock.Instant?
     @ObservationIgnored private var failures = 0
     @ObservationIgnored private var poisonCount = 0
@@ -184,6 +186,7 @@ final class CloudSync {
         heartbeatDue = true
         lastStatusKey = nil
         failures = 0; poisonCount = 0; backoffUntil = nil
+        suspended = false
         deviceID = defaults.string(forKey: Keys.device(user.uuid))
         if let d = deviceID {
             var l = ledgerStore.load(deviceID: d)
@@ -216,6 +219,9 @@ final class CloudSync {
     /// Before sign-out: one last push marking this Mac offline (bounded).
     func goOffline() async {
         guard running, let dev = deviceID, let local = host?.syncLocalState() else { return }
+        suspended = true
+        flushTimer?.cancel(); flushTimer = nil; flushAt = nil
+        stopRealtime()
         let push = Task { await self.pushOffline(deviceID: dev, local: local) }
         let deadline = Task { try? await Task.sleep(for: .seconds(3)); push.cancel() }
         await push.value
@@ -257,7 +263,7 @@ final class CloudSync {
     // MARK: Flush scheduling
 
     private func requestFlush(urgent: Bool) {
-        guard running, !isPaused else { return }
+        guard running, !isPaused, !suspended else { return }
         if pushing {
             flushAgain = true
             flushAgainUrgent = flushAgainUrgent || urgent
@@ -315,7 +321,7 @@ final class CloudSync {
     }
 
     private func performFlush() async {
-        guard running, !isPaused, let host else { return }
+        guard running, !isPaused, !suspended, let host else { return }
         do {
             let dev = try await ensureDevice()
             guard running, deviceID == dev, ledger != nil else { return }
@@ -667,7 +673,16 @@ final class CloudSync {
 
     private func handle(_ a: CloudAnswer) async {
         guard running, let host, let dev = deviceID, var l = ledger else { return }
-        guard !l.hasHandled(a.id), l.pendingConsumed[a.id] == nil else { return }
+        guard l.pendingConsumed[a.id] == nil else { return }
+        if l.hasHandled(a.id) {
+            // Seen before but never reported (e.g. the app quit mid-apply): close it out. Harmless if
+            // it was already consumed — the server only updates unconsumed answers.
+            l.pendingConsumed[a.id] = SyncAnswerOutcome.stale.rawValue
+            ledger = l
+            saveLedger()
+            requestFlush(urgent: false)
+            return
+        }
         l.markHandled(a.id)
         ledger = l
         saveLedger()
@@ -704,7 +719,7 @@ final class CloudSync {
     private func updateRealtime() {
         guard let host else { return }
         let local = host.syncLocalState()
-        let want = realtimeEnabled && running && registeredThisRun && deviceID != nil && !isPaused
+        let want = realtimeEnabled && !suspended && running && registeredThisRun && deviceID != nil && !isPaused
             && (local.isSiliconModeActive || !local.pendingQuestions.isEmpty || !(ledger?.pushedQuestions.isEmpty ?? true))
         if want {
             realtimeLingerTask?.cancel(); realtimeLingerTask = nil
@@ -765,6 +780,8 @@ final class CloudSync {
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.running, let dev = self.deviceID, let local = self.host?.syncLocalState() else { return }
+                self.suspended = true
+                self.flushTimer?.cancel(); self.flushTimer = nil; self.flushAt = nil
                 self.stopRealtime()
                 Task { await self.pushOffline(deviceID: dev, local: local) }
             }
@@ -772,6 +789,7 @@ final class CloudSync {
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.running else { return }
+                self.suspended = false
                 self.heartbeatDue = true
                 self.backoffUntil = nil
                 self.requestFlush(urgent: true)
