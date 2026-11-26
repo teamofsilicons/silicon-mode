@@ -39,8 +39,8 @@ Allowed `redirect_to` values (exact match, port included):
 
 | Client | `redirect_to` | Notes |
 |---|---|---|
-| Mac (primary) | `http://127.0.0.1:47291/auth/callback` | The app runs a loopback server only while signing in (10 min). Its page POSTs the fragment back to the app. |
-| Mac (fallback) | `https://mode.teamofsilicons.com/auth/mac` | Used when port 47291 is taken. The page must forward the fragment to `ai.tos.mode://auth/callback#…`. |
+| Mac (primary) | `http://127.0.0.1:47291/auth/callback` | The app runs a loopback server only while signing in (10 min). It opens its own start page first (see *Binding the callback* below); the callback page POSTs the fragment back to the app. |
+| Mac (fallback) | `https://mode.teamofsilicons.com/auth/mac` | Used only when port 47291 is taken. The page must forward the fragment to `ai.tos.mode://auth/callback#…`; the Mac asks the person to confirm the account. |
 | Web | `https://mode.teamofsilicons.com/auth/callback` | `@teamofsilicons/cells` with `sessionMode: "cookie"` is simplest. |
 | Android | `https://mode.teamofsilicons.com/auth/android` | App Link on that path; fallback button to the app's scheme. |
 | iOS | `https://mode.teamofsilicons.com/auth/ios` | `ASWebAuthenticationSession`; bounce page forwards to the app scheme. |
@@ -57,9 +57,30 @@ Allowed `redirect_to` values (exact match, port included):
 </script>
 ```
 
-Native apps must only accept a callback for a sign-in **they started** (the Mac ignores
-`ai.tos.mode://auth/callback` unless a sign-in is in progress) — otherwise a crafted link could sign
-the app into someone else's account and stream the user's agent logs to it.
+Native apps must only adopt tokens from a sign-in **they started**. Otherwise any web page (or local
+process) could sign the app into an attacker's account during the sign-in window, then read the
+user's agent logs and answer their agents' questions. "A sign-in is in progress" is not enough: the
+cell's token-mode redirect carries no client `state`, so the callback itself has to be tied to the attempt.
+
+**Binding the callback (Mac).** Per attempt the Mac makes a random 32-byte *flow key* and opens
+`http://127.0.0.1:47291/auth/start#<flow key>` (not the cell URL directly). The key exists only in that
+URL's fragment: never served by the loopback server, never sent to any server.
+1. `/auth/start` moves the key into the tab's `sessionStorage` (per tab, per origin), strips it from
+   history and `location.replace`s to the cell's hosted sign-in.
+2. The cell redirects **that same tab** to `/auth/callback#access_token=…`. The callback page strips the
+   fragment and POSTs it to `/auth/complete` with header `X-Silicon-Mode: <flow key from sessionStorage>`
+   (or `none`), removing the key from storage.
+3. A POST with the key (single use) is **bound**: the Mac checks the token with `GET /auth/user` (in
+   memory) and adopts it. Anything else (another tab or browser, a local process, a reused key) is
+   **unbound**: the Mac shows "Sign in as <name> (<id>)?" and adopts only if the person confirms.
+   An unbound `?error=access_denied` can't cancel the attempt.
+4. `POST /auth/complete` also requires the literal `Host`, a same-origin `Origin` (if sent), JSON and
+   the custom header (forcing a CORS preflight that is never answered). After the attempt ends the
+   listener refuses completions (`410`) and stops 2 s later.
+
+`ai.tos.mode://auth/callback#…` is accepted **only** while an attempt is using the bounce page (port
+taken), and always as unbound (any app or page can open that URL). Outside that, the Mac ignores it.
+A sign-out (offline marker, revoke, Keychain wipe) always finishes before a new sign-in can complete.
 
 ### Session rules
 - Access token: the cell's EdDSA JWT, **≤ 30 min**. Send it as `Authorization: Bearer <jwt>`.
@@ -81,6 +102,9 @@ the app into someone else's account and stream the user's agent logs to it.
   `{"user":{"uuid","id":"c:ada"|"si:tos","kind":"carbon"|"silicon","display_name","pfp_url","app",…}}`.
   Key everything on `uuid`; `id` can change.
 - Sign out: `POST /auth/sign-out` (Bearer) → `{"signed_out":true}`, then delete the stored pair.
+  Refresh first if the access token has expired (the cell rejects an expired JWT, and the session would
+  silently stay alive), and on 401 refresh once and retry. Revoke and delete only the session that was
+  current when sign-out started.
 - Store tokens in the platform keystore (Mac: Keychain item `ai.tos.mode.session`; Android:
   EncryptedSharedPreferences/Keystore; iOS: Keychain; web: HttpOnly cookies via cookie mode).
 - Silicons (and automated tests) skip the browser:
@@ -172,10 +196,15 @@ Namespace: **`c1e9e86e-7372-42ea-97e5-044b6f7cf2b0`** (Silicon Mode).
 
 | Row | Name hashed (UTF-8) |
 |---|---|
-| `agent_sessions.id` | `"<device_id>\|<provider>\|<provider_session_id>"` (device id lowercase, provider as stored) |
+| `agent_sessions.id` | `"<device_id>\|<provider>\|<provider_session_id>"` (device id lowercase, provider and provider session id as stored) |
 | `questions.id` | `"<device_id>\|q\|<Mac-local question id>"` |
 
 Any client holding a row can recompute the session id; the Mac uses them to stay idempotent.
+
+`provider_session_id` is opaque. The Mac sends a provider's own id as is when it is a plain token
+(`[A-Za-z0-9._:=+-]`, ≤ 200 code points: uuids, `ses_…`, `pid-42`). Anything else (some providers
+build ids from the cwd, e.g. Aider `<git root>#<start>` or Kiro `cwd:<path>`, or ids that are too long)
+is sent as `h:<sha256 hex of the full id>`, so no path ever reaches this column.
 
 ### 4.2 Providers
 Mac provider ids are lowercased, `-` → `_`, anything outside `[a-z0-9_.:]` → `_`, ≤ 64 chars:
@@ -183,9 +212,18 @@ Mac provider ids are lowercased, `-` → `_`, anything outside `[a-z0-9_.:]` →
 Display name: `meta.provider_name` (fall back to the id). `usage_hourly.by_provider` uses the same keys.
 
 ### 4.3 What the Mac never sends
-- No `cwd` / absolute paths: `project` is the folder name; the home directory becomes `~` in text.
-- Credential-shaped text is replaced by `•••` before upload: private keys, JWTs, `sk-…`/`pk-…`,
-  GitHub/Slack/AWS/Google keys, `cs_secret_…`/`csr_…`/`slt_…`, `Bearer …`, `password=`/`token=`/`api_key=` values.
+- No `cwd` / absolute paths: `project` is the folder name; the home directory becomes `~` in text;
+  path-like provider session ids are hashed (§4.1).
+- Credential-shaped text is replaced by `•••` before upload (titles, event summaries, question titles,
+  bodies, option labels and details): private keys (PEM, OpenSSH, PGP), JWTs, provider keys
+  (OpenAI/Anthropic/OpenRouter `sk-…`, Stripe `sk_live_…`/`rk_…`/`whsec_…`, GitHub `ghp_…`/`github_pat_…`,
+  GitLab `glpat-…`, Slack `xox…-` and webhooks, AWS key ids, Google `AIza…`/`ya29.`/`GOCSPX-`, npm,
+  PyPI, Hugging Face, Docker Hub, Groq, xAI, Linear, Supabase, Shopify, DigitalOcean, Notion, SendGrid,
+  Twilio, Mailgun, Postman, Atlassian, Figma, Telegram, `cs_secret_…`/`csr_…`/`slt_…`), passwords and
+  tokens in URLs (`scheme://user:pass@`, `https://<token>@`), `Authorization`/`Cookie` headers,
+  `Bearer`/`Basic` credentials, secret query parameters (`?access_token=`, `?key=`, `?sig=`…), secret
+  CLI flags (`--password x`, `--token=x`, `curl -u user:pass`, `sshpass -p`) and secret-named
+  assignments in env, YAML and JSON (`PASSWORD=`, `api_key:`, `"token": "…"`, `x-api-key:`).
 
 ### 4.4 Mac state mapping
 | Mac (`AgentState`) | `agent_sessions.state` |
@@ -229,6 +267,21 @@ Display name: `meta.provider_name` (fall back to the id). `usage_hourly.by_provi
    answers flush after **300 ms**; a **60 s** heartbeat always carries `status` + `usage`; only changed
    sessions are sent. Failed pushes back off 2 s → 5 min and retry immediately when the network returns;
    unacknowledged events/updates are resent with the same ids/seqs (idempotent).
+
+   A batch never repeats a session id or an hour (`ON CONFLICT DO UPDATE` can't touch a row twice:
+   `21000`). Errors never drop queued data, except rows the server itself refuses: when push_batch fails
+   with a data SQLSTATE (class `22`, class `23` except `23503`, `21000`) or `413`, the Mac first pushes an
+   empty batch (refused too → the problem isn't the rows: back off, drop nothing), then pushes the batch
+   again in parts, splitting refused parts down to single rows. Accepted parts are acknowledged; a refused
+   session row is held back until it changes or the app is updated (its questions are sent without the
+   session link), and a refused event, question, update, consumed answer or usage row is dropped.
+   Refresh/register hiccups, `403`/`404` without a SQLSTATE and `409 refresh_in_progress` only back off.
+
+   The Mac keeps its idempotency ledger (seqs, outbox, live sessions, pushed questions) per **device
+   id**, so switching accounts and back resumes the old device's seqs. A ledger created empty for a
+   device first reads `events` (max `seq` per session), live `agent_sessions` and pending `questions` for
+   that device: seqs continue after the server's (restarting at 1 would have push_batch's tail trim delete
+   the new events), events already there aren't resent, and rows left live/pending are ended/resolved.
 
    `usage` rows are **absolute totals** for a local hour (the server keeps the max), sent for the current
    and previous local hour; `hour_start` is the instant the local hour began (multiple of 15 min — works
@@ -311,9 +364,13 @@ the Mac pushes `online: false` and sends nothing else until it is back.
   cd apps/mac
   xcrun swiftc -swift-version 6 -D SYNC_HARNESS -module-name SiliconModeKit -parse-as-library \
     $(find SiliconModeKit/Sources -name '*.swift') App/Sources/Sync/*.swift -o /tmp/sync-harness
-  /tmp/sync-harness           # offline: ids, mapping, redaction, ledger, loopback server, keychain
+  /tmp/sync-harness           # offline: ids, mapping, redaction, ledger files, loopback server + hostile HTTP,
+                              #   keychain, and against an in-process fake cell: bound/unbound sign-in,
+                              #   bounce fallback, sign-out races, expired-token sign-out, CloudSync data
+                              #   rejections, transient errors, reconcile of a new ledger
   /tmp/sync-harness --live    # live: loopback sign-in, refresh, 401 retry, push, realtime answers,
                               #       push-reply answers, resolved_on_mac, session end, 4401, sign-out, cleanup
+  /tmp/sync-harness --serve-pages 120   # serve the loopback pages on :47395 for a manual browser check
   ```
   It deletes every device named "Silicon Mode Sync Harness" when done.
 
@@ -324,11 +381,11 @@ the Mac pushes `online: false` and sends nothing else until it is back.
 | `CellConfig.swift` | URLs, keys, redirect URIs, UUIDv5 ids, provider normalization, device info |
 | `CellSession.swift` | session/user types, callback (fragment) parsing, Keychain store |
 | `CellClient.swift` | actor owning the session: serialized refresh (persist-before-use), 401 → refresh → retry, REST/RPC |
-| `LoopbackAuthServer.swift`, `LoopbackPage.swift` | 127.0.0.1:47291 sign-in receiver + the Silicon-styled callback page |
-| `AccountManager.swift` | `signIn()`, `handleCallback(_:)`, `signOut()`, `restore()`, observable `account`/`state` |
+| `LoopbackAuthServer.swift`, `LoopbackPage.swift` | 127.0.0.1:47291 sign-in receiver (flow-key binding, hardened HTTP parsing) + the Silicon-styled start and callback pages |
+| `AccountManager.swift` | `signIn()`, `handleCallback(_:)`, `signOut()`, `restore()`, observable `account`/`state`; unbound-callback confirmation |
 | `SyncWire.swift` | wire rows, `SyncMapper` (local → rows), `SyncRedactor` |
-| `SyncLedger.swift` | persisted seqs, outbox, live sessions, pushed questions, pending updates/consumed, cursor |
+| `SyncLedger.swift` | persisted seqs, outbox, live sessions, pushed questions, pending updates/consumed, cursor, held-back rows; one file per device id |
 | `RealtimeAnswers.swift` | realtime socket for `answers` INSERT (4401 refresh, backoff, cursor resume) |
 | `CloudSync.swift` | the engine: scheduling, batches, answers, realtime lifecycle, offline marker |
 | `CloudSync+AppModel.swift` | adapter from `AppModel` |
-| `SyncHarness.swift` | the harness above (compiled only with `-D SYNC_HARNESS`) |
+| `SyncHarness.swift`, `SyncHarnessChecks.swift` | the harness above and its fake cell (compiled only with `-D SYNC_HARNESS`) |

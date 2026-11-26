@@ -18,6 +18,17 @@ enum CellConfig {
     /// Fallback when the loopback port is taken: the web bounce page forwards the fragment to
     /// `ai.tos.mode://auth/callback#…` (AppDelegate → AccountManager.handleCallback).
     static let bounceRedirect = "https://mode.teamofsilicons.com/auth/mac"
+
+    static func loopbackRedirect(port: UInt16) -> String {
+        port == loopbackPort ? loopbackRedirect : "http://127.0.0.1:\(port)/auth/callback"
+    }
+
+    /// Where the app sends the browser first. The loopback start page moves the per-attempt flow key
+    /// from this fragment into the tab's sessionStorage, then continues to the cell's hosted sign-in;
+    /// the callback page sends it back, which ties the tokens to the tab this Mac opened.
+    static func loopbackStartURL(port: UInt16 = loopbackPort, flowKey: String) -> URL {
+        URL(string: "http://127.0.0.1:\(port)/auth/start#\(flowKey)")!
+    }
     static let urlScheme = "ai.tos.mode"
 
     /// Keychain item holding the cell session (+ cached profile).
@@ -46,10 +57,24 @@ enum SyncIDs {
     /// Silicon Mode's UUIDv5 namespace.
     static let namespace = UUID(uuidString: "c1e9e86e-7372-42ea-97e5-044b6f7cf2b0")!
 
-    /// `agent_sessions.id` = UUIDv5(ns, "<device_id>|<provider>|<provider_session_id>").
+    /// `agent_sessions.id` = UUIDv5(ns, "<device_id>|<provider>|<provider_session_id>"), with the
+    /// provider session id exactly as sent (`providerSessionID(_:)`).
     static func session(deviceID: String, provider: String, nativeID: String) -> String {
-        uuidV5(namespace, "\(deviceID.lowercased())|\(provider)|\(nativeID)")
+        uuidV5(namespace, "\(deviceID.lowercased())|\(provider)|\(providerSessionID(nativeID))")
     }
+
+    /// `agent_sessions.provider_session_id` as sent. Opaque provider ids (uuids, `ses_…`, `pid-42`) go
+    /// as they are. Anything else (some providers build ids from the cwd: Aider `<git root>#<start>`,
+    /// Kiro `cwd:<path>`), or anything longer than the column allows, becomes `h:<sha256 hex>` of the
+    /// whole id: still unique and stable, but it can't carry a path or other local detail off the Mac.
+    static func providerSessionID(_ nativeID: String) -> String {
+        let scalars = nativeID.unicodeScalars
+        let plain = !scalars.isEmpty && scalars.count <= 200 && scalars.allSatisfy { plainIDScalars.contains($0) }
+        return plain ? nativeID : "h:" + CellClient.sha256Hex(nativeID)
+    }
+
+    private static let plainIDScalars = CharacterSet(charactersIn:
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:=+-")
 
     /// `questions.id` = UUIDv5(ns, "<device_id>|q|<local question id>").
     static func question(deviceID: String, localID: String) -> String {

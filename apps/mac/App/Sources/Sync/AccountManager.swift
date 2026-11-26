@@ -4,10 +4,19 @@ import SiliconModeKit
 
 /// Silicon Accounts sign-in (optional; needed for marketplace faces and the phone/web apps).
 ///
-/// `signIn()` opens the cell's hosted sign-in in the default browser with
-/// `redirect_to=http://127.0.0.1:47291/auth/callback`; a loopback server (alive only while
-/// signing in, 10 min max) receives the tokens. `ai.tos.mode://auth/callback#access_token=…`
-/// (web bounce page) is accepted through `handleCallback(_:)` while a sign-in is in progress.
+/// `signIn()` starts a loopback server (alive only while signing in, 10 min max) and opens
+/// `http://127.0.0.1:47291/auth/start#<flow key>` in the default browser; that page continues to
+/// the cell's hosted sign-in with `redirect_to=http://127.0.0.1:47291/auth/callback`.
+///
+/// Only tokens tied to *this* attempt are adopted without asking (login-CSRF: otherwise any web page
+/// or local process could sign this Mac into its own account during the window, then receive the
+/// agents' logs and answer their questions):
+/// - **bound**: the callback carried the attempt's flow key, which reached the browser only inside
+///   the start URL this Mac opened and lives in that tab's sessionStorage (LoopbackAuthServer);
+/// - **unbound**: anything else, i.e. another tab or browser, a local process, or the web bounce page's
+///   `ai.tos.mode://auth/callback#…` (used only when port 47291 is taken). The tokens are checked
+///   in memory (`/auth/user`) and adopted only after the person confirms that account.
+/// A sign-out finishes (offline marker, revoke, Keychain wipe) before a new sign-in can complete.
 /// The session lives in the Keychain (`ai.tos.mode.session`) and is owned by `CellClient`.
 @MainActor @Observable
 final class AccountManager {
@@ -39,6 +48,14 @@ final class AccountManager {
         case error(String)
     }
 
+    /// How a sign-in callback reached the app.
+    enum CallbackBinding: Sendable, Equatable {
+        /// Carried this attempt's flow key: it comes from the browser tab this Mac opened.
+        case bound
+        /// Can't be tied to this attempt: the person has to confirm the account first.
+        case unbound
+    }
+
     private(set) var account: Account?
     private(set) var state: State = .signedOut
     var isSignedIn: Bool { account != nil }
@@ -50,17 +67,36 @@ final class AccountManager {
     @ObservationIgnored var openURL: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
     /// Awaited before the session is revoked (CloudSync marks this Mac offline).
     @ObservationIgnored var willSignOut: (@MainActor () async -> Void)?
+    /// Asks the person whether to sign in as an account whose callback can't be tied to the attempt
+    /// this Mac started (overridable for tests). `true` = sign in.
+    @ObservationIgnored var confirmUnboundSignIn: @MainActor (Account) async -> Bool = { await SignInConfirmation.ask($0) }
+    /// Loopback port. The cell only accepts the default; tests use another one.
+    @ObservationIgnored var loopbackPort: UInt16 = CellConfig.loopbackPort
+    /// Sign-in window (the cell's own flow cookie also lives 10 min).
+    @ObservationIgnored var signInTimeout: Duration = .seconds(600)
 
+    /// The URL the current attempt opened in the browser (start page, or the cell's sign-in when the
+    /// web bounce is used). Re-opened by `signIn()` while signing in.
+    @ObservationIgnored private(set) var signInURL: URL?
+
+    private struct Attempt {
+        enum Mode { case loopback, bounce }
+        let id = UUID()
+        let mode: Mode
+    }
+
+    @ObservationIgnored private var attempt: Attempt?
+    /// Identifies the newest `startSignIn` call (a cancel or a newer call makes older ones stand down).
+    @ObservationIgnored private var startTicket: UUID?
     @ObservationIgnored private var server: LoopbackAuthServer?
     /// A finished sign-in's listener, kept a moment so the page's POST response flushes.
     @ObservationIgnored private var retiringServer: LoopbackAuthServer?
     @ObservationIgnored private var signInDeadline: Task<Void, Never>?
-    @ObservationIgnored private var signInURL: URL?
+    @ObservationIgnored private var signOutTask: Task<Void, Never>?
     @ObservationIgnored private var observers: [UUID: @MainActor (Bool) -> Void] = [:]
     @ObservationIgnored private var restoring = false
     @ObservationIgnored private var completing = false
-    /// Sign-in window (the cell's own flow cookie also lives 10 min).
-    @ObservationIgnored var signInTimeout: Duration = .seconds(600)
+    @ObservationIgnored private var confirming = false
 
     init(client: CellClient = .shared) {
         self.client = client
@@ -93,7 +129,8 @@ final class AccountManager {
         restoring = true
         Task {
             defer { restoring = false }
-            guard let stored = await client.restore() else { return }
+            if let t = signOutTask { await t.value }
+            guard account == nil, let stored = await client.restore() else { return }
             if let u = stored.user {
                 account = Account(u)
                 state = .signedIn
@@ -118,7 +155,10 @@ final class AccountManager {
 
     /// Opens the hosted sign-in in the default browser. Calling again while signing in re-opens it.
     func signIn() {
-        if state == .signingIn, let u = signInURL { openURL(u); return }
+        if state == .signingIn {
+            if let u = signInURL { openURL(u) }
+            return   // still starting: the browser opens in a moment
+        }
         state = .signingIn
         Task { await startSignIn(openBrowser: true) }
     }
@@ -126,30 +166,53 @@ final class AccountManager {
     /// Starts a sign-in (loopback listener + deadline). `openBrowser: false` is for tests.
     func startSignIn(openBrowser: Bool) async {
         state = .signingIn
-        stopServer()
+        let ticket = UUID()
+        startTicket = ticket
+        // A sign-out still revoking/wiping the old session must finish first, or it could wipe the new one.
+        if let t = signOutTask { await t.value }
+        guard state == .signingIn, startTicket == ticket else { return }
+        closeAttempt()
+        // The previous attempt's listener still holds the port while its last response flushes.
         retiringServer?.stop(); retiringServer = nil
-        let server = LoopbackAuthServer { [weak self] fragment, query in
-            await self?.complete(fragment: fragment, query: query)
+
+        let port = loopbackPort
+        let flowKey = LoopbackAuthServer.randomKey()
+        let handler: LoopbackAuthServer.Handler = { [weak self] fragment, query, bound in
+            await self?.complete(fragment: fragment, query: query, binding: bound ? .bound : .unbound)
                 ?? LoopbackResult(ok: false, title: "Silicon Mode quit", message: "Open Silicon Mode and try again.")
         }
-        var redirect = CellConfig.loopbackRedirect
-        do {
-            try await server.start()
-            self.server = server
-        } catch {
-            // Port busy (another copy of the app?): fall back to the web bounce page → ai.tos.mode://
-            SyncLog.error("loopback listener failed (\(error)); using the web bounce page")
-            redirect = CellConfig.bounceRedirect
+        var server: LoopbackAuthServer?
+        for tries in 1...3 {
+            let s = LoopbackAuthServer(port: port, flowKey: flowKey,
+                                       signInURL: CellConfig.signInURL(redirectTo: CellConfig.loopbackRedirect(port: port)),
+                                       handler: handler)
+            do {
+                try await s.start()
+                server = s
+                break
+            } catch {
+                s.stop()
+                if tries == 3 {
+                    // Port busy (another copy of the app?): fall back to the web bounce page → ai.tos.mode://
+                    SyncLog.error("loopback listener failed (\(error)); using the web bounce page")
+                } else {
+                    try? await Task.sleep(for: .milliseconds(150))   // a just-stopped listener releasing it
+                }
+            }
         }
-        guard state == .signingIn else { stopServer(); return }   // cancelled meanwhile
-        let url = CellConfig.signInURL(redirectTo: redirect)
+        let mode: Attempt.Mode = server == nil ? .bounce : .loopback
+        let url = server?.startURL ?? CellConfig.signInURL(redirectTo: CellConfig.bounceRedirect)
+        guard state == .signingIn, startTicket == ticket else { server?.stop(); return }   // cancelled meanwhile
+        self.server = server
+        let a = Attempt(mode: mode)
+        attempt = a
         signInURL = url
         signInDeadline?.cancel()
         let timeout = signInTimeout
         signInDeadline = Task { [weak self] in
             try? await Task.sleep(for: timeout)
-            guard !Task.isCancelled, let self, self.state == .signingIn else { return }
-            self.stopServer()
+            guard !Task.isCancelled, let self, self.state == .signingIn, self.attempt?.id == a.id else { return }
+            self.closeAttempt()
             self.state = .error("Sign-in timed out. Try again.")
         }
         if openBrowser { openURL(url) }
@@ -157,55 +220,66 @@ final class AccountManager {
 
     func cancelSignIn() {
         guard state == .signingIn else { return }
-        finishSignInWindow()
+        startTicket = nil
+        closeAttempt()
         state = account == nil ? .signedOut : .signedIn
     }
 
     func signOut() {
-        finishSignInWindow()
+        startTicket = nil
+        closeAttempt()
         let had = account != nil
         account = nil
         state = .signedOut
         let hook = willSignOut
-        Task {
+        let previous = signOutTask
+        signOutTask = Task { [client] in
+            await previous?.value
             // CloudSync is still running here: it marks this Mac offline with the live token.
             if had, let hook { await hook() }
             await client.signOut()
-            if had { notify(false) }
+            if had { self.notify(false) }
         }
     }
 
-    /// `ai.tos.mode://auth/callback#access_token=…&refresh_token=…&expires_at=…`
+    /// CloudSync found no stored session while an account is shown (it was lost underneath us).
+    func sessionLost() { sessionEnded("session_missing") }
+
+    /// `ai.tos.mode://auth/callback#access_token=…&refresh_token=…&expires_at=…` (web bounce page).
     func handleCallback(_ url: URL) {
         guard url.scheme?.lowercased() == CellConfig.urlScheme else { return }
         let host = url.host()?.lowercased() ?? ""
         guard host == "auth" || url.path().hasPrefix("/auth") || url.path().hasPrefix("auth") else { return }
+        // Only while a sign-in this Mac started is using the bounce page (blocks crafted links while the
+        // loopback is in use), and even then the account must be confirmed: any app or web page can open
+        // this URL.
+        guard state == .signingIn, attempt?.mode == .bounce else {
+            SyncLog.error("ignored auth callback: no web sign-in in progress")
+            return
+        }
         let c = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let fragment = c?.percentEncodedFragment ?? ""
         let query = c?.percentEncodedQuery ?? ""
-        // Only accept tokens for a sign-in this Mac started (blocks login-CSRF via crafted links).
-        guard state == .signingIn else {
-            SyncLog.error("ignored auth callback: no sign-in in progress")
-            return
-        }
-        Task { _ = await complete(fragment: fragment, query: query) }
+        Task { _ = await complete(fragment: fragment, query: query, binding: .unbound) }
     }
 
     // MARK: Completion
 
-    /// Adopt the tokens from the redirect, load the profile, persist, notify.
-    func complete(fragment: String, query: String) async -> LoopbackResult {
-        guard state == .signingIn else {
-            if let a = account {
-                return LoopbackResult(ok: true, title: "You're signed in",
-                                      message: "You can close this tab and head back to Silicon Mode.",
-                                      name: a.displayName, handle: a.id)
-            }
-            return LoopbackResult(ok: false, title: "Sign-in expired", message: "Start again from the Silicon Mode menu bar.")
+    /// Check the tokens from the redirect (in memory), confirm unbound ones with the person, then
+    /// persist, publish and notify.
+    func complete(fragment: String, query: String, binding: CallbackBinding) async -> LoopbackResult {
+        guard state == .signingIn, let current = attempt else {
+            return LoopbackResult(ok: false, title: "This sign-in already finished",
+                                  message: "Check Silicon Mode. To sign in again, start from its menu bar.")
         }
         switch CallbackPayload.parse(fragment: fragment, query: query) {
         case .denied(let why):
-            finishSignInWindow()
+            // Only the tab this Mac opened may cancel its sign-in.
+            guard binding == .bound else {
+                return LoopbackResult(ok: false, title: "Sign-in didn't finish",
+                                      message: "Start again from the Silicon Mode menu bar.")
+            }
+            closeAttempt()
             state = account == nil ? .signedOut : .signedIn
             let cancelled = why.hasPrefix("access_denied")
             return LoopbackResult(ok: false, title: cancelled ? "Sign-in cancelled" : "Sign-in didn't finish",
@@ -215,35 +289,91 @@ final class AccountManager {
             return LoopbackResult(ok: false, title: "Sign-in didn't finish",
                                   message: "The sign-in response was incomplete. Start again from the Silicon Mode menu bar.")
         case .tokens(let session):
-            guard !completing else {
-                return LoopbackResult(ok: false, title: "Already finishing",
-                                      message: "Silicon Mode is finishing this sign-in in another tab.")
-            }
-            completing = true
-            defer { completing = false }
-            do {
-                let previous = account
-                try await client.adopt(session)
-                let user = try await client.fetchUser()
-                let acc = Account(user)
-                finishSignInWindow()
-                account = acc
-                state = .signedIn
-                if previous == nil || previous?.uuid != acc.uuid { notify(true) }
-                return LoopbackResult(ok: true, title: "You're signed in",
-                                      message: "You can close this tab. Silicon Mode will keep your phone and the web up to date.",
-                                      name: acc.displayName, handle: acc.id)
-            } catch {
-                await client.clear()
-                finishSignInWindow()
-                let msg = (error as? CellError).map {
-                    $0.isRetryable ? "Couldn't reach Silicon Accounts. Check your connection and try again."
-                                   : "Silicon Accounts didn't accept this sign-in. Try again."
-                } ?? "Something went wrong. Try again."
+            return await adopt(session, binding: binding, attempt: current)
+        }
+    }
+
+    private func adopt(_ session: CellSession, binding: CallbackBinding, attempt current: Attempt) async -> LoopbackResult {
+        let expired = LoopbackResult(ok: false, title: "This sign-in already finished",
+                                     message: "Check Silicon Mode. To sign in again, start from its menu bar.")
+        if binding == .unbound, confirming {
+            return LoopbackResult(ok: false, title: "Check Silicon Mode",
+                                  message: "Silicon Mode is already asking you to confirm a sign-in.", pending: true)
+        }
+        guard !completing else {
+            return LoopbackResult(ok: false, title: "Already finishing",
+                                  message: "Silicon Mode is finishing this sign-in in another tab.")
+        }
+        // Whose tokens are these? Nothing is stored until we know (and, if unbound, the person agrees).
+        let user: CellUser
+        do {
+            user = try await client.fetchUser(accessToken: session.accessToken)
+        } catch {
+            let msg = (error as? CellError).map {
+                $0.isRetryable ? "Couldn't reach Silicon Accounts. Check your connection and try again."
+                               : "Silicon Accounts didn't accept this sign-in. Try again."
+            } ?? "Something went wrong. Try again."
+            // A bad callback from elsewhere must not end the person's own sign-in.
+            if binding == .bound, attempt?.id == current.id, state == .signingIn {
+                closeAttempt()
                 state = .error(msg)
-                if account != nil { account = nil; notify(false) }
-                return LoopbackResult(ok: false, title: "Sign-in didn't finish", message: msg)
             }
+            return LoopbackResult(ok: false, title: "Sign-in didn't finish", message: msg)
+        }
+        guard attempt?.id == current.id, state == .signingIn else { return expired }
+        let acc = Account(user)
+
+        if binding == .unbound {
+            guard !confirming else {
+                return LoopbackResult(ok: false, title: "Check Silicon Mode",
+                                      message: "Silicon Mode is already asking you to confirm a sign-in.", pending: true)
+            }
+            confirming = true
+            Task {
+                let yes = await confirmUnboundSignIn(acc)
+                confirming = false
+                guard yes else {
+                    SyncLog.error("sign-in as \(acc.id) not confirmed (callback not tied to this Mac's sign-in tab)")
+                    return
+                }
+                guard attempt?.id == current.id, state == .signingIn else { return }
+                _ = await store(session, user: user, account: acc, attempt: current)
+            }
+            return LoopbackResult(ok: false, title: "Confirm in Silicon Mode",
+                                  message: "Silicon Mode is asking whether to sign in as \(acc.displayName) (\(acc.id)). Switch to it to finish.",
+                                  pending: true)
+        }
+        return await store(session, user: user, account: acc, attempt: current)
+    }
+
+    /// Persist the checked session and publish the account.
+    private func store(_ session: CellSession, user: CellUser, account acc: Account, attempt current: Attempt) async -> LoopbackResult {
+        let expired = LoopbackResult(ok: false, title: "This sign-in already finished",
+                                     message: "Check Silicon Mode. To sign in again, start from its menu bar.")
+        guard !completing else {
+            return LoopbackResult(ok: false, title: "Already finishing",
+                                  message: "Silicon Mode is finishing this sign-in in another tab.")
+        }
+        completing = true
+        defer { completing = false }
+        if let t = signOutTask { await t.value }   // never adopt underneath a pending sign-out's wipe
+        guard attempt?.id == current.id, state == .signingIn else { return expired }
+        do {
+            let previous = account
+            try await client.adopt(session, user: user)
+            closeAttempt()
+            account = acc
+            state = .signedIn
+            if previous?.uuid != acc.uuid { notify(true) }
+            return LoopbackResult(ok: true, title: "You're signed in",
+                                  message: "You can close this tab. Silicon Mode will keep your phone and the web up to date.",
+                                  name: acc.displayName, handle: acc.id)
+        } catch {
+            // Keychain write failed: whatever was stored before is untouched.
+            closeAttempt()
+            let msg = "Couldn't save your session in the Keychain. Try again."
+            state = account == nil ? .error(msg) : .signedIn
+            return LoopbackResult(ok: false, title: "Sign-in didn't finish", message: msg)
         }
     }
 
@@ -254,12 +384,16 @@ final class AccountManager {
         notify(false)
     }
 
-    private func finishSignInWindow() {
+    /// End the current attempt: deadline, URL, pending confirmation, listener (kept a moment so the
+    /// page's POST response flushes, but refusing new completions right away).
+    private func closeAttempt() {
         signInDeadline?.cancel(); signInDeadline = nil
         signInURL = nil
-        // Let the page's POST response flush before the listener goes away.
+        attempt = nil
+        if confirming { SignInConfirmation.dismiss() }
         guard let s = server else { return }
         server = nil
+        s.retire()
         retiringServer = s
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -267,9 +401,30 @@ final class AccountManager {
             if self?.retiringServer === s { self?.retiringServer = nil }
         }
     }
+}
 
-    private func stopServer() {
-        server?.stop()
-        server = nil
+/// "Sign in as …?" for a sign-in Silicon Mode can't tie to the browser tab it opened.
+@MainActor
+enum SignInConfirmation {
+    private static var showing = false
+
+    static func ask(_ a: AccountManager.Account) async -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Sign in as \(a.displayName)?"
+        alert.informativeText = "A sign-in for \(a.id) reached Silicon Mode from outside the browser tab it opened. "
+            + "Continue only if this is your account and you just signed in: Silicon Mode will send your agents' "
+            + "activity to this account and accept answers from it."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Sign In as \(a.displayName)")
+        NSApp.activate()
+        showing = true
+        defer { showing = false }
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    /// The attempt ended while asking (e.g. the bound callback finished it): take the question away.
+    static func dismiss() {
+        if showing { NSApp.abortModal() }
     }
 }
