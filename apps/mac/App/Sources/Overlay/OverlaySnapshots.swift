@@ -6,7 +6,7 @@ import SiliconModeKit
 ///   overlay.countdown         countdown strip at ~3 s left over a stand-in desktop
 ///   overlay.enter             enter shockwave mid-frame (--time = seconds into the animation)
 ///   overlay.enter.bang        the flash at impact
-///   overlay.root              Silicon Mode, "bounce" face, grace period, default furniture
+///   overlay.root              Silicon Mode 6 s in, "bounce" face, grace period, default furniture
 ///   overlay.root.locked       after the grace period
 ///   overlay.root.unlock       unlock sheet presented
 ///   overlay.root.furniture    every kind of furniture placed
@@ -26,25 +26,25 @@ enum OverlaySnapshots {
             SnapshotItem(id: "overlay.enter.gather") { AnyView(enter(at: pin(0.2))) },
             SnapshotItem(id: "overlay.enter.bang") { AnyView(enter(at: pin(0.34))) },
             SnapshotItem(id: "overlay.enter.late") { AnyView(enter(at: pin(0.85))) },
-            SnapshotItem(id: "overlay.root") { AnyView(root(SiliconModePreview(faceID: "bounce"))) },
+            SnapshotItem(id: "overlay.root") { AnyView(settled(SiliconModePreview(faceID: "bounce"))) },
             SnapshotItem(id: "overlay.root.locked") {
-                AnyView(root(SiliconModePreview(graceRemaining: nil, locked: true, faceID: "bounce")))
+                AnyView(settled(SiliconModePreview(graceRemaining: nil, locked: true, faceID: "bounce")))
             },
             SnapshotItem(id: "overlay.root.unlock") {
                 AppModel.shared.unlockPresented = true
-                return AnyView(root(SiliconModePreview(graceRemaining: nil, locked: true, unlockPresented: true, faceID: "bounce")))
+                return AnyView(settled(SiliconModePreview(graceRemaining: nil, locked: true, unlockPresented: true, faceID: "bounce")))
             },
             SnapshotItem(id: "overlay.root.furniture") {
-                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
-                                                furniture: HUDSample.source(furniture: HUDSample.everyPiece))))
+                AnyView(settled(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                   furniture: HUDSample.source(furniture: HUDSample.everyPiece))))
             },
             SnapshotItem(id: "furniture.hidden") {
-                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
-                                                furnitureHidden: true)))
+                AnyView(settled(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                   furnitureHidden: true)))
             },
             SnapshotItem(id: "furniture.hidden-peek") {
-                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
-                                                furnitureHidden: true, questionsPeek: true)))
+                AnyView(settled(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                   furnitureHidden: true, questionsPeek: true)))
             },
             SnapshotItem(id: "overlay.exit") { AnyView(exit(at: pin(0.4))) },
         ]
@@ -66,6 +66,13 @@ enum OverlaySnapshots {
     private static func pin(_ t: Double) -> Double {
         if SnapshotHarness.time == nil { SnapshotHarness.time = t }
         return SnapshotHarness.time ?? t
+    }
+
+    /// Silicon Mode some seconds in: the face's agents have arrived and the clock reads the fixed
+    /// snapshot time (unpinned, the face is drawn at its first frame, before anything enters).
+    private static func settled(_ preview: SiliconModePreview) -> some View {
+        _ = pin(6)
+        return root(preview)
     }
 
     private static func countdownStrip(elapsed: Double, visible: Bool = true,
