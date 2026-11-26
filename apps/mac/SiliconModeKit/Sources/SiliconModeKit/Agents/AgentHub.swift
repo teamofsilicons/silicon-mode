@@ -98,7 +98,7 @@ public actor AgentHub {
                 if s.recentEvents.count > maxEvents { s.recentEvents = Array(s.recentEvents.suffix(maxEvents)) }
                 return s
             }
-            .sorted { a, b in a.state != b.state ? a.state < b.state : a.updatedAt > b.updatedAt }
+            .sorted(by: AgentSession.urgencyOrder)
         latest = Snapshot(sessions: merged, counts: AgentCounts(merged), takenAt: ctx.now)
         return latest
     }
