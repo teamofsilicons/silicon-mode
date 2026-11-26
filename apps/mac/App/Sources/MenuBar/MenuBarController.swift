@@ -7,9 +7,11 @@ import SiliconModeKit
 /// or programmatically (`toggle()`, `show()`). MenuBarExtra isn't used: it can't be opened from
 /// code, sized, or animated (docs/research/macos-ui.md §3.4).
 ///
-/// The panel is a transparent, non-activating canvas sized for the tallest card; the card is
-/// top-anchored inside it, so content height changes are pure SwiftUI springs (no window
-/// resizing, no jank). Transparent pixels pass clicks through to whatever is below.
+/// The panel is a transparent, non-activating window with room around the card for its soft
+/// shadow. The card is top-anchored inside it, so content height changes are pure SwiftUI
+/// springs; the window just hugs the card (grows first, shrinks after the spring settles).
+/// Closes on outside click, ESC, ⌘W, another app activating, a Space change, or entering
+/// Silicon Mode. Keyboard: ↑↓ select, Return/Space expand, 1–9 answer the selected question.
 @MainActor
 final class MenuBarController: NSObject {
     static let shared = MenuBarController()
@@ -125,8 +127,20 @@ final class MenuBarController: NSObject {
     }
 
     private func setHighlighted(_ on: Bool) {
-        // The button un-highlights itself on mouse-up; set ours after that.
-        Task { @MainActor [weak self] in self?.item?.button?.highlight(on) }
+        guard on else {
+            item?.button?.highlight(false)
+            return
+        }
+        // The button clears its highlight when its click tracking ends (mouse-up), so assert
+        // ours once the button is released.
+        Task { @MainActor [weak self] in
+            for _ in 0..<80 where NSEvent.pressedMouseButtons != 0 {
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            try? await Task.sleep(for: .milliseconds(16))
+            guard let self, self.presentation.isMounted else { return }
+            self.item?.button?.highlight(true)
+        }
     }
 
     /// The card reports its (final, unanimated) frame. The panel hugs it so no invisible window
@@ -171,19 +185,26 @@ final class MenuBarController: NSObject {
     /// Opens the Settings scene in front (we're an accessory app, so bring it forward ourselves).
     func openSettings() {
         hide()
-        NSApp.activate()
-        if let action = openSettingsAction {
-            action()
-        } else {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
+        // Accessory app: cooperative activation is ignored here (docs/research/macos-ui.md §0).
+        NSApp.activate(ignoringOtherApps: true)
+        openSettingsAction?()
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(60))
-            if let w = NSApp.windows.first(where: { ($0.identifier?.rawValue ?? "").localizedCaseInsensitiveContains("settings") && $0.isVisible }) {
+            try? await Task.sleep(for: .milliseconds(openSettingsAction == nil ? 0 : 150))
+            // Fallback: the app menu's "Settings…" item that the Settings scene installs.
+            if Self.settingsWindow == nil, let appMenu = NSApp.mainMenu?.items.first?.submenu,
+               let i = appMenu.items.firstIndex(where: { $0.keyEquivalent == "," && $0.keyEquivalentModifierMask.contains(.command) }) {
+                appMenu.performActionForItem(at: i)
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            if let w = Self.settingsWindow {
                 w.orderFrontRegardless()
                 w.makeKey()
             }
         }
+    }
+
+    private static var settingsWindow: NSWindow? {
+        NSApp.windows.first { ($0.identifier?.rawValue ?? "").localizedCaseInsensitiveContains("settings") && $0.isVisible }
     }
 
     /// Pops an NSMenu under a rect given in the card's (top-left origin) coordinates.

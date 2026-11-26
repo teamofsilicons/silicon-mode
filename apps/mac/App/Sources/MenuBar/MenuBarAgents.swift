@@ -364,6 +364,7 @@ private struct SharpenIn: ViewModifier {
 
 struct MenuBarEmptyState: View {
     @State private var lid: Double = MenuBarRender.flat ? MenuBarGlyph.restingLid : 18
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -395,6 +396,7 @@ struct MenuBarEmptyState: View {
         .padding(.bottom, 10)
         .onAppear {
             guard !MenuBarRender.flat else { return }
+            guard !reduceMotion else { lid = MenuBarGlyph.restingLid; return }
             withAnimation(.spring(response: 0.75, dampingFraction: 0.55).delay(0.12)) { lid = MenuBarGlyph.restingLid }
         }
     }

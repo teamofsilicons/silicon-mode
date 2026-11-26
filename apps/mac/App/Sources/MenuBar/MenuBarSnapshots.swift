@@ -13,7 +13,7 @@ enum MenuBarSnapshots {
         [
             card("menubar-popover", dark: true, demo: .base, expanded: ["claude-code:demo-1"]),
             card("menubar-popover-light", dark: false, demo: .base, expanded: ["claude-code:demo-1"]),
-            card("menubar-collapsed", dark: true, demo: .base),
+            card("menubar-collapsed", dark: true, demo: .base, height: 760, selection: "a:claude-code:demo-5"),
             card("menubar-empty", dark: true, demo: emptyDemo, height: 560),
             card("menubar-empty-light", dark: false, demo: emptyDemo, height: 560),
             card("menubar-questions", dark: true, demo: questionsDemo, height: 980, selection: "q:demo-q"),
@@ -21,6 +21,14 @@ enum MenuBarSnapshots {
             card("menubar-paused", dark: false, demo: pausedDemo, height: 760),
             SnapshotItem(id: "menubar-headers", size: CGSize(width: 900, height: 760), dark: true) { AnyView(HeaderGallery()) },
             SnapshotItem(id: "menubar-headers-light", size: CGSize(width: 900, height: 760), dark: false) { AnyView(HeaderGallery()) },
+            // The real panel root wired to the live (unstarted) AppModel: exercises the connectors.
+            SnapshotItem(id: "menubar-panel-live", size: CGSize(width: MB.width + MB.margin.leading + MB.margin.trailing, height: 560), dark: true) {
+                let p = MenuPanelPresentation()
+                p.isMounted = true
+                p.isPresented = true
+                p.maxCardHeight = 480
+                return AnyView(ZStack { SnapshotBackdrop(); MenuPanelRoot(presentation: p) })
+            },
             SnapshotItem(id: "menubar-icons", size: CGSize(width: 560, height: 300), dark: true) { AnyView(IconGallery()) },
             SnapshotItem(id: "menubar-icons-light", size: CGSize(width: 560, height: 300), dark: false) { AnyView(IconGallery()) },
         ]
