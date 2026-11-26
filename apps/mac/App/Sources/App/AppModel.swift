@@ -196,6 +196,8 @@ final class AppModel {
         LoginItem.sync(enabled: Flags.noLoginItem ? false : settings.launchAtLogin)
         account.restore()
         cloud.attach(model: self)
+        // Build the next countdown's and entry's windows while idle (a couple of seconds in).
+        overlay.startPrewarming()
     }
 
     // MARK: Ticks
@@ -290,6 +292,7 @@ final class AppModel {
     }
 
     private func systemDidWake() {
+        overlay.systemDidWake()
         handle(.systemDidWake)
         lidLoop?.requestProbe()
         refreshAgentsSoon()
@@ -416,6 +419,7 @@ final class AppModel {
         }
         if settings.furniture != old.furniture || settings.furnitureHidden != old.furnitureHidden { updateSystemSampler() }
         updateHoldPolicy()
+        overlay.settingsChanged()
     }
 
     // MARK: Agents
