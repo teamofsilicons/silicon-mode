@@ -10,18 +10,23 @@ import SiliconModeKit
 /// long log that rebuild pinned the main thread. A text view is a single view with its own,
 /// exact TextKit 1 layout: no lazy re-estimation, no per-line SwiftUI views.
 ///
-/// - Its size is fixed by the furniture plan (from line counts), never by its content.
+/// - Its size is fixed by the furniture plan (from the lines' wrapped heights, `LogMeasure`),
+///   never by measuring the view itself.
 /// - Appends are incremental: only paragraphs after the first changed event are rewritten, and
 ///   events dropped from the front (the log book's cap) are removed from the front.
 /// - It follows the tail while the view rests at the bottom; scrolling up pauses that, counts the
 ///   unseen lines into `unseen`, and scrolling back down (or `jump`) resumes it. Only the user's
 ///   own scrolling (wheel, trackpad, scroller) decides that: layout and resizes never do.
+/// - It reports how much text is scrolled out of view above and below (`fade`), so the body can
+///   dissolve rows under its edges instead of cutting them.
 struct LogTextView: NSViewRepresentable {
     let events: [AgentEvent]
     @Binding var following: Bool
     @Binding var unseen: Int
     /// Changes when the "Latest" button is pressed: scroll to the end and follow again.
     let jump: Int
+    /// The scroll-edge fades this view's position calls for.
+    let fade: LogEdgeFade
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -30,7 +35,9 @@ struct LogTextView: NSViewRepresentable {
         let scroll = LogScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = true
+        // The overlay scroller appears with the user's first scroll (`LogScrollView`), so
+        // following the tail and resizes never flash it.
+        scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
@@ -51,7 +58,7 @@ struct LogTextView: NSViewRepresentable {
         text.isSelectable = false
         text.drawsBackground = false
         text.isRichText = true
-        text.textContainerInset = NSSize(width: 16, height: 12)
+        text.textContainerInset = NSSize(width: LogMeasure.insetX, height: LogMeasure.insetY)
         text.isVerticallyResizable = true
         text.isHorizontallyResizable = false
         text.autoresizingMask = [.width]
@@ -63,6 +70,9 @@ struct LogTextView: NSViewRepresentable {
                                                name: NSScrollView.didLiveScrollNotification, object: scroll)
         NotificationCenter.default.addObserver(c, selector: #selector(Coordinator.liveScrolled(_:)),
                                                name: NSScrollView.didEndLiveScrollNotification, object: scroll)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(c, selector: #selector(Coordinator.boundsChanged(_:)),
+                                               name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         scroll.onResize = { [weak c] in c?.keepTail() }
         scroll.onUserScroll = { [weak c] in c?.userScrolled() }
         c.attach(scroll: scroll, text: text)
@@ -96,6 +106,8 @@ struct LogTextView: NSViewRepresentable {
         /// What each paragraph shows, and where it starts in the text storage.
         private var rendered: [Rendered] = []
         private var offsets: [Int] = []
+        /// The fades last asked for (applied on the next turn of the run loop).
+        private var edges = (top: CGFloat(0), bottom: CGFloat(0))
 
         private struct Rendered: Equatable {
             var id: String
@@ -152,6 +164,7 @@ struct LogTextView: NSViewRepresentable {
                 let n = parent.unseen + added
                 Task { @MainActor [weak self] in self?.parent.unseen = n }
             }
+            updateEdges()
         }
 
         // MARK: Scrolling
@@ -163,6 +176,9 @@ struct LogTextView: NSViewRepresentable {
 
         func scrollToEnd() {
             guard let scroll, let text, let layout = text.layoutManager, let container = text.textContainer else { return }
+            // Not laid out yet (a new tab's view starts at zero size): laying the whole log out a
+            // glyph per line would be wasted; the first resize scrolls to the end.
+            guard scroll.bounds.width >= 1 else { return }
             layout.ensureLayout(for: container)
             text.sizeToFit()
             let y = max(0, text.frame.height - scroll.contentView.bounds.height)
@@ -185,6 +201,30 @@ struct LogTextView: NSViewRepresentable {
         /// The scroller was dragged (live scroll): same as a wheel scroll.
         @objc func liveScrolled(_ note: Notification) { userScrolled() }
 
+        /// The visible part moved (any scroll, a resize).
+        @objc func boundsChanged(_ note: Notification) { updateEdges() }
+
+        /// Fades the edges that have text scrolled out of view behind them: none while it all
+        /// fits, the top one while following a longer log, both once the user scrolls up. Changes
+        /// are rare (stepped heights), and applied after the current update.
+        func updateEdges() {
+            guard let scroll, let doc = scroll.documentView else { return }
+            let visible = scroll.contentView.bounds
+            let top = LogEdgeFade.height(hidden: visible.minY, max: LogEdgeFade.topMax)
+            let bottom = LogEdgeFade.height(hidden: doc.frame.height - visible.maxY, max: LogEdgeFade.bottomMax)
+            guard top != edges.top || bottom != edges.bottom else { return }
+            edges = (top, bottom)
+            let fade = parent.fade
+            Task { @MainActor [weak self] in
+                guard let self, fade.top != self.edges.top || fade.bottom != self.edges.bottom else { return }
+                let (t, b) = self.edges
+                withAnimation(.easeOut(duration: 0.2)) {
+                    fade.top = t
+                    fade.bottom = b
+                }
+            }
+        }
+
         /// The user scrolled: resting at the bottom follows the tail again, anywhere else pauses it.
         func userScrolled() {
             let bottom = atBottom
@@ -205,6 +245,7 @@ final class LogScrollView: NSScrollView {
     var onUserScroll: (() -> Void)?
 
     override func scrollWheel(with event: NSEvent) {
+        if !hasVerticalScroller { hasVerticalScroller = true }
         super.scrollWheel(with: event)
         onUserScroll?()
     }
@@ -219,6 +260,120 @@ final class LogScrollView: NSScrollView {
 /// A text view that never takes keyboard focus (any key in Silicon Mode belongs to the PIN pad).
 final class LogNSTextView: NSTextView {
     override var acceptsFirstResponder: Bool { false }
+}
+
+/// How far the body's edges fade, from how much text is scrolled out of view behind each. A
+/// macOS 26 scroll-edge effect: rows dissolve under the tab strip instead of being cut.
+@MainActor @Observable
+final class LogEdgeFade {
+    static let topMax: CGFloat = 28
+    static let bottomMax: CGFloat = 20
+
+    var top: CGFloat = 0
+    var bottom: CGFloat = 0
+
+    /// No fade while the hidden part is within the text inset (no glyph is cut yet), then
+    /// growing to `max`, in 4 pt steps.
+    nonisolated static func height(hidden: CGFloat, max: CGFloat) -> CGFloat {
+        let h = Swift.min(max, Swift.max(0, (hidden - 6) * 2))
+        return (h / 4).rounded() * 4
+    }
+}
+
+/// The body's mask: soft top and bottom edges (heights from `LogEdgeFade`) and the panel's
+/// rounded bottom corners. Only this view observes the fades, so scrolling never re-renders the
+/// log itself.
+struct LogEdgeMask: View {
+    let fade: LogEdgeFade
+
+    /// Eased stops: transparent at the edge, solid where the fade ends.
+    private static let stops: [Gradient.Stop] = [
+        .init(color: .black.opacity(0), location: 0),
+        .init(color: .black.opacity(0.12), location: 0.3),
+        .init(color: .black.opacity(0.5), location: 0.6),
+        .init(color: .black.opacity(0.85), location: 0.85),
+        .init(color: .black, location: 1),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(stops: Self.stops, startPoint: .top, endPoint: .bottom).frame(height: fade.top)
+            Rectangle()
+            LinearGradient(stops: Self.stops, startPoint: .bottom, endPoint: .top).frame(height: fade.bottom)
+        }
+        .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
+                                          bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous))
+    }
+}
+
+/// The height a log body needs to show its newest lines in full: each paragraph laid out once,
+/// off screen, exactly as `LogTextView` sets it (TextKit 1, same attributes, same width), and
+/// cached per line. The furniture plan sizes the logs piece from this (data, never the view on
+/// screen), so a log can't feed back into its own layout.
+@MainActor
+enum LogMeasure {
+    /// The text view's insets.
+    static let insetX: CGFloat = 16
+    static let insetY: CGFloat = 12
+
+    private struct Entry {
+        var text: String
+        var kind: AgentEvent.Kind
+        var width: CGFloat
+        var height: CGFloat
+    }
+
+    private static var cache: [String: Entry] = [:]
+    private static let storage = NSTextStorage()
+    private static let container: NSTextContainer = {
+        let c = NSTextContainer(size: NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude))
+        c.lineFragmentPadding = 0
+        return c
+    }()
+    private static let layout: NSLayoutManager = {
+        let l = NSLayoutManager()
+        l.allowsNonContiguousLayout = false
+        storage.addLayoutManager(l)
+        l.addTextContainer(container)
+        return l
+    }()
+
+    /// What a second paragraph adds besides its own lines (paragraph spacing and line gap).
+    private static let join: CGFloat = {
+        let e = AgentEvent(id: "m", at: Date(timeIntervalSince1970: 0), kind: .tool, text: "Read a")
+        let one = measure(LogParagraph.make(e, first: true), width: 400)
+        let pair = NSMutableAttributedString(attributedString: LogParagraph.make(e, first: true))
+        pair.append(LogParagraph.make(e, first: false))
+        return measure(pair, width: 400) - 2 * one
+    }()
+
+    /// Body height (insets included) for the newest lines of `events` at a panel `width`, up to `limit`.
+    static func bodyHeight(_ events: [AgentEvent], width: CGFloat, limit: CGFloat) -> CGFloat {
+        guard !events.isEmpty else { return 0 }
+        let w = max(40, width - 2 * insetX)
+        if cache.count > 6000 { cache.removeAll(keepingCapacity: true) }
+        var h = 2 * insetY
+        for (i, e) in events.reversed().enumerated() {
+            h += height(e, width: w) + (i > 0 ? join : 0)
+            if h >= limit { return limit }
+        }
+        return ceil(h)
+    }
+
+    private static func height(_ e: AgentEvent, width: CGFloat) -> CGFloat {
+        if let c = cache[e.id], c.width == width, c.kind == e.kind, c.text == e.text { return c.height }
+        let h = measure(LogParagraph.make(e, first: true), width: width)
+        cache[e.id] = Entry(text: e.text, kind: e.kind, width: width, height: h)
+        return h
+    }
+
+    private static func measure(_ s: NSAttributedString, width: CGFloat) -> CGFloat {
+        _ = layout
+        storage.setAttributedString(s)
+        container.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        layout.ensureLayout(for: container)
+        return layout.usedRect(for: container).height
+    }
 }
 
 /// One event as a paragraph: "12:04:31  [symbol]  text", wrapped lines indented under the text.
@@ -266,7 +421,7 @@ enum LogParagraph {
 
         let color = textColor(e.kind)
         let font = e.kind == .user ? userFont : textFont
-        let body = EventText.clip(e.text, max: 280)
+        let body = LogCode.display(e)
         if e.kind == .tool || e.kind == .permission, let parts = LogCode.split(body) {
             s.append(NSAttributedString(string: parts.lead, attributes: base.merging([.foregroundColor: color, .font: font]) { $1 }))
             s.append(NSAttributedString(string: parts.code, attributes: base.merging([.foregroundColor: color, .font: codeFont]) { $1 }))

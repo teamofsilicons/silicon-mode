@@ -2,17 +2,21 @@ import SwiftUI
 import SiliconModeKit
 
 /// The logs piece, like Safari's tab bar: a row of capsule tabs, one per agent Silicon Mode shows
-/// (needs you, working, error, finished; most recent first), and under it every line the mode's
-/// log book holds for the selected agent, oldest at the top, in a native text view that follows the
-/// tail (`LogTextView`).
+/// (needs you, working, error, finished), and under it every line the mode's log book holds for
+/// the selected agent, oldest at the top, in a native text view that follows the tail
+/// (`LogTextView`).
 ///
-/// - The selected tab is a glass capsule that morphs from tab to tab.
-/// - Scrolling up pauses following; a "Latest" button appears when newer lines arrive.
+/// - Tabs stand in the order their agents started, oldest first: a new agent opens a tab at the
+///   trailing end, and tabs never move as agents change state (`ModeLogTabs`).
+/// - The selected tab is a glass capsule that morphs from tab to tab. The user's last pick stays
+///   selected; an agent that starts needing you is selected once per need.
+/// - Scrolling up pauses following; a "Latest" button appears when newer lines arrive. Rows
+///   scrolled under the tab strip dissolve (a soft scroll edge) instead of being cut.
 /// - The chevron minimises the piece to its tab strip (per piece, remembered, shared by every
 ///   display); clicking a tab or the chevron restores it.
-/// - The selected tab starts on the most recently active agent; if that agent leaves, the tab that
-///   takes its place is selected.
-/// - Its height comes from the plan, which sizes it from line counts, never from measured content.
+/// - It hugs the selected agent's lines, from one line up to 30% of the screen. The plan sizes it
+///   from those lines' wrapped heights (`LogMeasure`), never from the view on screen; new heights
+///   reach the plan animated, at most twice a second.
 struct LogsPiece: View {
     @Environment(AppModel.self) private var model
     let pieceID: String
@@ -21,34 +25,36 @@ struct LogsPiece: View {
     let slot: FurnitureSlot
     var preview: FurnitureSource?
 
-    @State private var selectedID: String?
-
     /// Tabs (32) inset by 8 all round: concentric with the panel (16 + 8 = 24).
     static let stripHeight: CGFloat = 48
-    /// The smallest body worth showing (else only the strip is drawn).
-    static let minBody: CGFloat = 72
-    /// Height budgeted per log line (a one-line row and the gap after it).
-    static let lineEstimate: CGFloat = 24
-    static let bodyPadding: CGFloat = 24
+    /// The smallest body: one line and the text insets (else only the strip is drawn).
+    static let minBody: CGFloat = 40
+    /// Body heights are measured at most this far (above any screen's 30% cap).
+    static let measureLimit: CGFloat = 720
 
     private var ui: FurnitureUIState { .shared }
+    private var state: LogTabsState { .shared }
 
     var body: some View {
-        let sessions = preview?.sortedSessions ?? model.modeAgents
+        let shown = preview?.sessions ?? model.modeAgents
+        let tabs = preview == nil ? state.tabs(pieceID) : ModeLogTabs()
+        let sessions = tabs.ordered(shown)
+        let selectedID = preview.map { Self.previewSelection($0, sessions) } ?? tabs.selection(in: sessions)
+        let selected = sessions.first { $0.id == selectedID }
         let minimized = preview?.logsMinimized ?? ui.logsMinimized(pieceID)
-        let selected = Self.resolve(selectedID ?? preview?.selectedLogTab, in: sessions)
-        // The body takes exactly what the plan gave the piece. The plan sizes it from line counts
-        // (never from measured content), so a growing log can't feed back into its own layout.
+        // The body takes exactly what the plan gave the piece (see `demand`).
         let bodyHeight = max(0, budget - Self.stripHeight)
         let showsBody = !minimized && bodyHeight >= Self.minBody
+        let want = Self.wantedBody(selected, model: model, preview: preview, width: width,
+                                   cap: preview == nil ? state.cap(pieceID) : nil)
 
         VStack(spacing: 0) {
-            LogTabStrip(sessions: sessions, selectedID: selected?.id, bottomSlot: !slot.isTop,
+            LogTabStrip(sessions: sessions, selectedID: selectedID, bottomSlot: !slot.isTop,
                         minimized: minimized, onSelect: select, onToggle: toggleMinimized)
             if showsBody {
                 Group {
                     if let selected {
-                        LogBody(session: selected, preview: preview)
+                        LogBody(session: selected, preview: preview, overflows: want > bodyHeight + 1)
                             .id(selected.id)
                     } else {
                         LogEmptyNote(text: "Agent activity will stream in here.")
@@ -61,42 +67,44 @@ struct LogsPiece: View {
         }
         .frame(width: width)
         .hudPanel()
-        .onAppear {
-            if selectedID == nil, preview == nil { selectedID = Self.mostRecent(sessions)?.id }
+        .onChange(of: Self.tabKey(shown), initial: true) {
+            if preview == nil { state.update(pieceID, sessions: shown) }
         }
-        .onChange(of: sessions.map(\.id)) { old, new in repairSelection(old: old, new: new, sessions: sessions) }
+        .onChange(of: PlanRequest(tab: selectedID, body: want), initial: true) { old, new in
+            // A tab switch re-plans at once (in the switch's animation); new lines at most twice a second.
+            if preview == nil { state.requestBody(pieceID, new.body, immediately: old.tab != new.tab) }
+        }
         .animation(Theme.Motion.slow, value: minimized)
     }
 
     // MARK: Selection
 
-    static func resolve(_ id: String?, in sessions: [AgentSession]) -> AgentSession? {
-        if let id, let s = sessions.first(where: { $0.id == id }) { return s }
-        return mostRecent(sessions)
+    /// Snapshots and previews: the tab they name, else the most recently active agent.
+    static func previewSelection(_ source: FurnitureSource, _ sessions: [AgentSession]) -> String? {
+        if let id = source.selectedLogTab, sessions.contains(where: { $0.id == id }) { return id }
+        return sessions.max { $0.updatedAt < $1.updatedAt }?.id
     }
 
-    static func mostRecent(_ sessions: [AgentSession]) -> AgentSession? {
-        sessions.max { $0.updatedAt < $1.updatedAt }
-    }
-
-    /// The selected agent left: select the tab that took its place (else the last one).
-    private func repairSelection(old: [String], new: [String], sessions: [AgentSession]) {
-        guard preview == nil else { return }
-        guard let sel = selectedID else {
-            selectedID = Self.mostRecent(sessions)?.id
-            return
-        }
-        guard !new.contains(sel) else { return }
-        guard !new.isEmpty else { selectedID = nil; return }
-        let i = old.firstIndex(of: sel) ?? 0
-        withAnimation(Theme.Motion.slow) { selectedID = new[min(i, new.count - 1)] }
+    /// What tab order and selection depend on.
+    private static func tabKey(_ sessions: [AgentSession]) -> [String] {
+        sessions.map { "\($0.id)|\($0.state.rawValue)" }
     }
 
     private func select(_ id: String) {
         guard preview == nil else { return }
-        if selectedID != id { withAnimation(.smooth(duration: 0.35)) { selectedID = id } }
+        if tabsSelection != id {
+            let session = model.modeAgents.first { $0.id == id }
+            let body = Self.wantedBody(session, model: model, preview: nil, width: width, cap: state.cap(pieceID))
+            // The capsule morphs and the panel resizes in one motion.
+            withAnimation(LogTabsState.motion) {
+                state.select(pieceID, id)
+                state.requestBody(pieceID, body, immediately: true)
+            }
+        }
         if ui.logsMinimized(pieceID) { withAnimation(Theme.Motion.slow) { ui.setLogsMinimized(pieceID, false) } }
     }
+
+    private var tabsSelection: String? { state.tabs(pieceID).selection(in: model.modeAgents) }
 
     private func toggleMinimized() {
         guard preview == nil else { return }
@@ -105,27 +113,123 @@ struct LogsPiece: View {
 
     // MARK: Size
 
-    /// The strip, plus a body sized from how many lines the longest tab holds (a fixed height per
-    /// line, up to 30% of the screen, so it stays clear of the face). Never from measured content: a lazy stack re-estimates its
-    /// height as it scrolls, and sizing the panel from that re-lays it out forever. Sizing by the
-    /// longest tab also keeps the panel still while switching tabs.
-    static func demand(minimized: Bool, lines: Int, screenHeight: CGFloat) -> FurnitureDemand {
+    /// The strip, plus a body that hugs the selected agent's newest lines: their wrapped heights
+    /// (`LogMeasure`, from the lines, never the view on screen), from one line up to 30% of the
+    /// screen less the strip, so it stays clear of the face. Live, the piece publishes that height
+    /// itself (`LogTabsState.requestBody`: animated, rate-limited); the first plan and snapshots
+    /// measure it here.
+    static func demand(pieceID: String, slot: FurnitureSlot, minimized: Bool, screen: CGSize,
+                       preview: FurnitureSource?, model: AppModel) -> FurnitureDemand {
         if minimized { return .fixed(stripHeight) }
-        let cap = max(minBody, screenHeight * 0.3 - stripHeight)
-        let body = min(cap, estimatedBody(lines: lines))
-        return FurnitureDemand(min: stripHeight, ideal: stripHeight + body)
+        let cap = max(minBody, (screen.height * 0.3 - stripHeight).rounded(.down))
+        let state = LogTabsState.shared
+        let body: CGFloat
+        if preview == nil, let planned = state.plannedBody(pieceID) {
+            body = planned
+        } else {
+            let sessions = preview?.sessions ?? model.modeAgents
+            let id = preview.map { previewSelection($0, sessions) } ?? state.tabs(pieceID).selection(in: sessions)
+            body = wantedBody(sessions.first { $0.id == id }, model: model, preview: preview,
+                              width: FurnitureMetrics.logsWidth(screen: screen.width, slot: slot), cap: cap)
+        }
+        if preview == nil { state.noteCap(pieceID, cap) }
+        return FurnitureDemand(min: stripHeight, ideal: stripHeight + min(cap, max(minBody, body)))
     }
 
-    static func estimatedBody(lines: Int) -> CGFloat {
-        max(minBody, CGFloat(lines) * lineEstimate + bodyPadding)
+    /// The body height the session's lines need at `width` (at least one line, at most `cap`).
+    static func wantedBody(_ session: AgentSession?, model: AppModel, preview: FurnitureSource?,
+                           width: CGFloat, cap: CGFloat?) -> CGFloat {
+        guard let session else { return minBody }
+        let limit = cap ?? measureLimit
+        let lines = events(session, model: model, preview: preview)
+        return min(limit, max(minBody, LogMeasure.bodyHeight(lines, width: width, limit: limit)))
     }
 
-    /// Lines in the longest tab: the log book's (live) or the sessions' recent events.
-    static func longestLog(_ sessions: [AgentSession], book: ModeLogBook?) -> Int {
-        sessions.map { s in
-            let logged = book?.events(for: s.id).count ?? 0
-            return logged > 0 ? logged : s.recentEvents.count
-        }.max() ?? 0
+    /// Live: the log book (read `logRevision` first, which is what views observe); the session's
+    /// recent events until the book has any. Previews: the session's events.
+    static func events(_ session: AgentSession, model: AppModel, preview: FurnitureSource?) -> [AgentEvent] {
+        if preview != nil { return session.recentEvents }
+        _ = model.logRevision
+        let logged = model.logBook.events(for: session.id)
+        return logged.isEmpty ? session.recentEvents : logged
+    }
+}
+
+private struct PlanRequest: Equatable {
+    var tab: String?
+    var body: CGFloat
+}
+
+/// The logs pieces' tabs (order and selection, `ModeLogTabs`) and the body height each asked the
+/// plan for. Shared by every display, like the minimised flag, and kept between entries, so the
+/// user's last tab stays selected.
+@MainActor @Observable
+final class LogTabsState {
+    static let shared = LogTabsState()
+    /// New body heights reach the plan at most this often.
+    static let planInterval: TimeInterval = 0.5
+    static let motion = Animation.smooth(duration: 0.35)
+
+    private var tabsByPiece: [String: ModeLogTabs] = [:]
+    private var planned: [String: CGFloat] = [:]
+    @ObservationIgnored private var caps: [String: CGFloat] = [:]
+    @ObservationIgnored private var plannedAt: [String: Date] = [:]
+    @ObservationIgnored private var pending: [String: CGFloat] = [:]
+    @ObservationIgnored private var timers: [String: Task<Void, Never>] = [:]
+
+    func tabs(_ piece: String) -> ModeLogTabs { tabsByPiece[piece] ?? ModeLogTabs() }
+    func plannedBody(_ piece: String) -> CGFloat? { planned[piece] }
+
+    /// The tallest body the plan gives a piece (noted while planning; not observed).
+    func cap(_ piece: String) -> CGFloat? { caps[piece] }
+    func noteCap(_ piece: String, _ cap: CGFloat) { if caps[piece] != cap { caps[piece] = cap } }
+
+    /// Feeds the shown agents (order, need-driven selection). A changed selection morphs.
+    func update(_ piece: String, sessions: [AgentSession]) {
+        var t = tabs(piece)
+        let before = t
+        let visible = t.update(sessions)
+        guard t != before else { return }
+        if visible { withAnimation(Self.motion) { tabsByPiece[piece] = t } } else { tabsByPiece[piece] = t }
+    }
+
+    func select(_ piece: String, _ session: String) {
+        var t = tabs(piece)
+        t.select(session)
+        if t != tabsByPiece[piece] { tabsByPiece[piece] = t }
+    }
+
+    /// Asks the plan for `body` points of log. The first request applies as is; later ones
+    /// animate, at most one per `planInterval` (the latest wins), or at once when `immediately`.
+    func requestBody(_ piece: String, _ body: CGFloat, immediately: Bool) {
+        guard let current = planned[piece] else {
+            planned[piece] = body
+            plannedAt[piece] = Date()
+            return
+        }
+        if current == body {
+            pending[piece] = nil
+            return
+        }
+        let since = Date().timeIntervalSince(plannedAt[piece] ?? .distantPast)
+        if immediately || since >= Self.planInterval {
+            pending[piece] = nil
+            apply(piece, body)
+            return
+        }
+        pending[piece] = body
+        guard timers[piece] == nil else { return }
+        timers[piece] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.planInterval - since))
+            guard let self else { return }
+            self.timers[piece] = nil
+            if let b = self.pending.removeValue(forKey: piece), b != self.planned[piece] { self.apply(piece, b) }
+        }
+    }
+
+    private func apply(_ piece: String, _ body: CGFloat) {
+        plannedAt[piece] = Date()
+        withAnimation(Self.motion) { planned[piece] = body }
     }
 }
 
@@ -257,27 +361,25 @@ private struct LogBody: View {
     @Environment(AppModel.self) private var model
     let session: AgentSession
     var preview: FurnitureSource?
+    /// The lines need more room than the body has (snapshots fade the top edge then).
+    var overflows = false
 
     @State private var following = true
     @State private var unseen = 0
     @State private var jump = 0
+    @State private var fade = LogEdgeFade()
 
     var body: some View {
-        let lines = events
+        let lines = LogsPiece.events(session, model: model, preview: preview)
         if lines.isEmpty {
             LogEmptyNote(text: session.state.isRunning ? "Waiting for the first step…" : "No activity since Silicon Mode began.")
         } else if HUDRender.isSnapshot {
             flat(lines)
         } else {
-            LogTextView(events: lines, following: $following, unseen: $unseen, jump: jump)
-                // A soft scroll edge under the tab strip; the bottom corners follow the panel's.
-                .mask {
-                    VStack(spacing: 0) {
-                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 10)
-                        UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
-                                               bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous)
-                    }
-                }
+            LogTextView(events: lines, following: $following, unseen: $unseen, jump: jump, fade: fade)
+                // Soft scroll edges where text is scrolled out of view; the bottom corners follow
+                // the panel's.
+                .mask { LogEdgeMask(fade: fade) }
                 .overlay(alignment: .bottom) {
                     if !following && unseen > 0 {
                         latestButton
@@ -287,15 +389,6 @@ private struct LogBody: View {
                 }
                 .animation(Theme.Motion.moderate, value: !following && unseen > 0)
         }
-    }
-
-    /// Live: the log book (read `logRevision` first, which is what this view observes); the
-    /// session's recent events until the book has any. Previews: the session's events.
-    private var events: [AgentEvent] {
-        if preview != nil { return session.recentEvents }
-        _ = model.logRevision
-        let logged = model.logBook.events(for: session.id)
-        return logged.isEmpty ? session.recentEvents : logged
     }
 
     private var latestButton: some View {
@@ -310,18 +403,21 @@ private struct LogBody: View {
         .accessibilityLabel("Jump to the latest lines")
     }
 
-    /// Snapshots can't render the text view: the last lines, bottom-aligned, faded at the top.
+    /// Snapshots can't render the text view: the last lines, top-aligned while they fit (like the
+    /// text view), else bottom-aligned with the top faded.
     private func flat(_ lines: [AgentEvent]) -> some View {
         VStack(alignment: .leading, spacing: LogLineRow.spacing) {
             ForEach(lines.suffix(40)) { LogLineRow(event: $0) }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, LogsPiece.bodyPadding / 2)
-        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottomLeading)
+        .padding(.horizontal, LogMeasure.insetX)
+        .padding(.vertical, LogMeasure.insetY)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity,
+               alignment: overflows ? .bottomLeading : .topLeading)
         .clipped()
         .mask {
             VStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 24)
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                    .frame(height: overflows ? LogEdgeFade.topMax : 0)
                 Color.black
             }
         }
@@ -430,8 +526,22 @@ private struct LogLabelStyle: LabelStyle {
 /// can be set in SF Mono. Descriptions ("Ran: Look for crash reports") stay in SF Pro.
 enum LogCode {
     static func text(_ e: AgentEvent) -> Text {
-        guard e.kind == .tool || e.kind == .permission, let s = split(e.text) else { return Text(e.text) }
+        let body = display(e)
+        guard e.kind == .tool || e.kind == .permission, let s = split(body) else { return Text(body) }
         return Text("\(Text(s.lead))\(Text(s.code).font(.callout.monospaced()))\(Text(s.tail))")
+    }
+
+    /// The line as the panel shows it: clipped on a word; an error without the "✗" its symbol
+    /// already says, or the tool-output tags ("<tool_use_error>") it was quoted with.
+    static func display(_ e: AgentEvent) -> String {
+        var t = e.text
+        if e.kind == .error {
+            for mark in ["✗ ", "✕ ", "✘ "] where t.hasPrefix(mark) { t.removeFirst(mark.count) }
+            if t.contains("<") {
+                t = t.replacingOccurrences(of: #"</?[a-z]+(?:[_-][a-z]+)+>"#, with: " ", options: .regularExpression)
+            }
+        }
+        return EventText.clip(t, max: 280)
     }
 
     private static let runLeads = ["Wants to run: ", "Ran: ", "Ran ", "Running ", "Run: ", "Run ", "$ "]
