@@ -314,7 +314,7 @@ struct SettingsDebugPane: View {
         note = nil
         m.sounds.preview(panicSoundID: m.settings.panicSoundID, volume: m.settings.panicVolume)
         guard m.settings.panicEnabled else { note = "Panic is turned off under Panic. You heard the sound preview only."; return }
-        guard m.counts.running > 0 else {
+        guard m.runningAgents > 0 else {
             note = "Panic only fires while agents are running. Start an agent, then test again. (Sound preview played.)"
             return
         }
@@ -348,7 +348,7 @@ struct SettingsDebugPane: View {
         if !model.settings.autoEnterEnabled { return "Automatic entry is off (Silicon Mode → Enter automatically)." }
         if model.autoPausedUntil != nil { return "Auto-entry is paused. Resume it under Silicon Mode." }
         if !model.armed { return "Auto-entry is re-arming: the lid has to stay up for the re-arm time first." }
-        if model.settings.requireAgentsRunning && model.counts.running == 0 {
+        if model.settings.requireAgentsRunning && model.runningAgents == 0 {
             return "No agents are running, and \u{201C}Only while agents are running\u{201D} is on."
         }
         return "The countdown didn't start. The angle may not have settled yet. Try again."

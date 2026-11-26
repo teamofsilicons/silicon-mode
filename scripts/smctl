@@ -6,6 +6,19 @@
 #   scripts/smctl enter | cancel | turnoff | unlock=123456 | unlockui | setpin=123456
 #   scripts/smctl face=orbit | stats | menubar | onboarding | settings | refresh
 #   scripts/smctl setting=countdownSeconds:3
+#   scripts/smctl demo=question | demo=permission | demo=off
+#                                 # a made-up agent waiting on a question (demo-q1) or a permission
+#                                 # (demo-p1); UI only: never synced, never in usage, never counted
+#                                 # for auto-entry or panic. Its question sorts first (dated just
+#                                 # before the oldest real one); answered, it works a few seconds,
+#                                 # then finishes, and stays listed until demo=off.
+#   scripts/smctl 'answer=o0'     # while a demo agent is shown, its question (never a real one);
+#                                 # otherwise the oldest answerable question. 'answer=o0|some text'
+#                                 # adds a reply; 'answer=|text' sends a reply only, and only to a
+#                                 # question with a reply field
+#   scripts/smctl 'answer=demo-p1:allow'   # answer=<questionID>:<optionID>[|text]: that question
+#                                 # (an unknown option, or a bare reply to a permission, is refused,
+#                                 # never sent; see lastAnswer and answerErrors in the state)
 #   scripts/smctl state           # print the current state (dump + read)
 set -euo pipefail
 STATE="$HOME/Library/Application Support/Silicon Mode/debug-state.json"

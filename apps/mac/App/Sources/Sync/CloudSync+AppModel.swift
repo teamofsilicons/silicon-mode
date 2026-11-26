@@ -29,7 +29,8 @@ final class AppModelSyncHost: SyncHost {
             siliconAngle: m.siliconModeAngle,
             caffeinated: m.caffeinator.isActive,
             face: m.settings.faceID,
-            sessions: m.sessions
+            // The hub's agents only (questions come with them): QA demo agents are never synced.
+            sessions: m.hubSnapshot.sessions
         )
     }
 
