@@ -54,7 +54,8 @@
    requires ≥1 app for non-trusted interfaces and Cells needs a linked app for user sessions, so a draft
    app `silicon-mode` exists. Listing on interfaces.teamofsilicons.com must be done by c:shubham in the
    Developer site (no CLI; Silicons can't). Request `trusted` later to drop the app.
-2. **Code hosting**: this repo is local only (git, many commits). Say where it should live
-   (e.g. a private `teamofsilicons/silicon-mode`) and I'll push it.
+2. **Code hosting**: public at https://github.com/teamofsilicons/silicon-mode. Before publishing, the
+   history was scanned (gitleaks + exact match against every stored secret: none present) and local
+   machine details (paths, account ids, IP) were scrubbed from all commits.
 3. **Secrets** are in `~/.silicon-mode-secrets/` (0600): app secret, cell secret key, DB password
    (rotated once tonight because it appeared in a log).

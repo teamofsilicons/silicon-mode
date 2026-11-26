@@ -8,7 +8,9 @@ screen → Silicon Mode blooms in with a face (Bounce, Orbit, Chomp, Clock, Desk
 tail logs and questions you can answer. For the first minute you can turn it off freely; after that
 it's locked behind your 6-digit PIN or Touch ID. Close the lid while agents run and it panics.
 
-Spec: [`understanding.md`](understanding.md).
+Download (notarized, macOS 26+): **https://mode.teamofsilicons.com/download** · Web app: https://mode.teamofsilicons.com/app
+
+Spec: [`understanding.md`](understanding.md). Status and known gaps: [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Repo layout
 
