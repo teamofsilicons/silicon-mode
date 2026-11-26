@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# smctl — drive a running (debug) Silicon Mode app from the shell.
+#
+#   scripts/smctl angle=60        # simulate the lid at 60°
+#   scripts/smctl angle=off       # back to the real sensor
+#   scripts/smctl enter | cancel | turnoff | unlock=123456 | unlockui | setpin=123456
+#   scripts/smctl face=orbit | stats | menubar | onboarding | settings | refresh
+#   scripts/smctl setting=countdownSeconds:3
+#   scripts/smctl state           # print the current state (dump + read)
+set -euo pipefail
+STATE="$HOME/Library/Application Support/Silicon Mode/debug-state.json"
+cmd="${1:-state}"
+post() {
+  swift -e "import Foundation; DistributedNotificationCenter.default().postNotificationName(.init(\"ai.tos.mode.debug\"), object: \"$1\", userInfo: nil, deliverImmediately: true)" 2>/dev/null
+}
+if [[ "$cmd" == "state" ]]; then
+  post dump
+  sleep 0.4
+  cat "$STATE"
+else
+  post "$cmd"
+fi

@@ -9,7 +9,8 @@ import SiliconModeKit
 ///   ~/Library/Application\ Support/Silicon\ Mode/bin/silicon-mode-hook is the agent hook; for
 ///   debugging use distributed notifications:
 ///   swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("ai.tos.mode.debug"), object: "angle=60", deliverImmediately: true)'
-/// Commands (object string): angle=<deg> | angle=off | enter | cancel | turnoff | unlock=<pin> | face=<id> | dump
+/// Commands (object string): angle=<deg> | angle=off | enter | cancel | turnoff | unlock=<pin> | face=<id> |
+/// unlockui | setpin=<pin> | stats | menubar | onboarding | settings | setting=<key>:<json> | refresh | dump
 /// `dump` writes the current state to ~/Library/Application Support/Silicon Mode/debug-state.json.
 @MainActor
 enum DebugCommands {
@@ -46,6 +47,23 @@ enum DebugCommands {
         case "face": m.settings.faceID = val
         case "unlockui": m.unlockPresented = true
         case "quit-unlocked": if !m.isActive { NSApp.terminate(nil) }
+        case "setpin": try? m.pinVault.set(pin: val)
+        case "stats": StatsWindow.present()
+        case "menubar": MenuBarController.shared.toggle()
+        case "onboarding": OnboardingPresenter.present()
+        case "settings":
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        case "setting":
+            // setting=<key>:<json value>, e.g. setting=countdownSeconds:3
+            let kv = val.split(separator: ":", maxSplits: 1).map(String.init)
+            if kv.count == 2, var dict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(m.settings))) as? [String: Any],
+               let v = try? JSONSerialization.jsonObject(with: Data(kv[1].utf8), options: .fragmentsAllowed) {
+                dict[kv[0]] = v
+                if let d = try? JSONSerialization.data(withJSONObject: dict),
+                   let s = try? JSONDecoder().decode(ModeSettings.self, from: d) { m.settings = s }
+            }
+        case "refresh": Task { await m.refreshAgents() }
         default: break
         }
         dump()
