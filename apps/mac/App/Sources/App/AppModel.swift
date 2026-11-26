@@ -52,11 +52,21 @@ final class AppModel {
             NSLog("SiliconMode: helper install failed: \(error)")
         }
     }
+    /// The agents as the hub reported them: real ones only. Everything that acts on agents reads
+    /// this: the mode engine (auto-entry, panic, "only while agents run"), the usage history and
+    /// cloud sync.
+    private(set) var hubSnapshot: AgentHub.Snapshot = .empty
+    /// The agents the UI shows (menu bar, overlay furniture, faces, Settings): `hubSnapshot` plus any
+    /// QA demo agents (`debugDemoSessions`), in the hub's order. Never feed it to the engine, usage
+    /// or sync.
     private(set) var snapshot: AgentHub.Snapshot = .empty
-    /// Every session the providers report (menu bar, phone/web sync, auto-entry).
+    /// Every session shown (menu bar, furniture, faces). Includes QA demo agents.
     var sessions: [AgentSession] { snapshot.sessions }
     var counts: AgentCounts { snapshot.counts }
+    /// Questions shown, oldest first (QA demo questions first of all).
     var pendingQuestions: [AgentQuestion] { snapshot.pendingQuestions }
+    /// Agents running as the mode engine counts them: real agents only.
+    var runningAgents: Int { hubSnapshot.counts.running }
     /// Last error shown after a failed answer, keyed by question id.
     var answerErrors: [String: String] = [:]
 
@@ -208,7 +218,7 @@ final class AppModel {
         let reading = simulatedAngle ?? lid.angle
         publishAngle(reading, now: now)
 
-        let events = engine.update(now: now, angle: reading, agentsRunning: counts.running)
+        let events = engine.update(now: now, angle: reading, agentsRunning: runningAgents)
         // Publish the new state first: effects (hold policy, cloud status, overlay) read it.
         syncFromEngine(now: now)
         apply(events)
@@ -331,7 +341,7 @@ final class AppModel {
 
     private func handle(_ c: ModeEngine.Command) {
         let now = MonotonicClock.now()
-        let events = engine.handle(c, now: now, agentsRunning: counts.running)
+        let events = engine.handle(c, now: now, agentsRunning: runningAgents)
         syncFromEngine(now: now)
         apply(events)
     }
@@ -447,27 +457,32 @@ final class AppModel {
     }
 
     func refreshAgents() async {
-        var snap = await hub.refresh()
-        if !debugDemoSessions.isEmpty {
-            snap.sessions += debugDemoSessions
-            snap.counts = AgentCounts(snap.sessions)
-        }
+        let snap = await hub.refresh()
         // A caller resuming late must not apply an older snapshot over a newer one. Snapshot
         // equality ignores `takenAt`, so an unchanged scan isn't stored: track the newest applied
         // time separately, or a late older scan could replace content a newer equal scan confirmed.
         guard snap.takenAt >= latestTakenAt else { return }
         latestTakenAt = snap.takenAt
+        // Usage and sync get the hub's snapshot as it is: QA demo agents only join the shown one.
         usage.sample(running: snap.sessions.filter { $0.state.isRunning }.map { (id: $0.id, provider: $0.provider) },
                      siliconModeActive: isActive)
-        if snap != snapshot {
-            let hadQuestions = Set(snapshot.pendingQuestions.map(\.id))
-            snapshot = snap
-            let newQuestions = snap.pendingQuestions.filter { !hadQuestions.contains($0.id) }
-            if !newQuestions.isEmpty, settings.uiSoundsEnabled, !isPanicking { sounds.play(.question) }
-            republishAgents()
-            avatars.prefetch(snap.sessions.compactMap(\.identity))
-            cloud.agentsChanged()
-        }
+        guard snap != hubSnapshot else { return }
+        hubSnapshot = snap
+        showAgents()
+        cloud.agentsChanged()
+    }
+
+    /// Rebuilds the shown snapshot (`hubSnapshot` plus QA demo agents) and what follows from it:
+    /// the question sound, `modeAgents` / `faceSessions`, avatar prefetch.
+    private func showAgents() {
+        let shown = DebugDemo.shown(hubSnapshot, demo: debugDemoSessions)
+        guard shown != snapshot else { return }
+        let hadQuestions = Set(snapshot.pendingQuestions.map(\.id))
+        snapshot = shown
+        let newQuestions = shown.pendingQuestions.filter { !hadQuestions.contains($0.id) }
+        if !newQuestions.isEmpty, settings.uiSoundsEnabled, !isPanicking { sounds.play(.question) }
+        republishAgents()
+        avatars.prefetch(shown.sessions.compactMap(\.identity))
     }
 
     /// Recomputes `modeAgents` / `faceSessions` (and feeds the log book) from the snapshot.
@@ -487,19 +502,32 @@ final class AppModel {
         if faceSessions != shown { faceSessions = shown }
     }
 
-    /// QA only (`--debug-control`, `demo=question|permission|off`): demo agents merged into every
-    /// scan, so question cards (and their reply field) can be exercised live without a real agent.
+    /// QA only (`--debug-control`, `demo=question|permission|off`): demo agents shown with the real
+    /// ones, so question cards (and their reply field) can be exercised live without a real agent.
+    /// UI only: they join `snapshot`, never `hubSnapshot`, so the mode engine, usage history and
+    /// cloud sync never see them.
     private(set) var debugDemoSessions: [AgentSession] = []
 
     func setDebugDemo(_ kind: String) {
         debugDemoSessions = DebugDemo.sessions(kind)
-        Task { await refreshAgents() }
+        showAgents()
+    }
+
+    /// The question belongs to a QA demo agent.
+    func isDebugDemo(_ q: AgentQuestion) -> Bool {
+        debugDemoSessions.contains { $0.id == q.sessionID }
     }
 
     func answer(_ q: AgentQuestion, optionIDs: [String] = [], text: String? = nil, source: AgentAnswer.Source) {
-        if debugDemoSessions.contains(where: { $0.id == q.sessionID }) {
-            debugDemoSessions.removeAll { $0.id == q.sessionID }
-            Task { await refreshAgents() }
+        if isDebugDemo(q) {
+            // Like a real agent, the demo picks the answer up a moment later and carries on working
+            // (`demo=off` ends it).
+            answerErrors[q.id] = nil
+            Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                debugDemoSessions = debugDemoSessions.map { DebugDemo.answered($0, q, optionIDs: optionIDs, text: text) }
+                showAgents()
+            }
             return
         }
         let a = AgentAnswer(questionID: q.id, optionIDs: optionIDs, text: text, source: source)
