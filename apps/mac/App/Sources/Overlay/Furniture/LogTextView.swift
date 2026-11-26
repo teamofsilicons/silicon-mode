@@ -413,10 +413,15 @@ struct LogEdgeMask: View {
     }
 }
 
-/// The height a log body needs to show its newest lines in full: each paragraph laid out once,
-/// off screen, exactly as `LogTextView` sets it (TextKit 1, same attributes, same width), and
-/// cached per line. The furniture plan sizes the logs piece from this (data, never the view on
-/// screen), so a log can't feed back into its own layout.
+/// The height a log body needs to show its newest lines in full, laid out off screen exactly as
+/// `LogTextView` sets them (TextKit 1, same attributes, same width). The furniture plan sizes the
+/// logs piece from this (data, never the view on screen), so a log can't feed back into its own
+/// layout.
+///
+/// Lines that fit under the limit are laid out together, as one block: the gap between two
+/// paragraphs depends on the fonts that meet there, so a sum of separately measured lines drifts
+/// (by about a point a line) and the panel would fall short of its last line. Each line's own
+/// height (cached) only tells, cheaply, when a log is taller than the limit.
 @MainActor
 enum LogMeasure {
     /// The text view's insets.
@@ -431,6 +436,8 @@ enum LogMeasure {
     }
 
     private static var cache: [String: Entry] = [:]
+    /// Whole-block heights by the lines and width they were measured for.
+    private static var blocks: [Int: CGFloat] = [:]
     private static let storage = NSTextStorage()
     private static let container: NSTextContainer = {
         let c = NSTextContainer(size: NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude))
@@ -445,7 +452,8 @@ enum LogMeasure {
         return l
     }()
 
-    /// What a second paragraph adds besides its own lines (paragraph spacing and line gap).
+    /// The least a second paragraph adds besides its own lines (paragraph spacing and line gap);
+    /// with some fonts it adds a little more.
     private static let join: CGFloat = {
         let e = AgentEvent(id: "m", at: Date(timeIntervalSince1970: 0), kind: .tool, text: "Read a")
         let one = measure(LogParagraph.make(e, first: true), width: 400)
@@ -459,12 +467,24 @@ enum LogMeasure {
         guard !events.isEmpty else { return 0 }
         let w = max(40, width - 2 * insetX)
         if cache.count > 6000 { cache.removeAll(keepingCapacity: true) }
+        // A lower bound, line by line: past the limit, the log is at least that tall.
         var h = 2 * insetY
         for (i, e) in events.reversed().enumerated() {
             h += height(e, width: w) + (i > 0 ? join : 0)
             if h >= limit { return limit }
         }
-        return ceil(h)
+        // It all fits: lay the lines out together for the exact height.
+        var key = Hasher()
+        key.combine(w)
+        for e in events { key.combine(e.id); key.combine(e.kind.rawValue); key.combine(e.text) }
+        let k = key.finalize()
+        if let b = blocks[k] { return min(limit, b) }
+        let all = NSMutableAttributedString()
+        for (i, e) in events.enumerated() { all.append(LogParagraph.make(e, first: i == 0)) }
+        let b = ceil(measure(all, width: w) + 2 * insetY)
+        if blocks.count > 256 { blocks.removeAll(keepingCapacity: true) }
+        blocks[k] = b
+        return min(limit, b)
     }
 
     private static func height(_ e: AgentEvent, width: CGFloat) -> CGFloat {

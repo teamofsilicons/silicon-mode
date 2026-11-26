@@ -128,9 +128,12 @@ struct LogsPiece: View {
         withAnimation(Theme.Motion.slow) { ui.setLogsMinimized(pieceID, !ui.logsMinimized(pieceID)) }
     }
 
-    /// The lines of the outgoing and the incoming tab cross-fade, quicker than the panel resizes
-    /// (the capsule's morph already says which tab is shown).
-    private static let swap = AnyTransition.opacity.animation(.easeInOut(duration: 0.2))
+    /// The outgoing tab's lines fade out quickly and the incoming ones fade in just after, so the
+    /// two barely overlap; both well within the panel's resize (the capsule's morph already says
+    /// which tab is shown).
+    private static let swap = AnyTransition.asymmetric(
+        insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.06)),
+        removal: .opacity.animation(.easeIn(duration: 0.1)))
 
     // MARK: Size
 
