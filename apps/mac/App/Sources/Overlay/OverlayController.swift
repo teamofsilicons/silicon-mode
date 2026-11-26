@@ -92,6 +92,8 @@ final class OverlayController {
     private var warmStale = false
     /// A furniture/chrome layer has been laid out once in this process.
     private var topWarmed = false
+    /// The audio engine has been started once since launch or wake (see `SoundPlayer.warmUp`).
+    private var audioWarmed = false
     /// Screens the prewarmed windows were laid out for.
     private var warmScreens: [CGDirectDisplayID: NSRect] = [:]
 
@@ -417,6 +419,7 @@ final class OverlayController {
 
     /// After wake: rebuild the prewarmed windows (displays may have changed while asleep).
     func systemDidWake() {
+        audioWarmed = false
         invalidatePrewarm(countdownToo: true)
     }
 
@@ -490,6 +493,12 @@ final class OverlayController {
                 layoutCountdown()
                 countdownPanel?.buildLayers()
                 countdownButtonPanel?.buildLayers()
+            }))
+        }
+        if !audioWarmed {
+            steps.append(("audio engine", { [unowned self] in
+                audioWarmed = true
+                model.sounds.warmUp()
             }))
         }
         if !shadersWarmed {

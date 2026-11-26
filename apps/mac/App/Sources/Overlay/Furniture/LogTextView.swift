@@ -251,7 +251,7 @@ enum LogParagraph {
         let base: [NSAttributedString.Key: Any] = [.paragraphStyle: style, .font: textFont]
         if !first { s.append(NSAttributedString(string: "\n", attributes: base)) }
         s.append(NSAttributedString(string: HUDFormat.clock(e.at) + "\t", attributes: [
-            .paragraphStyle: style, .font: timeFont, .foregroundColor: NSColor.tertiaryLabelColor,
+            .paragraphStyle: style, .font: timeFont, .foregroundColor: LogInk.time,
         ]))
         let icon = NSTextAttachment()
         if let img = symbol(LogLineRow.symbol(e.kind, e.text), color: iconColor(e.kind)) {
@@ -281,9 +281,9 @@ enum LogParagraph {
         switch k {
         case .permission, .question: .systemOrange
         case .error: .systemRed
-        case .assistant, .user: .labelColor
-        case .tool: .secondaryLabelColor
-        case .thinking, .status, .toolResult: .tertiaryLabelColor
+        case .assistant, .user: LogInk.primary
+        case .tool: LogInk.secondary
+        case .thinking, .status, .toolResult: LogInk.quiet
         }
     }
 
@@ -292,8 +292,8 @@ enum LogParagraph {
         case .permission, .question: .systemOrange
         case .error: .systemRed
         case .user: .systemBlue
-        case .assistant, .tool: .secondaryLabelColor
-        case .thinking, .status, .toolResult: .tertiaryLabelColor
+        case .assistant, .tool: LogInk.icon
+        case .thinking, .status, .toolResult: LogInk.quiet
         }
     }
 
@@ -306,4 +306,14 @@ enum LogParagraph {
         symbols[key] = img
         return img
     }
+}
+
+/// Log ink on the dimmed glass panel. The system's tertiary label (25% white) vanishes over a busy
+/// face; these keep the same hierarchy (text, tools, plan and status, times) with every level legible.
+enum LogInk {
+    static let primary = NSColor(white: 1, alpha: 0.92)
+    static let secondary = NSColor(white: 1, alpha: 0.72)
+    static let quiet = NSColor(white: 1, alpha: 0.52)
+    static let icon = NSColor(white: 1, alpha: 0.6)
+    static let time = NSColor(white: 1, alpha: 0.46)
 }

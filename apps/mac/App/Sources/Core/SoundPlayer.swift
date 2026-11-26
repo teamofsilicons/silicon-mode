@@ -138,6 +138,15 @@ final class SoundPlayer {
         for name in Self.bundledSoundNames { _ = buffer(named: name) }
     }
 
+    /// Build the graph and start the output once, silently, while nothing is on screen. The first start
+    /// of an engine (graph, IO unit, output device) holds the main thread for 150–350 ms; paying it here
+    /// keeps it off the countdown's and the entry's first frames. The idle check stops the engine again a
+    /// few seconds later; restarting a built engine on the same device is quick.
+    func warmUp() {
+        guard !offline, panicMode == .off else { return }
+        _ = ensureRunning()
+    }
+
     // MARK: Panic
 
     /// Start (or keep) the looping alarm. Unknown ids fall back to the first panic sound, so it always sounds.

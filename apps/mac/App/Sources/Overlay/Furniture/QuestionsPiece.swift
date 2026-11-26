@@ -1,7 +1,8 @@
 import SwiftUI
 import SiliconModeKit
 
-/// The questions piece: answerable question cards (or a calm "All quiet." chip). Shows as many
+/// The questions piece: answerable question cards, and nothing at all while none wait (like
+/// Notification Center, it has no empty state: the agents piece already says who's working). Shows as many
 /// cards as fit its room (measured, via ViewThatFits) and folds the rest into "+N more waiting";
 /// with no room for even one card it shows a compact "N waiting" note instead of overflowing.
 struct QuestionsPiece: View {
@@ -13,7 +14,6 @@ struct QuestionsPiece: View {
 
     static let maxCards = 4
     static let headerHeight: CGFloat = 20
-    static let quietHeight: CGFloat = 32
     static let compactHeight: CGFloat = headerHeight + 12 + 34
     static let moreHeight: CGFloat = 32
 
@@ -31,7 +31,7 @@ struct QuestionsPiece: View {
 
     /// Every card (up to `maxCards`, plus the "+N more" stack); at least the compact note.
     static func demand(_ qs: [AgentQuestion], hasAgents: Bool) -> FurnitureDemand {
-        if qs.isEmpty { return .fixed(hasAgents ? quietHeight : 0) }
+        if qs.isEmpty { return .none }
         let shown = qs.prefix(maxCards)
         let cards = shown.reduce(CGFloat(0)) { $0 + estimatedCardHeight($1) } + 12 * CGFloat(shown.count - 1)
         let more: CGFloat = qs.count > maxCards ? 12 + moreHeight : 0
@@ -66,12 +66,7 @@ struct QuestionStack: View {
     var body: some View {
         let most = min(questions.count, QuestionsPiece.maxCards)
         VStack(alignment: leading ? .leading : .trailing, spacing: 12) {
-            if questions.isEmpty {
-                if !sessions.isEmpty {
-                    quiet
-                        .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: leading ? .topLeading : .topTrailing)))
-                }
-            } else {
+            if !questions.isEmpty {
                 HStack {
                     if !leading { Spacer(minLength: 0) }
                     HUDSectionLabel(title: "Waiting on You", count: questions.count, symbol: "bell.badge.fill", tint: HUDTint.needsYou)
@@ -127,28 +122,6 @@ struct QuestionStack: View {
         .padding(.horizontal, 14)
         .frame(height: 34)
         .hudChip(tint: HUDTint.needsYou.opacity(0.14))
-    }
-
-    private var quiet: some View {
-        let c = AgentCounts(sessions)
-        let detail: String = {
-            if c.working > 0 { return "\(c.working) \(c.working == 1 ? "agent" : "agents") working." }
-            if c.total == 0 { return "No agents running." }
-            if c.finished > 0 { return "\(c.finished) finished." }
-            return "Nothing needs you."
-        }()
-        return Label {
-            Text("\(Text("All quiet.").foregroundStyle(.primary)) \(Text(detail).foregroundStyle(.secondary))")
-        } icon: {
-            Image(systemName: "checkmark.circle.fill")
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(HUDTint.finished)
-        }
-        .font(.subheadline.weight(.medium))
-        .lineLimit(1)
-        .padding(.horizontal, 12)
-        .frame(height: QuestionsPiece.quietHeight)
-        .hudChip()
     }
 
     /// Questions that didn't fit: a quiet capsule, like a collapsed notification stack.

@@ -42,7 +42,7 @@ enum HUDSnapshots {
             layer("furniture.all", HUDSample.source(furniture: HUDSample.everyPiece)),
             piece("furniture.agents", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 760)),
             piece("furniture.agents.silicon", .agents, .topLeading, HUDSample.siliconSessions(), size: CGSize(width: 760, height: 420)),
-            // Trailing slot: rows align right and chips wider than the slot run toward the centre.
+            // Trailing slot: the panel and the pill align right.
             piece("furniture.agents.trailing", .agents, .topTrailing, HUDSample.sessions(), size: CGSize(width: 760, height: 760)),
             piece("furniture.agents.collapsed", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 260)) {
                 $0.agentsCollapsed = true

@@ -1,20 +1,18 @@
 import SwiftUI
 import SiliconModeKit
 
-/// The agents piece: state chips ("2 agents need you · 3 working · 1 finished") over the list of
-/// the agents Silicon Mode shows: running ones plus those that finished since it was turned on,
-/// never idle ones (`AppModel.modeAgents`). Rows read like Notification Center's; the list
-/// collapses into a glass pill of avatars.
+/// The agents piece: the agents Silicon Mode shows (running ones plus those that finished since it
+/// was turned on, never idle ones; `AppModel.modeAgents`) as one element. Collapsed it is a glass
+/// pill of avatars and a one-line summary ("2 need you · 3 working"); expanded, a panel of rows
+/// like Notification Center's under the same summary. The pill and the panel morph into each other.
 struct AgentsPiece: View {
     @Environment(AppModel.self) private var model
     let budget: CGFloat
     let width: CGFloat
-    /// Leading slots align left; trailing ones align right, so chips wider than the slot run
-    /// toward the middle of the screen, never off its edge.
+    /// Leading slots align left; trailing ones align right.
     var leading = true
     var preview: FurnitureSource?
 
-    static let chipsHeight: CGFloat = 30
     static let pillHeight: CGFloat = 36
     static let maxRows = 8
 
@@ -23,19 +21,14 @@ struct AgentsPiece: View {
     var body: some View {
         let sessions = preview?.sortedSessions ?? model.modeAgents
         let collapsed = preview?.agentsCollapsed ?? ui.agentsCollapsed
-        let listBudget = budget - Self.chipsHeight - FurnitureMetrics.spacing
-        VStack(alignment: leading ? .leading : .trailing, spacing: FurnitureMetrics.spacing) {
-            // Chips keep their natural width (they may run past the list's edge toward the
-            // middle of the screen, never wrap).
-            AgentStateChips(counts: AgentCounts(sessions), leading: leading)
-                .fixedSize()
-            if !sessions.isEmpty {
-                let fits = AgentsPieceList.maxRows(for: listBudget, count: sessions.count)
-                if (collapsed || fits == 0) && listBudget >= Self.pillHeight {
-                    AgentsPieceList(sessions: sessions, collapsed: true, maxRows: 0, width: width, preview: preview != nil) { toggle() }
-                } else if fits > 0 {
-                    AgentsPieceList(sessions: sessions, collapsed: false, maxRows: fits, width: width, preview: preview != nil) { toggle() }
-                }
+        let fits = AgentsPieceList.maxRows(for: budget, count: sessions.count)
+        Group {
+            if sessions.isEmpty {
+                AgentsEmptyPill()
+                    .transition(.opacity)
+            } else {
+                AgentsPieceList(sessions: sessions, collapsed: collapsed || fits == 0, maxRows: fits,
+                                width: width, preview: preview != nil) { toggle() }
             }
         }
         .frame(width: width, alignment: leading ? .leading : .trailing)
@@ -46,97 +39,70 @@ struct AgentsPiece: View {
         ui.agentsCollapsed.toggle()
     }
 
-    /// Chips, then the list with every agent (up to `maxRows`) or the pill.
+    /// The pill, or the panel with every agent (up to `maxRows`).
     static func demand(count: Int, collapsed: Bool) -> FurnitureDemand {
-        guard count > 0 else { return .fixed(chipsHeight) }
-        let below = collapsed ? pillHeight : AgentsPieceList.height(rows: min(count, maxRows), more: count > maxRows)
-        return FurnitureDemand(min: chipsHeight, ideal: chipsHeight + FurnitureMetrics.spacing + below)
+        guard count > 0, !collapsed else { return .fixed(pillHeight) }
+        return FurnitureDemand(min: pillHeight, ideal: AgentsPieceList.height(rows: min(count, maxRows), more: count > maxRows))
     }
 }
 
-// MARK: - Chips
+// MARK: - Summary
 
-/// "3 agents need you · 2 working · 4 finished · 1 failed" as glass capsules with the state's
-/// symbol and rolling numbers. No idle chip: Silicon Mode never lists idle agents.
-struct AgentStateChips: View {
-    let counts: AgentCounts
-    var leading = true
-    @Namespace private var ns
-
-    private struct Chip: Identifiable {
-        let state: AgentState
-        let n: Int
-        var id: AgentState { state }
+/// "2 need you · 3 working · 1 finished · 1 failed": the most urgent state first, in its colour
+/// when it needs you or failed; the rest secondary. No idle part: Silicon Mode never lists idle agents.
+enum AgentSummary {
+    static func parts(_ c: AgentCounts) -> [(state: AgentState, text: String)] {
+        var out: [(AgentState, String)] = []
+        if c.needsYou > 0 { out.append((.needsYou, "\(c.needsYou) need\(c.needsYou == 1 ? "s" : "") you")) }
+        if c.working > 0 { out.append((.working, "\(c.working) working")) }
+        if c.error > 0 { out.append((.error, "\(c.error) failed")) }
+        if c.finished > 0 { out.append((.finished, "\(c.finished) finished")) }
+        return out
     }
 
-    private var chips: [Chip] {
-        [Chip(state: .needsYou, n: counts.needsYou), Chip(state: .working, n: counts.working),
-         Chip(state: .finished, n: counts.finished), Chip(state: .error, n: counts.error)].filter { $0.n > 0 }
+    static func text(_ c: AgentCounts) -> Text {
+        let ps = parts(c)
+        guard let first = ps.first else { return Text("No agents running").foregroundStyle(.secondary) }
+        let lead: Text = {
+            switch first.state {
+            case .needsYou: Text(first.text).foregroundStyle(HUDTint.needsYou)
+            case .error: Text(first.text).foregroundStyle(HUDTint.error)
+            default: Text(first.text).foregroundStyle(.primary)
+            }
+        }()
+        return ps.dropFirst().reduce(lead) { acc, p in
+            Text("\(acc)\(Text(" · \(p.text)").foregroundStyle(.secondary))")
+        }
     }
 
+    static func plain(_ c: AgentCounts) -> String {
+        let ps = parts(c)
+        return ps.isEmpty ? "No agents running" : ps.map(\.text).joined(separator: ", ")
+    }
+}
+
+/// No agent to show: a quiet pill (nothing to expand).
+private struct AgentsEmptyPill: View {
     var body: some View {
-        HStack(spacing: 8) {
-            if chips.isEmpty {
-                Label {
-                    Text("No agents running")
-                        .foregroundStyle(.secondary)
-                } icon: {
-                    Image(systemName: "moon.zzz.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.subheadline.weight(.medium))
-                .padding(.horizontal, 12)
-                .frame(height: AgentsPiece.chipsHeight)
-                .hudChip()
-                .glassEffectID("none", in: ns)
-                .transition(.blurReplace)
-            }
-            ForEach(Array(chips.enumerated()), id: \.element.id) { i, chip in
-                chipView(chip, first: i == 0)
-                    .glassEffectID(chip.state.rawValue, in: ns)
-                    .transition(.scale(scale: 0.6, anchor: leading ? .leading : .trailing).combined(with: .opacity))
-            }
+        Label {
+            Text("No agents running")
+                .foregroundStyle(.secondary)
+        } icon: {
+            Image(systemName: "moon.zzz.fill")
+                .foregroundStyle(.secondary)
         }
-        .hudGlassContainer(spacing: 8)
-        .animation(Theme.Motion.expressive, value: chips.map(\.n))
+        .font(.subheadline.weight(.medium))
+        .padding(.horizontal, 14)
+        .frame(height: AgentsPiece.pillHeight)
+        .hudChip()
         .accessibilityElement(children: .combine)
-    }
-
-    private func chipView(_ chip: Chip, first: Bool) -> some View {
-        HStack(spacing: 6) {
-            HUDStateGlyph(state: chip.state, size: 12)
-            HStack(spacing: 4) {
-                Text("\(chip.n)")
-                    .foregroundStyle(.primary)
-                    .monospacedDigit()
-                    .contentTransition(.numericText(value: Double(chip.n)))
-                Text(label(chip, first: first))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.interpolate)
-            }
-            .font(.subheadline.weight(.semibold))
-        }
-        .padding(.leading, 9)
-        .padding(.trailing, 12)
-        .frame(height: AgentsPiece.chipsHeight)
-        .hudChip(tint: chip.state == .needsYou ? HUDTint.needsYou.opacity(0.18) : nil)
-    }
-
-    private func label(_ chip: Chip, first: Bool) -> String {
-        let noun = first ? (chip.n == 1 ? "agent " : "agents ") : ""
-        switch chip.state {
-        case .needsYou: return first ? (chip.n == 1 ? "agent needs you" : "agents need you") : (chip.n == 1 ? "needs you" : "need you")
-        case .working: return noun + "working"
-        case .finished: return noun + "finished"
-        case .error: return first ? (chip.n == 1 ? "agent failed" : "agents failed") : "failed"
-        case .idle: return noun + "idle"
-        }
     }
 }
 
 // MARK: - List
 
-/// The agent list, most urgent first. Collapsing morphs the glass panel into a pill of avatars.
+/// The agent list, most urgent first, under the summary. Collapsing morphs the glass panel into a
+/// pill of avatars carrying the same summary.
 struct AgentsPieceList: View {
     let sessions: [AgentSession]
     let collapsed: Bool
@@ -211,7 +177,15 @@ struct AgentsPieceList: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            HUDSectionLabel(title: "Agents", count: sessions.count)
+            Text("Agents")
+                .font(.headline)
+                .foregroundStyle(.primary)
+            AgentSummary.text(AgentCounts(sessions))
+                .font(.subheadline)
+                .monospacedDigit()
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .contentTransition(.numericText())
             Spacer(minLength: 0)
             HUDCircleButton(symbol: "chevron.up", size: 28, action: onToggle)
                 .help("Collapse the agent list")
@@ -241,10 +215,11 @@ struct AgentsPieceList: View {
                             .zIndex(Double(10 - i))
                     }
                 }
-                Text(sessions.count == 1 ? "1 agent" : "\(sessions.count) agents")
+                AgentSummary.text(AgentCounts(sessions))
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .contentTransition(.numericText())
                 Image(systemName: "chevron.down")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
@@ -256,10 +231,10 @@ struct AgentsPieceList: View {
         }
         .buttonStyle(HUDPressStyle())
         .focusable(false)
-        .hudChip()
+        .hudChip(tint: AgentCounts(sessions).needsYou > 0 ? HUDTint.needsYou.opacity(0.18) : nil)
         .transition(.opacity)
         .help("Show the agent list")
-        .accessibilityLabel("Show agent list")
+        .accessibilityLabel("Show agent list: \(AgentSummary.plain(AgentCounts(sessions)))")
     }
 
     private func moreRow(_ n: Int) -> some View {

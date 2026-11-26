@@ -49,7 +49,6 @@ struct SettingsFurnitureLayout {
     static let bottomTrailingInset = FurnitureMetrics.bottomTrailingInset
 
     // Piece metrics (the silhouettes draw exactly these heights).
-    static let agentChips: CGFloat = 32
     static let agentHeader: CGFloat = 40
     static let agentRow: CGFloat = 66
     static let agentPill: CGFloat = 44
@@ -86,7 +85,7 @@ struct SettingsFurnitureLayout {
     static func height(_ p: FurniturePiece, level: Int) -> CGFloat {
         switch p.kind {
         case .agents:
-            return agentChips + gap + (level == 0 ? agentPill : agentHeader + CGFloat(level) * agentRow + 8)
+            return level == 0 ? agentPill : agentHeader + CGFloat(level) * agentRow + 8
         case .logs:
             return level == 0 ? logStrip : logStrip + 6 + 24 + CGFloat(level) * logLine
         case .questions:
@@ -478,41 +477,29 @@ private struct SilhouetteStatePill: View {
     }
 }
 
-// Agents: state chips, then the list (or the collapsed pill).
+// Agents: one element, the list under its summary (or the collapsed pill).
 private struct AgentsSilhouette: View {
     let width: CGFloat
     let rows: Int
     let leading: Bool
 
     var body: some View {
-        VStack(alignment: leading ? .leading : .trailing, spacing: SettingsFurnitureLayout.gap) {
-            HStack(spacing: 8) {
-                chip(.needsYou, bar: 90)
-                chip(.working, bar: 55)
-                chip(.finished, bar: 55)
-            }
-            .frame(height: SettingsFurnitureLayout.agentChips)
-            if rows == 0 { pill } else { list }
-        }
+        if rows == 0 { pill } else { list }
     }
 
-    private func chip(_ s: AgentState, bar: CGFloat) -> some View {
-        let c = Theme.stateColor(s)
-        return HStack(spacing: 8) {
-            Circle().fill(c).frame(width: 7, height: 7)
-            SilhouetteBar(width: bar, height: 9, opacity: 0.55)
+    /// "2 need you · 3 working": the lead part in its state colour, the rest muted.
+    private var summary: some View {
+        HStack(spacing: 6) {
+            SilhouetteBar(width: 44, height: 7, color: Theme.stateColor(.needsYou), opacity: 0.85)
+            SilhouetteBar(width: 40, height: 7, color: Theme.Night.muted, opacity: 0.6)
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 14)
-        .frame(height: 32)
-        .silhouetteCapsule(tint: c.opacity(s == .needsYou ? 0.2 : 0.1))
     }
 
     private var list: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                SilhouetteBar(width: 58, height: 7, color: Theme.Night.muted, opacity: 0.85)
-                SilhouetteBar(width: 9, height: 7, color: Theme.Night.muted, opacity: 0.6)
+                SilhouetteBar(width: 46, height: 8, opacity: 0.85)
+                summary
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.up")
                     .font(.system(size: 11, weight: .bold))
@@ -551,7 +538,7 @@ private struct AgentsSilhouette: View {
                     AgentAvatarView(provider: a.provider, identity: a.identity, state: a.state, size: 28, showsState: false)
                 }
             }
-            SilhouetteBar(width: 64, height: 9, opacity: 0.55)
+            summary
             Image(systemName: "chevron.down")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Theme.Night.muted)

@@ -106,12 +106,12 @@ struct LogsPiece: View {
     // MARK: Size
 
     /// The strip, plus a body sized from how many lines the longest tab holds (a fixed height per
-    /// line, up to ~42% of the screen). Never from measured content: a lazy stack re-estimates its
+    /// line, up to 30% of the screen, so it stays clear of the face). Never from measured content: a lazy stack re-estimates its
     /// height as it scrolls, and sizing the panel from that re-lays it out forever. Sizing by the
     /// longest tab also keeps the panel still while switching tabs.
     static func demand(minimized: Bool, lines: Int, screenHeight: CGFloat) -> FurnitureDemand {
         if minimized { return .fixed(stripHeight) }
-        let cap = max(minBody, screenHeight * 0.42 - stripHeight)
+        let cap = max(minBody, screenHeight * 0.3 - stripHeight)
         let body = min(cap, estimatedBody(lines: lines))
         return FurnitureDemand(min: stripHeight, ideal: stripHeight + body)
     }
@@ -220,10 +220,10 @@ struct LogTab: View {
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// About 18 characters.
+    /// At most about 32 characters; the strip truncates further when tabs share it.
     static func short(_ title: String) -> String {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.count > 18 ? String(t.prefix(17)).trimmingCharacters(in: .whitespaces) + "…" : t
+        return t.count > 32 ? String(t.prefix(31)).trimmingCharacters(in: .whitespaces) + "…" : t
     }
 }
 
@@ -352,7 +352,7 @@ struct LogLineRow: View {
             Text(HUDFormat.clock(event.at))
                 .font(.caption2)
                 .monospacedDigit()
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color(nsColor: LogInk.time))
                 .fixedSize()
             Label {
                 LogCode.text(event)
@@ -377,9 +377,9 @@ struct LogLineRow: View {
         switch event.kind {
         case .permission, .question: AnyShapeStyle(HUDTint.needsYou)
         case .error: AnyShapeStyle(HUDTint.error)
-        case .assistant, .user: AnyShapeStyle(.primary)
-        case .tool: AnyShapeStyle(.secondary)
-        case .thinking, .status, .toolResult: AnyShapeStyle(.tertiary)
+        case .assistant, .user: AnyShapeStyle(Color(nsColor: LogInk.primary))
+        case .tool: AnyShapeStyle(Color(nsColor: LogInk.secondary))
+        case .thinking, .status, .toolResult: AnyShapeStyle(Color(nsColor: LogInk.quiet))
         }
     }
 
@@ -388,8 +388,8 @@ struct LogLineRow: View {
         case .permission, .question: AnyShapeStyle(HUDTint.needsYou)
         case .error: AnyShapeStyle(HUDTint.error)
         case .user: AnyShapeStyle(HUDTint.working)
-        case .assistant, .tool: AnyShapeStyle(.secondary)
-        case .thinking, .status, .toolResult: AnyShapeStyle(.tertiary)
+        case .assistant, .tool: AnyShapeStyle(Color(nsColor: LogInk.icon))
+        case .thinking, .status, .toolResult: AnyShapeStyle(Color(nsColor: LogInk.quiet))
         }
     }
 

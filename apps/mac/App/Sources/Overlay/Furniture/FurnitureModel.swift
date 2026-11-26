@@ -177,13 +177,14 @@ struct FurniturePlan: Equatable {
         for leading in [true, false] {
             let topSlot: FurnitureSlot = leading ? .topLeading : .topTrailing
             let bottomSlot: FurnitureSlot = leading ? .bottomLeading : .bottomTrailing
-            let top = pieces.filter { $0.slot == topSlot }
-            let bottom = pieces.filter { $0.slot == bottomSlot }
+            // A piece with nothing to show (no questions waiting) takes no room and no gap.
+            let top = pieces.filter { $0.slot == topSlot }.map { ($0, demand($0)) }.filter { $0.1.ideal > 0 }
+            let bottom = pieces.filter { $0.slot == bottomSlot }.map { ($0, demand($0)) }.filter { $0.1.ideal > 0 }
             if top.isEmpty && bottom.isEmpty { continue }
 
             let column = size.height - m.margin - m.bottomInset(leading: leading)
             let avail = max(0, column - (top.isEmpty || bottom.isEmpty ? 0 : m.slotGap))
-            let topD = top.map(demand), bottomD = bottom.map(demand)
+            let topD = top.map(\.1), bottomD = bottom.map(\.1)
             let (topMin, topIdeal) = totals(topD)
             let (bottomMin, bottomIdeal) = totals(bottomD)
             _ = topMin
@@ -200,8 +201,8 @@ struct FurniturePlan: Equatable {
                 topBudget = max(0, min(topIdeal, avail - bottomBudget))
                 bottomBudget = min(bottomIdeal, max(0, avail - topBudget))
             }
-            plan.slots[topSlot] = distribute(top, topD, budget: topBudget, slot: topSlot, screen: size.width)
-            plan.slots[bottomSlot] = distribute(bottom, bottomD, budget: bottomBudget, slot: bottomSlot, screen: size.width)
+            plan.slots[topSlot] = distribute(top.map(\.0), topD, budget: topBudget, slot: topSlot, screen: size.width)
+            plan.slots[bottomSlot] = distribute(bottom.map(\.0), bottomD, budget: bottomBudget, slot: bottomSlot, screen: size.width)
         }
         return plan
     }

@@ -63,6 +63,9 @@ enum HUDTint {
     static let working = Color.blue
     static let finished = Color.green
     static let error = Color.red
+    /// Dims a text panel's glass so its lines stay legible over a bright or busy face (Notification
+    /// Center's platters do the same in dark mode).
+    static let panelDim = Color.black.opacity(0.3)
 
     static func state(_ s: AgentState) -> Color {
         switch s {
@@ -96,7 +99,7 @@ extension View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return self
             .containerShape(shape)
-            .hudGlass(in: shape, tint: tint, interactive: interactive)
+            .hudGlass(in: shape, tint: tint ?? HUDTint.panelDim, interactive: interactive)
     }
 
     /// Capsule variant (chips, pills).
