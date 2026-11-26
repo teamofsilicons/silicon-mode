@@ -324,7 +324,10 @@ struct SettingsDebugPane: View {
             if !m.isActive { m.enterNow() }
             try? await Task.sleep(for: .milliseconds(900))
             let base = m.siliconModeAngle ?? 100
-            let target = max(base * m.settings.panicRatio - 25, 5)
+            // Close well past the engine's own trigger (which drops further when the Silicon Mode
+            // angle sits above the threshold), so the test fires under the same rule as a real lid.
+            let trigger = ModeEngine.panicAngle(baseline: base, settings: m.settings)
+            let target = max(trigger - 15, 5)
             for i in 1...20 {
                 m.simulatedAngle = base - (base - target) * Double(i) / 20
                 try? await Task.sleep(for: .milliseconds(33))

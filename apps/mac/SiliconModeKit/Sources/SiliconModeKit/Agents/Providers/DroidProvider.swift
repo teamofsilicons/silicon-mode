@@ -41,14 +41,15 @@ public final class DroidProvider: AgentProvider, @unchecked Sendable {
         var last: TurnActivity?
         var lastAt: Date?
         var firstPrompt: String?
-        for (i, line) in MoreFiles.tailLines(path, maxBytes: 384 << 10).enumerated() {
+        // Lines without an id fall back to their byte offset: stable as the file grows (window positions are not).
+        for (off, line) in MoreFiles.tailLinesWithOffsets(path, maxBytes: 384 << 10) {
             guard let j = J.parse(line) else { continue }
             let msg = j["message"].exists ? j["message"] : j
             guard msg["role"].exists else { continue }
             let at = j["timestamp"].date
             if let at { lastAt = at }
             if firstPrompt == nil, msg["role"].string == "user" { firstPrompt = msg["content"].flattenedText }
-            if let a = Transcript.anthropicMessage(msg, id: j["id"].string ?? "\(i)", at: at, cwd: cwd, into: &events,
+            if let a = Transcript.anthropicMessage(msg, id: j["id"].string ?? "\(off)", at: at, cwd: cwd, into: &events,
                                                    uses: &uses, results: &results) { last = a }
         }
         let (activity, pending) = Transcript.finalActivity(last, uses: uses, results: results)

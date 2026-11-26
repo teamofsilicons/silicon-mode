@@ -11,6 +11,8 @@ public final class GrokProvider: AgentProvider, @unchecked Sendable {
     public init(env: MoreEnvironment = .live) { self.env = env }
 
     var sessionsRoot: String { env.root("GROK_HOME", ".grok").appendingPathComponent("sessions").path }
+    /// How much of `updates.jsonl` is read on each scan (its tail).
+    static let tailBytes = 384 << 10
 
     public func scan(_ ctx: ScanContext) async -> [AgentSession] {
         var files: [String] = []
@@ -35,7 +37,9 @@ public final class GrokProvider: AgentProvider, @unchecked Sendable {
         let cwd = summary.first("cwd", "workingDirectory", "working_dir").text ?? encodedCwd.removingPercentEncoding
         let id = summary.first("session_id", "sessionId", "id").text ?? (dir as NSString).lastPathComponent
         let mtime = FileStamp.of(path)?.date ?? Date()
-        let acp = ACPLog.parse(MoreFiles.tailLines(path, maxBytes: 384 << 10), prefix: "grok:\(id)", cwd: cwd, fallback: mtime, maxEvents: maxEvents)
+        // Ids are byte offsets in the file: stable as it grows (window positions are not).
+        let lines = MoreFiles.tailLinesWithOffsets(path, maxBytes: tailBytes)
+        let acp = ACPLog.parse(lines, prefix: "grok:\(id)", cwd: cwd, fallback: mtime, maxEvents: maxEvents)
         return ParsedSession(nativeID: id, title: summary.first("title", "summary").text ?? acp.firstPrompt, cwd: cwd,
                              model: summary.first("current_model_id", "model").text,
                              startedAt: summary.first("created_at", "createdAt", "started_at").date,
@@ -46,6 +50,10 @@ public final class GrokProvider: AgentProvider, @unchecked Sendable {
 
 /// Agent Client Protocol `session/update` logs (Grok Build, ACP recorders). Accepts raw notifications
 /// (`{"method":"session/update","params":{…}}`), bare params (`{"sessionId","update"}`) or bare updates.
+///
+/// Event ids must survive the file growing past the tail window (the log book upserts by id), so
+/// they come from the file itself: a tool call's `toolCallId`, else the line's absolute byte offset;
+/// a streamed message takes the offset of its first chunk.
 enum ACPLog {
     struct Result {
         var events: [AgentEvent]
@@ -55,7 +63,9 @@ enum ACPLog {
         var firstPrompt: String?
     }
 
-    static func parse(_ lines: [Substring], prefix: String, cwd: String?, fallback: Date, maxEvents: Int) -> Result {
+    /// `lines` carry each line's absolute byte offset (`MoreFiles.tailLinesWithOffsets`).
+    static func parse(_ lines: [(offset: UInt64, line: Substring)], prefix: String, cwd: String?, fallback: Date,
+                      maxEvents: Int) -> Result {
         var events = EventList(prefix: prefix, fallback: fallback)
         var activity: TurnActivity = .unknown
         var open: [String: String] = [:]
@@ -64,16 +74,23 @@ enum ACPLog {
         var bufferID = ""
         var lastAt: Date?
         var firstPrompt: String?
+        var toolIDs = Set<String>()
+        // A window opening mid-file may start inside a streamed message whose first chunk is out of
+        // view; its id would slide with the window (and its text is partial), so that message is
+        // skipped (unless the window holds nothing else). `midMessage` holds until a line that ends
+        // or starts a message proves the window is past it.
+        var midMessage = (lines.first?.offset ?? 0) > 0
+        var bufferPartial = false
 
         func flush() {
-            if let k = bufferKind {
-                events.add(bufferID, at: lastAt, k, buffer)
-                if k == .user, firstPrompt == nil { firstPrompt = EventText.clip(buffer, max: 80) }
-            }
-            buffer = ""; bufferKind = nil
+            defer { buffer = ""; bufferKind = nil; bufferPartial = false; midMessage = false }
+            guard let k = bufferKind, !bufferPartial else { return }
+            events.add(bufferID, at: lastAt, k, buffer)
+            if k == .user, firstPrompt == nil { firstPrompt = EventText.clip(buffer, max: 80) }
         }
 
-        for (n, line) in lines.enumerated() {
+        for (off, line) in lines {
+            let n = "\(off)"
             guard let j = J.parse(line) else { continue }
             let params = j["params"].exists ? j["params"] : j
             let u = params["update"].exists ? params["update"] : params
@@ -82,7 +99,11 @@ enum ACPLog {
             switch kind {
             case "user_message_chunk", "agent_message_chunk":
                 let k: AgentEvent.Kind = kind == "user_message_chunk" ? .user : .assistant
-                if bufferKind != k { flush(); bufferKind = k; bufferID = "\(n)" }
+                if bufferKind != k {
+                    if bufferKind != nil { flush() }
+                    bufferKind = k; bufferID = n; bufferPartial = midMessage
+                    midMessage = false
+                }
                 // Chunks: keep their own spacing (don't trim each piece).
                 buffer += u["content"]["text"].string ?? u["content"].flattenedText ?? ""
                 activity = open.isEmpty ? .running : .toolPending
@@ -90,9 +111,12 @@ enum ACPLog {
                 activity = open.isEmpty ? .running : .toolPending
             case "tool_call":
                 flush()
-                let id = u.first("toolCallId", "id").string ?? "\(n)"
+                let callID = u.first("toolCallId", "id").string
+                let id = callID ?? n
                 let text = u["title"].text ?? MoreText.tool(u["kind"].string, args: u.first("rawInput", "input"), cwd: cwd)
-                events.add("\(n)", at: lastAt, .tool, text)
+                // The call's own id names the event; a repeated or missing one falls back to the offset.
+                let eventID = callID.map { "tool:\($0)" }.flatMap { toolIDs.insert($0).inserted ? $0 : nil } ?? n
+                events.add(eventID, at: lastAt, .tool, text)
                 let status = u["status"].string ?? "pending"
                 if status == "completed" || status == "failed" { open[id] = nil } else { open[id] = text }
                 activity = open.isEmpty ? .running : .toolPending
@@ -100,7 +124,7 @@ enum ACPLog {
                 let id = u.first("toolCallId", "id").string ?? ""
                 let status = u["status"].string ?? ""
                 if status == "completed" || status == "failed" || status == "cancelled" { open[id] = nil }
-                if status == "failed" { events.add("\(n)", at: lastAt, .error, "Tool failed: \(u["title"].text ?? id)") }
+                if status == "failed" { events.add(n, at: lastAt, .error, "Tool failed: \(u["title"].text ?? id)") }
                 activity = open.isEmpty ? .running : .toolPending
             case "turn_completed", "turn_end", "end_turn":
                 flush()
@@ -109,7 +133,7 @@ enum ACPLog {
             case "plan":
                 flush()
                 if let current = u["entries"].array.first(where: { $0["status"].string == "in_progress" })?["content"].text {
-                    events.add("\(n)", at: lastAt, .status, "Plan: \(current)")
+                    events.add(n, at: lastAt, .status, "Plan: \(current)")
                 }
             default:
                 // JSON-RPC responses to session/prompt carry the stop reason.
@@ -120,6 +144,7 @@ enum ACPLog {
                 }
             }
         }
+        if events.last == nil { bufferPartial = false }
         flush()
         return Result(events: events.tail(maxEvents), activity: activity, pendingTool: open.values.sorted().first,
                       lastAt: lastAt, firstPrompt: firstPrompt)
