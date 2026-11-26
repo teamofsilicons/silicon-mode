@@ -3,7 +3,8 @@ import SiliconModeKit
 
 /// The logs piece, like Safari's tab bar: a row of capsule tabs, one per agent Silicon Mode shows
 /// (needs you, working, error, finished; most recent first), and under it every line the mode's
-/// log book holds for the selected agent, oldest at the top, in a scroll view that follows the tail.
+/// log book holds for the selected agent, oldest at the top, in a native text view that follows the
+/// tail (`LogTextView`).
 ///
 /// - The selected tab is a glass capsule that morphs from tab to tab.
 /// - Scrolling up pauses following; a "Latest" button appears when newer lines arrive.
@@ -269,8 +270,14 @@ private struct LogBody: View {
             flat(lines)
         } else {
             LogTextView(events: lines, following: $following, unseen: $unseen, jump: jump)
-                .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
-                                                  bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous))
+                // A soft scroll edge under the tab strip; the bottom corners follow the panel's.
+                .mask {
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 10)
+                        UnevenRoundedRectangle(bottomLeadingRadius: HUDMetrics.panelRadius,
+                                               bottomTrailingRadius: HUDMetrics.panelRadius, style: .continuous)
+                    }
+                }
                 .overlay(alignment: .bottom) {
                     if !following && unseen > 0 {
                         latestButton

@@ -12,6 +12,8 @@ import SiliconModeKit
 ///   overlay.root.furniture    every kind of furniture placed
 ///   furniture.hidden          furniture hidden while agents need you ("N need you" pill)
 ///   furniture.hidden-peek     …and the pill clicked (the questions show)
+///   furniture.hidden-no-questions  hidden, agents waiting, no Questions piece placed: a plain count
+///   overlay.root.grace        the grace control early on (ring nearly full)
 ///   overlay.exit              implode mid-frame
 ///   overlay.panic.<style>     each panic style (--time picks the moment)
 @MainActor
@@ -45,6 +47,18 @@ enum OverlaySnapshots {
             SnapshotItem(id: "furniture.hidden-peek") {
                 AnyView(settled(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
                                                    furnitureHidden: true, questionsPeek: true)))
+            },
+            SnapshotItem(id: "furniture.hidden-no-questions") {
+                // Even "peeking", nothing answerable may show without a placed Questions piece.
+                let furniture = HUDSample.source(sessions: HUDSample.sessions(), furniture: [
+                    FurniturePiece(id: "agents", kind: .agents, slot: .topLeading),
+                    FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+                ])
+                return AnyView(settled(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                          furniture: furniture, furnitureHidden: true, questionsPeek: true)))
+            },
+            SnapshotItem(id: "overlay.root.grace") {
+                AnyView(settled(SiliconModePreview(graceRemaining: 47, graceTotal: 60, faceID: "bounce")))
             },
             SnapshotItem(id: "overlay.exit") { AnyView(exit(at: pin(0.4))) },
         ]
