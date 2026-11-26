@@ -135,8 +135,14 @@ struct QuestionCard: View {
                     }
                 }
             }
-            if question.allowText || question.options.isEmpty {
+            // The Mac only takes text where it said so (`allow_text`); anything else it rejects.
+            if question.allowText {
                 replyField
+            }
+            if !question.isAnswerableOffMac {
+                Label("Answer this one on \(macName).", systemImage: "laptopcomputer")
+                    .allo(13, .medium)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
         .disabled(isSending)
@@ -214,6 +220,10 @@ struct QuestionCard: View {
             OutcomeRow(symbol: "arrow.triangle.branch", tint: Theme.accent,
                        title: "Answered \(from)" + (label.map { " · \($0)" } ?? ""),
                        subtitle: pending ? "Waiting for \(macName) to apply it" : "Nothing left to do here", working: pending)
+        case .notApplied(let mine, let from):
+            OutcomeRow(symbol: "exclamationmark.triangle.fill", tint: Theme.warning,
+                       title: "\(macName) couldn't use " + (mine ? "your answer" : "the answer sent \(from)"),
+                       subtitle: "The agent is still waiting. Answer it on the Mac.", working: false)
         case .closed(let msg):
             OutcomeRow(symbol: "clock.badge.xmark", tint: Theme.textMuted, title: msg, subtitle: nil, working: false)
         default:

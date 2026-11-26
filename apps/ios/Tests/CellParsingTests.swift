@@ -28,6 +28,39 @@ struct CellParsingTests {
         #expect(!SignIn.isAuthCallback(URL(string: "ai.tos.mode://stats")!))
     }
 
+    @Test func callbackErrorNeverEchoesItsDescription() {
+        // Anyone can craft this link; the free-text description must not reach the screen.
+        let url = URL(string: "ai.tos.mode://auth/callback?error=server_error&error_description=Call%20support%20at%20evil.example")!
+        guard case .failed(let msg) = SignIn.parse(url) else { Issue.record("expected .failed"); return }
+        #expect(!msg.contains("evil"))
+        #expect(msg.contains("(server_error)"))
+        let odd = URL(string: "ai.tos.mode://auth/callback#error=Visit%20evil.example")!
+        guard case .failed(let msg2) = SignIn.parse(odd) else { Issue.record("expected .failed"); return }
+        #expect(!msg2.contains("evil"))
+    }
+
+    @Test func pendingSignInIsFreshOnceAndExpires() throws {
+        let defaults = try #require(UserDefaults(suiteName: "pending-sign-in-\(UUID().uuidString)"))
+        let pending = PendingSignIn(defaults: defaults)
+        let t0 = Date(timeIntervalSince1970: 1_795_668_483)
+        // Nothing started: a callback link is unsolicited.
+        #expect(!pending.isPending(now: t0))
+        #expect(!pending.consume(now: t0))
+        // Started: accepted once, then never again.
+        pending.begin(now: t0)
+        #expect(pending.isPending(now: t0.addingTimeInterval(60)))
+        #expect(pending.consume(now: t0.addingTimeInterval(60)))
+        #expect(!pending.consume(now: t0.addingTimeInterval(61)))
+        // Too old: refused (and cleared).
+        pending.begin(now: t0)
+        #expect(!pending.consume(now: t0.addingTimeInterval(PendingSignIn.window + 1)))
+        #expect(!pending.isPending(now: t0))
+        // Cancelled: refused.
+        pending.begin(now: t0)
+        pending.clear()
+        #expect(!pending.consume(now: t0))
+    }
+
     @Test func signInURLUsesBouncePage() {
         let c = URLComponents(url: SignIn.url, resolvingAgainstBaseURL: false)!
         #expect(c.host == "silicon-mode.cells.teamofsilicons.com")
@@ -59,6 +92,44 @@ struct CellParsingTests {
         let rows = try CellJSON.plainDecoder.decode([UsageRow].self, from: Data(json.utf8))
         #expect(rows.first?.byProvider["claude_code"] == 1800)
         #expect(Providers.info("claude_code").name == "Claude Code")
+    }
+}
+
+@Suite("Answers")
+struct AnswerStateTests {
+    private func answer(from: String = "iphone", consumed: Bool = false, outcome: String? = nil) -> AnswerRow {
+        AnswerRow(id: "a", questionId: "q", deviceId: "m", optionId: "allow", text: nil, answeredFrom: from, answeredBy: "p",
+                  createdAt: nil, consumedAt: consumed ? Date() : nil, outcome: outcome)
+    }
+
+    @Test func ownAnswerFollowsTheMacsVerdict() {
+        #expect(AppStore.answerUI(answer(), label: "Allow", mine: true) == .sent(option: "allow", text: nil))
+        #expect(AppStore.answerUI(answer(consumed: true, outcome: "applied"), label: "Allow", mine: true) == .applied)
+        // The Mac rejected it: not "Sent", and not done — the agent still waits on the Mac.
+        let rejected = AppStore.answerUI(answer(consumed: true, outcome: "failed"), label: "Allow", mine: true)
+        #expect(rejected == .notApplied(mine: true, from: "on an iPhone"))
+        #expect(!rejected.isTerminal && !rejected.isBusy)
+        #expect(AppStore.answerUI(answer(consumed: true, outcome: "stale"), label: "Allow", mine: true).isTerminal)
+    }
+
+    @Test func someoneElsesAnswer() {
+        #expect(AppStore.answerUI(answer(from: "web"), label: "Allow", mine: false)
+            == .elsewhere(from: "on the web", label: "Allow", pendingOnMac: true))
+        #expect(AppStore.answerUI(answer(from: "web", consumed: true, outcome: "applied"), label: "Allow", mine: false)
+            == .elsewhere(from: "on the web", label: "Allow", pendingOnMac: false))
+        #expect(AppStore.answerUI(answer(from: "web", consumed: true, outcome: "failed"), label: "Allow", mine: false)
+            == .notApplied(mine: false, from: "on the web"))
+    }
+
+    @Test func questionsTheMacMarkedUnanswerable() {
+        var q = QuestionRow(id: "q", deviceId: "m", sessionId: nil, kind: "question", title: "Waiting for you", body: nil,
+                            options: [], allowText: false, state: "pending", createdAt: nil, expiresAt: nil, resolvedAt: nil)
+        #expect(!q.isAnswerableOffMac)
+        q.allowText = true
+        #expect(q.isAnswerableOffMac)
+        q.allowText = false
+        q.options = [QuestionOption(id: "allow", label: "Allow", role: "allow")]
+        #expect(q.isAnswerableOffMac)
     }
 }
 

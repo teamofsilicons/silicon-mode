@@ -215,6 +215,10 @@ struct QuestionRow: Codable, Identifiable, Equatable, Sendable {
 
     var isPending: Bool { state == "pending" && !(expiresAt.map { $0 <= .now } ?? false) }
 
+    /// Whether a phone can answer it at all. The Mac sends no options and `allow_text: false` for
+    /// prompts it can't take an answer for remotely; those are answered on the Mac.
+    var isAnswerableOffMac: Bool { !options.isEmpty || allowText }
+
     var symbol: String {
         switch kind {
         case "permission": "lock.shield.fill"

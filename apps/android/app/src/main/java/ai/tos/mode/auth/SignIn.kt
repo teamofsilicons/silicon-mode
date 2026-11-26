@@ -8,7 +8,12 @@ import ai.tos.mode.data.CellSession
 import ai.tos.mode.data.SessionStore
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.verify.domain.DomainVerificationManager
+import android.content.pm.verify.domain.DomainVerificationUserState
 import android.net.Uri
+import android.os.Build
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.graphics.toColorInt
@@ -53,11 +58,27 @@ object CallbackParser {
 }
 
 /**
+ * Where a sign-in's tokens may go. The cell redirects to the https App Link; until Android has
+ * verified it (`/.well-known/assetlinks.json`), the page there forwards the tokens to
+ * `ai.tos.mode://auth/callback`, a scheme any installed app can also claim. Pure, so it is unit tested.
+ */
+object CallbackChannel {
+    /** Why a sign-in must not start, or null when the tokens can only reach this app. */
+    fun refusal(appLinkVerified: Boolean, otherHandlers: List<String>): String? {
+        if (appLinkVerified || otherHandlers.isEmpty()) return null
+        val who = otherHandlers.distinct().take(2).joinToString(" and ")
+        return "$who also opens Silicon Mode's sign-in link, so it could receive your session. " +
+            "Uninstall it, then sign in again."
+    }
+}
+
+/**
  * Hosted Silicon Cell sign-in (docs/research/cells.md §2.3): a Custom Tab opens
  * `/auth/sign-in?redirect_to=https://mode.teamofsilicons.com/auth/android&session=token&app=silicon-mode`;
  * the cell runs Silicon Accounts (PKCE between cell and Accounts) and redirects with the tokens in
  * the URL fragment; the bounce page forwards them to `ai.tos.mode://auth/callback#…`
- * (or Android delivers the https App Link directly once assetlinks.json is served).
+ * (or Android delivers the https App Link directly once assetlinks.json is served). Sign-in won't
+ * start while another app also claims that scheme and the App Link isn't verified ([CallbackChannel]).
  */
 class SignIn(
     private val cell: CellClient,
@@ -75,6 +96,8 @@ class SignIn(
 
     /** Opens the sign-in page. Returns an error message, or null when the page opened. */
     fun start(context: Context): String? {
+        // Bearer tokens must not go where another app can take them.
+        CallbackChannel.refusal(appLinkVerified(context), otherCallbackHandlers(context))?.let { return it }
         prefs.pendingSignInAt = System.currentTimeMillis()
         val light = CustomTabColorSchemeParams.Builder()
             .setToolbarColor("#FCFCFC".toColorInt())
@@ -98,6 +121,41 @@ class SignIn(
         }
     }
 
+    /** Whether Android opens [BuildConfig.SIGN_IN_REDIRECT] in this app (verified, or chosen by the person). */
+    private fun appLinkVerified(context: Context): Boolean {
+        val redirect = Uri.parse(BuildConfig.SIGN_IN_REDIRECT)
+        val host = redirect.host ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = context.getSystemService(DomainVerificationManager::class.java) ?: return false
+            val state = runCatching { manager.getDomainVerificationUserState(context.packageName) }.getOrNull() ?: return false
+            return when (state.hostToStateMap[host]) {
+                DomainVerificationUserState.DOMAIN_STATE_VERIFIED, DomainVerificationUserState.DOMAIN_STATE_SELECTED -> true
+                else -> false
+            }
+        }
+        // No verification API before Android 12: the link resolving to this app by default is the same signal.
+        val intent = Intent(Intent.ACTION_VIEW, redirect).addCategory(Intent.CATEGORY_BROWSABLE)
+        @Suppress("DEPRECATION")
+        val handler = context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+        return handler?.activityInfo?.packageName == context.packageName
+    }
+
+    /** Other installed apps that would be offered `ai.tos.mode://auth/callback` (visible through `<queries>`). */
+    private fun otherCallbackHandlers(context: Context): List<String> {
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("$SCHEME://auth/callback")).addCategory(Intent.CATEGORY_BROWSABLE)
+        val matches = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            }
+        }.getOrDefault(emptyList())
+        return matches.filter { it.activityInfo.packageName != context.packageName }
+            .map { runCatching { it.loadLabel(pm).toString() }.getOrDefault(it.activityInfo.packageName) }
+    }
+
     sealed interface Result {
         data object Success : Result
         data class Failure(val message: String) : Result
@@ -110,15 +168,18 @@ class SignIn(
             (uri.scheme == "https" && uri.host == Uri.parse(BuildConfig.SIGN_IN_REDIRECT).host &&
                 uri.path == Uri.parse(BuildConfig.SIGN_IN_REDIRECT).path)
 
-    /** Completes sign-in from the redirect [uri]: validates the tokens with `/auth/user`, then stores them. */
-    suspend fun complete(uri: Uri): Result {
+    /**
+     * Completes sign-in from the redirect [uri]: validates the tokens with `/auth/user`, then stores
+     * them. [viaBrowser]: a web page opened it (the intent carries `CATEGORY_BROWSABLE`).
+     */
+    suspend fun complete(uri: Uri, viaBrowser: Boolean): Result {
         if (!isCallback(uri)) return Result.NotOurs
-        // A callback nobody asked for could sign this phone into someone else's account. Release
-        // builds only accept one shortly after the person tapped "Continue"; debug builds also accept
-        // one delivered over adb (docs/ANDROID.md, testing without a browser).
-        val startedAt = prefs.pendingSignInAt
-        val fresh = startedAt > 0 && System.currentTimeMillis() - startedAt < PENDING_WINDOW_MS
-        if (!fresh && !BuildConfig.DEBUG) return Result.Failure("This sign-in link has expired. Try again.")
+        // A callback nobody asked for could sign this phone into someone else's account: accept one
+        // only shortly after the person tapped "Continue". Debug builds also take one delivered over
+        // adb (docs/ANDROID.md, testing without a browser), but never one a web page opened.
+        if (!acceptsCallback(prefs.pendingSignInAt, System.currentTimeMillis(), BuildConfig.DEBUG, viaBrowser)) {
+            return Result.Failure("This sign-in link has expired. Try again.")
+        }
         return when (val parsed = CallbackParser.parse(uri.encodedFragment, uri.encodedQuery)) {
             is CallbackResult.Denied -> {
                 prefs.pendingSignInAt = 0
@@ -140,6 +201,12 @@ class SignIn(
 
     companion object {
         const val SCHEME = "ai.tos.mode"
-        private const val PENDING_WINDOW_MS = 15 * 60 * 1000L
+        const val PENDING_WINDOW_MS = 15 * 60 * 1000L
+
+        /** Whether a sign-in callback may be taken: one started here recently, or adb on a debug build. */
+        fun acceptsCallback(pendingSignInAt: Long, nowMs: Long, debugBuild: Boolean, viaBrowser: Boolean): Boolean {
+            val fresh = pendingSignInAt > 0 && nowMs - pendingSignInAt in 0 until PENDING_WINDOW_MS
+            return fresh || (debugBuild && !viaBrowser)
+        }
     }
 }

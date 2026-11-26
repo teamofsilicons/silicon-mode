@@ -1,5 +1,6 @@
 package ai.tos.mode
 
+import ai.tos.mode.data.Liveness
 import ai.tos.mode.data.ModeJson
 import ai.tos.mode.data.RealtimeFrame
 import ai.tos.mode.data.RealtimeSub
@@ -36,6 +37,17 @@ class RealtimeFrameTest {
         assertEquals("INSERT", f.change.operation)
         assertEquals(null, f.change.old)
         assertEquals("Bash: ls", f.change.new!!["summary"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun aSilentSocketGoesStale() {
+        val liveness = Liveness(staleAfterMs = 70_000)
+        liveness.heard(1_000)
+        assertFalse(liveness.isStale(1_000 + 25_000))   // one ping interval
+        assertFalse(liveness.isStale(1_000 + 70_000))
+        assertTrue(liveness.isStale(1_000 + 70_001))    // two pongs missed
+        liveness.heard(80_000)                          // any frame (a pong) resets it
+        assertFalse(liveness.isStale(100_000))
     }
 
     @Test

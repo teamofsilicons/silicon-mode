@@ -10,6 +10,10 @@ enum QuestionUI: Equatable, Sendable {
     case applied
     /// Someone answered on another device (`pendingOnMac`: the Mac has not applied it yet).
     case elsewhere(from: String, label: String?, pendingOnMac: Bool)
+    /// The Mac consumed the answer (ours when `mine`, else the one sent `from` elsewhere) but
+    /// couldn't use it. The cell keeps one answer per question, so it can only be answered on the
+    /// Mac now, where the agent is still waiting.
+    case notApplied(mine: Bool, from: String)
     case closed(String)
     case failed(String)
 
@@ -76,6 +80,8 @@ final class AppStore {
 
     let realtime = RealtimeClient()
     private let client = CellClient.shared
+    private let pendingSignIn = PendingSignIn()
+    private var completingSignIn = false
     private var lastSnapshot: Date = .distantPast
     private var lingerTasks: [String: Task<Void, Never>] = [:]
     private var demoTicker: Task<Void, Never>?
@@ -118,7 +124,7 @@ final class AppStore {
         questions.filter { q in
             guard q.isPending else { return false }
             switch questionUI[q.id] {
-            case .none, .failed: return true
+            case .none, .failed, .notApplied: return true
             default: return false
             }
         }.count
@@ -176,24 +182,39 @@ final class AppStore {
 
     // MARK: Sign in / out
 
-    func completeSignIn(_ outcome: SignIn.Outcome) async {
-        switch outcome {
-        case .session(let s):
-            await client.adopt(s)
-            signInError = nil
-            withAnimation(Theme.Motion.slow) { auth = .signedIn }
-            await afterSignIn()
-        case .denied:
-            signInError = "Sign-in was cancelled."
-        case .failed(let message):
-            signInError = message
-        }
+    /// The person tapped "Sign in": until that sign-in ends, a callback through `.onOpenURL` is ours.
+    func beginSignIn() {
+        signInError = nil
+        isSigningIn = true
+        pendingSignIn.begin()
+    }
+
+    /// The web authentication session ended without a callback (cancelled, or it failed).
+    func endSignIn(error: String?) {
+        pendingSignIn.clear()
+        signInError = error
         isSigningIn = false
+    }
+
+    /// The callback `ASWebAuthenticationSession` handed back to the session this app started.
+    func finishSignIn(_ outcome: SignIn.Outcome) async {
+        pendingSignIn.clear()
+        await completeSignIn(outcome)
     }
 
     /// Handles `ai.tos.mode://…` links: the sign-in callback, and `ai.tos.mode://now|stats|settings`.
     func handle(url: URL) {
         if SignIn.isAuthCallback(url) {
+            // Any web page can open this link (the bounce page forwards whatever fragment it is
+            // given). Take a session from it only while a sign-in this app started is pending, once,
+            // and never over the account this phone is already signed in to.
+            guard auth != .signedIn else { return }
+            guard pendingSignIn.consume() || Self.acceptsUnrequestedSignIn else {
+                if auth == .signedOut {
+                    signInError = "That sign-in link has expired or wasn't started on this iPhone. Tap Sign in to try again."
+                }
+                return
+            }
             Task { await completeSignIn(SignIn.parse(url)) }
             return
         }
@@ -201,10 +222,58 @@ final class AppStore {
         if let t = AppTab(rawValue: target) { withAnimation(Theme.Motion.moderate) { tab = t } }
     }
 
-    private func afterSignIn() async {
-        if let u = try? await client.user() {
-            user = u
-            if let d = try? JSONEncoder().encode(u) { UserDefaults.standard.set(d, forKey: "user") }
+    /// Debug builds launched by the deep-link UI test (`-SMAcceptDeepLinkSignIn`, docs/IOS.md) take a
+    /// session from a link without tapping Sign in first. Release builds never do.
+    private static var acceptsUnrequestedSignIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-SMAcceptDeepLinkSignIn")
+        #else
+        false
+        #endif
+    }
+
+    private func completeSignIn(_ outcome: SignIn.Outcome) async {
+        guard !completingSignIn else { return }
+        completingSignIn = true
+        isSigningIn = true
+        defer {
+            completingSignIn = false
+            isSigningIn = false
+        }
+        switch outcome {
+        case .session(let s):
+            // Prove the cell issued these tokens before they replace anything.
+            let u: CellUser
+            do {
+                u = try await client.validate(s)
+            } catch CellError.http(let code, _) where code == 401 || code == 403 {
+                signInError = "That sign-in wasn't accepted. Try again."
+                return
+            } catch {
+                signInError = error.localizedDescription
+                return
+            }
+            // Already signed in (a callback raced the Keychain session at launch): keep that account.
+            guard await client.adoptIfSignedOut(s) else { return }
+            remember(u)
+            signInError = nil
+            withAnimation(Theme.Motion.slow) { auth = .signedIn }
+            await afterSignIn(fetchUser: false)
+        case .denied:
+            signInError = "Sign-in was cancelled."
+        case .failed(let message):
+            signInError = message
+        }
+    }
+
+    private func remember(_ u: CellUser) {
+        user = u
+        if let d = try? JSONEncoder().encode(u) { UserDefaults.standard.set(d, forKey: "user") }
+    }
+
+    private func afterSignIn(fetchUser: Bool = true) async {
+        if fetchUser, let u = try? await client.user() {
+            remember(u)
         }
         realtime.start()
         updateSubscriptions()
@@ -363,13 +432,10 @@ final class AppStore {
                 self.answers = Dictionary(answers.map { ($0.questionId, $0) }, uniquingKeysWith: { a, _ in a })
                 for q in pending {
                     guard let ans = self.answers[q.id] else { continue }
-                    if ans.answeredBy != nil, ans.answeredBy == myDeviceID {
-                        if !(self.questionUI[q.id]?.isBusy ?? false) {
-                            self.questionUI[q.id] = .sent(option: ans.optionId, text: ans.text)
-                        }
-                    } else {
-                        self.questionUI[q.id] = .elsewhere(from: ans.fromTitle, label: label(q, ans), pendingOnMac: true)
-                    }
+                    let next = Self.answerUI(ans, label: label(q, ans), mine: isMine(ans))
+                    // An answer the Mac hasn't consumed only confirms ours: keep "Sending…" until the RPC returns.
+                    if ans.consumedAt == nil, isMine(ans), self.questionUI[q.id]?.isBusy ?? false { continue }
+                    self.questionUI[q.id] = next
                 }
             }
             lastError = nil
@@ -430,16 +496,20 @@ final class AppStore {
             }
             switch r.reason ?? "" {
             case "already_answered", "answered":
+                // Possibly our own answer, when an earlier attempt's response was lost.
                 let ans = try? await client.get("rest/v1/answers", [
                     "select": "id,question_id,device_id,option_id,text,answered_from,answered_by,created_at,consumed_at,outcome",
                     "question_id": "eq.\(q.id)", "limit": "1",
                 ], as: [AnswerRow].self).first
-                if let ans { answers[q.id] = ans }
-                withAnimation(Theme.Motion.slow) {
-                    questionUI[q.id] = .elsewhere(from: ans?.fromTitle ?? "elsewhere", label: ans.flatMap { label(q, $0) },
-                                                  pendingOnMac: r.reason == "already_answered")
+                let next: QuestionUI
+                if let ans {
+                    answers[q.id] = ans
+                    next = Self.answerUI(ans, label: label(q, ans), mine: isMine(ans))
+                } else {
+                    next = .elsewhere(from: "elsewhere", label: nil, pendingOnMac: r.reason == "already_answered")
                 }
-                if r.reason == "answered" { linger(q.id) }
+                withAnimation(Theme.Motion.slow) { questionUI[q.id] = next }
+                if next.isTerminal { linger(q.id) }
             case "resolved_on_mac":
                 withAnimation(Theme.Motion.slow) { questionUI[q.id] = .elsewhere(from: "on the Mac", label: nil, pendingOnMac: false) }
                 linger(q.id)
@@ -467,6 +537,29 @@ final class AppStore {
     private func label(_ q: QuestionRow, _ a: AnswerRow) -> String? {
         if let o = a.optionId { return q.options.first { $0.id == o }?.label ?? o }
         return a.text.map { "“\($0)”" }
+    }
+
+    /// Whether this iPhone sent `a` (`answered_by` is our `devices.id`).
+    private func isMine(_ a: AnswerRow) -> Bool {
+        guard let by = a.answeredBy, let me = myDeviceID else { return false }
+        return by.lowercased() == me.lowercased()
+    }
+
+    /// What a card says about an answer row, ours (`mine`) or someone else's. Once the Mac consumed
+    /// it, `outcome` is its verdict: 'applied', 'stale' (the question was gone) or 'failed' (it
+    /// couldn't use it: the question isn't answerable off the Mac, or the agent rejected it).
+    nonisolated static func answerUI(_ a: AnswerRow, label: String?, mine: Bool) -> QuestionUI {
+        guard a.consumedAt != nil else {
+            return mine ? .sent(option: a.optionId, text: a.text) : .elsewhere(from: a.fromTitle, label: label, pendingOnMac: true)
+        }
+        switch a.outcome ?? "applied" {
+        case "applied":
+            return mine ? .applied : .elsewhere(from: a.fromTitle, label: label, pendingOnMac: false)
+        case "stale":
+            return .closed("The agent moved on before the answer arrived.")
+        default:
+            return .notApplied(mine: mine, from: a.fromTitle)
+        }
     }
 
     /// Keep a resolved card on screen for a moment, then let it go.
@@ -531,12 +624,16 @@ final class AppStore {
             guard let a = c.decode(AnswerRow.self), a.deviceId == selectedMac?.id else { return }
             answers[a.questionId] = a
             guard let q = questions.first(where: { $0.id == a.questionId }) else { return }
-            let mine = a.answeredBy != nil && a.answeredBy == myDeviceID
-            if !mine, !(questionUI[q.id]?.isBusy ?? false) {
-                withAnimation(Theme.Motion.slow) {
-                    questionUI[q.id] = .elsewhere(from: a.fromTitle, label: label(q, a), pendingOnMac: a.consumedAt == nil)
-                }
-            }
+            let current = questionUI[q.id]
+            // The question already reported how it ended.
+            if current?.isTerminal ?? false { return }
+            // A new row only confirms an answer in flight: "Sending…" waits for the RPC. Our own
+            // row still lands when that RPC's response was lost (the card said it failed).
+            if a.consumedAt == nil, current?.isBusy ?? false { return }
+            // Once the Mac consumes it (UPDATE), its outcome decides: applied, or still waiting on the Mac.
+            let next = Self.answerUI(a, label: label(q, a), mine: isMine(a))
+            withAnimation(Theme.Motion.slow) { questionUI[q.id] = next }
+            if next.isTerminal { linger(q.id) }
         default:
             break
         }
@@ -555,11 +652,15 @@ final class AppStore {
         let current = questionUI[q.id]
         let next: QuestionUI
         switch (q.state, current) {
-        case ("answered", .some(.sent)), ("answered", .some(.sending)):
+        case ("answered", .some(.sent)), ("answered", .some(.sending)), ("answered", .some(.applied)):
             next = .applied
         case ("answered", _):
             let a = answers[q.id]
-            next = .elsewhere(from: a?.fromTitle ?? "elsewhere", label: a.flatMap { label(q, $0) }, pendingOnMac: false)
+            if let a, isMine(a) {
+                next = .applied     // ours, though the RPC's response never said so
+            } else {
+                next = .elsewhere(from: a?.fromTitle ?? "elsewhere", label: a.flatMap { label(q, $0) }, pendingOnMac: false)
+            }
         case ("resolved_on_mac", _):
             next = .elsewhere(from: "on the Mac", label: nil, pendingOnMac: false)
         case ("expired", _):
