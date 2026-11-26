@@ -1,0 +1,6 @@
+{"steps":[
+ {"type":"CORTEX_STEP_TYPE_USER_INPUT","status":"CORTEX_STEP_STATUS_DONE","metadata":{"createdAt":"2026-11-20T10:00:00Z"},"userInput":{"items":[{"text":"Fix the demo build please"}]}},
+ {"type":"CORTEX_STEP_TYPE_PLANNER_RESPONSE","status":"CORTEX_STEP_STATUS_DONE","metadata":{"createdAt":"2026-11-20T10:00:05Z"},"plannerResponse":{"response":"I'll run the tests first."}},
+ {"type":"CORTEX_STEP_TYPE_VIEW_FILE","status":"CORTEX_STEP_STATUS_DONE","metadata":{"createdAt":"2026-11-20T10:01:00Z","toolCall":{"name":"view_file","argumentsJson":"{\"AbsolutePath\":\"/tmp/demo-proj/Package.swift\"}"}}},
+ {"type":"CORTEX_STEP_TYPE_RUN_COMMAND","status":"CORTEX_STEP_STATUS_WAITING","metadata":{"createdAt":"2026-11-20T10:04:00Z"},"runCommand":{"commandLine":"swift test","proposedCommandLine":"swift test"},"requestedInteraction":{"permission":{"resource":{"action":"command","target":"swift test"},"actionDescription":"Run swift test"}}}
+]}

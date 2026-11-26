@@ -1,0 +1,2 @@
+{"sessionId":"sess_00000000000000000000000000000abc","title":"Demo omni run","cwd":"/tmp/demo-proj","createdAt":"2026-11-20T09:55:00.000Z","updatedAt":"2026-11-20T10:03:00.000Z","permissionMode":"allow_all","deliveryMode":"inject","activeTarget":{"accountId":"cc","model":"demo-opus","effort":"high","fastMode":false},
+ "bindings":{"cc":{"accountId":"cc","pluginId":"claude-code","nativeSessionId":"native-claude-bbb","syncedSeq":6},"agy":{"accountId":"agy","pluginId":"antigravity","nativeSessionId":"agy-run-1","syncedSeq":2}},"nextSeq":7,"nextTurn":2}

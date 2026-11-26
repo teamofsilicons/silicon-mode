@@ -1,0 +1,2 @@
+{"uuid":"q1","parentUuid":null,"sessionId":"qwen-0001","timestamp":"2026-11-20T10:00:00.000Z","type":"user","cwd":"/tmp/demo-proj","message":{"role":"user","parts":[{"text":"Run the linter"}]}}
+{"uuid":"q2","parentUuid":"q1","sessionId":"qwen-0001","timestamp":"2026-11-20T10:00:04.000Z","type":"assistant","model":"demo-qwen","message":{"role":"model","parts":[{"text":"Running it."},{"functionCall":{"id":"fc1","name":"run_shell_command","args":{"command":"swiftlint"}}}]}}
