@@ -40,12 +40,22 @@ struct SiliconModeRootView: View {
         return model.unlockPresented && stage.focusedDisplay == displayID
     }
     private var exiting: Bool { stage.exitStartedAt != nil }
+    /// The opaque base is up once the entrance wave has passed and until the exit starts.
+    private var baseOpaque: Bool { preview != nil || (stage.enterStartedAt != nil && !exiting) }
     private var chromeShown: Bool { chromeIn && !exiting }
 
     private struct EntryKey: Equatable { var enter: Date?; var exit: Date? }
 
     var body: some View {
         ZStack {
+            // Opaque base: nothing behind Silicon Mode (the user's desktop) may ever show through,
+            // even while the face is scaled/blurred behind the unlock sheet. Fades in with the
+            // entrance and out with the exit so the shockwave still reveals the face.
+            Theme.Night.background
+                .opacity(baseOpaque ? 1 : 0)
+                .animation(baseOpaque ? .easeIn(duration: 0.35).delay(1.0) : .easeOut(duration: 0.2), value: baseOpaque)
+                .allowsHitTesting(false)
+
             // (a) Face, inside the shockwave. Dimmed + blurred behind the unlock sheet.
             EnterTransition(enterStartedAt: stage.enterStartedAt, exitStartedAt: stage.exitStartedAt) {
                 ZStack {

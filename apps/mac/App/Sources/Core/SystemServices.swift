@@ -67,25 +67,77 @@ final class Caffeinator {
 final class KioskLock {
     private(set) var engaged = false
     private var previous: NSApplication.PresentationOptions = []
+    private var activeObserver: NSObjectProtocol?
+    private var retryTask: Task<Void, Never>?
+
+    static let lockOptions: NSApplication.PresentationOptions = [
+        .hideDock, .hideMenuBar, .disableProcessSwitching, .disableForceQuit,
+        .disableSessionTermination, .disableHideApplication, .disableAppleMenu,
+    ]
+
+    /// Whether the lock options are actually in force right now (needs the app to be active).
+    var isEffective: Bool { engaged && NSApp.isActive && NSApp.currentSystemPresentationOptions.contains(.hideMenuBar) }
 
     func engage() {
         guard !engaged, !Flags.noKiosk else { return }
         engaged = true
-        NSApp.activate(ignoringOtherApps: true)
         previous = NSApp.presentationOptions
-        let opts: NSApplication.PresentationOptions = [
-            .hideDock, .hideMenuBar, .disableProcessSwitching, .disableForceQuit,
-            .disableSessionTermination, .disableHideApplication, .disableAppleMenu,
-        ]
-        // Presentation options throw an ObjC exception if the combination is invalid; the set
-        // above is valid (hideDock + hideMenuBar + the disable* flags).
-        NSApp.presentationOptions = opts
+        // An accessory (LSUIElement) app never owns the menu bar, so "hide menu bar" would have
+        // nothing to hide and the previous app's menus stay on screen. Become a regular app while
+        // locked; the Dock icon this adds is hidden by the same presentation options.
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
+        // Presentation options only take effect while the app is active, and activation is
+        // asynchronous (and may be refused once by cooperative activation), so: apply now, apply
+        // again every time we become active, and keep asking to be active for a few seconds.
+        activeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                                object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppModel.shared.kiosk.applyIfEngaged() }
+        }
+        bringForward()
+        applyIfEngaged()
+        retryTask = Task { @MainActor [weak self] in
+            for delay in [0.15, 0.4, 0.8, 1.5, 3.0, 6.0] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, self.engaged else { return }
+                if !NSApp.isActive { self.bringForward() }
+                self.applyIfEngaged()
+            }
+        }
+    }
+
+    /// Called by the overlay on any click/keypress inside Silicon Mode: a user gesture always
+    /// lets us become active, so the lock engages even if the earlier activation was refused.
+    func reassert() {
+        guard engaged else { return }
+        if !NSApp.isActive { bringForward() }
+        applyIfEngaged()
+    }
+
+    fileprivate func applyIfEngaged() {
+        guard engaged, NSApp.isActive else { return }
+        if NSApp.presentationOptions != Self.lockOptions { NSApp.presentationOptions = Self.lockOptions }
+    }
+
+    private func bringForward() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        // Make the built-in display's Silicon Mode window key (it accepts key status).
+        if let w = NSApp.windows.filter({ $0.isVisible && $0.canBecomeKey && $0.level.rawValue >= NSWindow.Level.screenSaver.rawValue - 1 }).first {
+            w.makeKeyAndOrderFront(nil)
+        }
     }
 
     func release() {
         guard engaged else { return }
         engaged = false
+        retryTask?.cancel()
+        retryTask = nil
+        if let o = activeObserver { NotificationCenter.default.removeObserver(o) }
+        activeObserver = nil
         NSApp.presentationOptions = previous
+        // Back to a menu-bar-only app unless a normal window (Settings, Stats, onboarding) is open.
+        let titledOpen = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) }
+        if !titledOpen { NSApp.setActivationPolicy(.accessory) }
     }
 }
 

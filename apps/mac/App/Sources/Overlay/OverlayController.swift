@@ -53,6 +53,7 @@ final class OverlayController {
 
     private var screenObserver: NSObjectProtocol?
     private var keyMonitor: Any?
+    private var clickMonitor: Any?
     private var idleTimer: Timer?
     private var lastMouse = NSPoint(x: -1, y: -1)
     private var lastMove = Date()
@@ -168,7 +169,8 @@ final class OverlayController {
         stage.focusedDisplay = NSScreen.overlayPrimary?.displayID ?? 0
         rebuildModePanels()
 
-        NSApp.activate()
+        // Silicon Mode must be the active app for the kiosk lock (hide menu bar, block ⌘-Tab).
+        NSApp.activate(ignoringOtherApps: true)
         focus(display: stage.focusedDisplay)
         startInteractionMonitors()
 
@@ -230,6 +232,9 @@ final class OverlayController {
                 continue
             }
             let p = OverlayPanel(frame: screen.frame, level: Self.modeLevel)
+            // Unlike the countdown strip, the full-screen mode windows *should* activate the app
+            // (a click must be able to bring Silicon Mode forward so its lock applies).
+            p.styleMask.remove(.nonactivatingPanel)
             p.acceptsKey = id == (stage.focusedDisplay == 0 ? primary : stage.focusedDisplay)
             p.host(SiliconModeRootView(stage: stage, displayID: id).environment(model))
             p.orderFrontRegardless()
@@ -268,9 +273,16 @@ final class OverlayController {
     private func startInteractionMonitors() {
         if keyMonitor == nil {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                MainActor.assumeIsolated { AppModel.shared.kiosk.reassert() }
                 let code = event.keyCode
                 let consume = MainActor.assumeIsolated { self?.handleKey(code) ?? false }
                 return consume ? nil : event
+            }
+        }
+        if clickMonitor == nil {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+                MainActor.assumeIsolated { AppModel.shared.kiosk.reassert() }
+                return event
             }
         }
         if idleTimer == nil {
@@ -287,6 +299,8 @@ final class OverlayController {
     private func stopInteractionMonitors() {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         keyMonitor = nil
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        clickMonitor = nil
         idleTimer?.invalidate()
         idleTimer = nil
         NSCursor.setHiddenUntilMouseMoves(false)

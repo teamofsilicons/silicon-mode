@@ -51,6 +51,7 @@ enum DebugCommands {
         case "stats": StatsWindow.present()
         case "menubar": MenuBarController.shared.toggle()
         case "onboarding": OnboardingPresenter.present()
+        case "onboarding-close": OnboardingPresenter.close()
         case "settings":
             NSApp.activate(ignoringOtherApps: true)
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
@@ -64,6 +65,31 @@ enum DebugCommands {
                    let s = try? JSONDecoder().decode(ModeSettings.self, from: d) { m.settings = s }
             }
         case "refresh": Task { await m.refreshAgents() }
+        case "type":
+            // Inject key presses through the app's own event path (same as a real keyboard).
+            let codes: [Character: UInt16] = ["0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25]
+            var delay = 0.0
+            for ch in val {
+                let code = ch == "<" ? UInt16(51) : (ch == "!" ? UInt16(53) : codes[ch] ?? 0)
+                let chars = ch == "<" ? "\u{7f}" : (ch == "!" ? "\u{1b}" : String(ch))
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    guard let w = NSApp.keyWindow else { return }
+                    for type in [NSEvent.EventType.keyDown, .keyUp] {
+                        if let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: w.windowNumber, context: nil, characters: chars,
+                                                    charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) {
+                            NSApp.sendEvent(e)
+                        }
+                    }
+                }
+                delay += 0.18
+            }
+        case "answer":
+            // answer=<optionID>[|free text] → first pending answerable question (as the menu bar would)
+            let parts = val.split(separator: "|", maxSplits: 1).map(String.init)
+            if let q = m.pendingQuestions.first(where: { $0.answerable }) {
+                m.answer(q, optionIDs: parts.first.map { [$0] } ?? [], text: parts.count > 1 ? parts[1] : nil, source: .menuBar)
+            }
         case "signin": m.account.signIn()
         case "signout": m.account.signOut()
         default: break
@@ -88,6 +114,10 @@ enum DebugCommands {
             "face": m.settings.faceID,
             "pinSet": m.pinVault.isSet,
             "signedIn": m.account.isSignedIn,
+            "appActive": NSApp.isActive,
+            "kiosk": ["engaged": m.kiosk.engaged, "effective": m.kiosk.isEffective,
+                      "options": NSApp.currentSystemPresentationOptions.rawValue],
+            "keyWindow": NSApp.keyWindow.map { String(describing: type(of: $0)) } as Any,
             "sync": ["status": String(describing: m.cloud.status), "device": m.cloud.deviceID as Any,
                      "live": m.cloud.realtimeLive, "lastSynced": m.cloud.lastSyncedAt.map { $0.timeIntervalSince1970 } as Any,
                      "account": m.account.account?.id as Any, "state": String(describing: m.account.state)],
