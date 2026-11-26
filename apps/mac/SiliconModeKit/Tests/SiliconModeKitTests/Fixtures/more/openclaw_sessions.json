@@ -1,0 +1,4 @@
+{"ts":1795168800000,"count":2,"sessions":[
+ {"key":"agent:main:demo","sessionId":"sid-1","displayName":"Demo cleanup","lastMessagePreview":"Cleaning the build folder","updatedAt":1795168740000,"hasActiveRun":true,"activeRunIds":["run-1"],"model":"demo-model","execCwd":"/tmp/demo-proj"},
+ {"key":"agent:main:quiet","sessionId":"sid-9","derivedTitle":"Old chat","updatedAt":1795150000000,"hasActiveRun":false,"activeRunIds":[]}
+],"defaults":{"model":"demo-model"}}

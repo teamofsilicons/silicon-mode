@@ -1,0 +1,8 @@
+{"v":3,"id":"T-0000demo-0000-4000-8000-000000000001","created":1795168500000,"title":"Explain the demo module",
+ "env":{"initial":{"trees":[{"displayName":"demo-proj","uri":"file:///tmp/demo-proj"}]}},
+ "messages":[
+  {"role":"user","messageId":0,"content":[{"type":"text","text":"Explain the demo module"}],"meta":{"sentAt":1795168500000}},
+  {"role":"assistant","messageId":1,"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"path":"/tmp/demo-proj/Sources/Demo.swift"}}],"state":{"type":"complete"}},
+  {"role":"user","messageId":2,"content":[{"type":"tool_result","toolUseID":"tu_1","tool_use_id":"tu_1","content":"…"}]},
+  {"role":"assistant","messageId":3,"content":[{"type":"text","text":"It parses demo files."}],"state":{"type":"complete"}}
+ ]}

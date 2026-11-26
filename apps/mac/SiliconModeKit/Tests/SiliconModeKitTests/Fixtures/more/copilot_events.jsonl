@@ -1,0 +1,6 @@
+{"type":"session.start","timestamp":"2026-11-20T10:00:00Z","data":{"cwd":"/tmp/demo-proj"}}
+{"type":"user.message","timestamp":"2026-11-20T10:00:01Z","data":{"content":"Add a unit test for the demo"}}
+{"type":"assistant.message","timestamp":"2026-11-20T10:00:05Z","data":{"content":"Adding a test file.","toolRequests":[{"toolCallId":"tc1","name":"create","arguments":{"path":"/tmp/demo-proj/Tests/DemoTests.swift"}}]}}
+{"type":"tool.execution_complete","timestamp":"2026-11-20T10:00:06Z","data":{"toolCallId":"tc1","success":true}}
+{"type":"assistant.message","timestamp":"2026-11-20T10:00:09Z","data":{"content":"Test added."}}
+{"type":"assistant.turn_end","timestamp":"2026-11-20T10:00:10Z","data":{}}

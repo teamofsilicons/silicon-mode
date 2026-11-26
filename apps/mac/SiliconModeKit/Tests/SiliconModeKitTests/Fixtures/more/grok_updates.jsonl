@@ -1,0 +1,8 @@
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Add a README "}}},"timestamp":"2026-11-20T10:00:00Z"}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"to the demo"}}}}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Sure, "}}},"timestamp":"2026-11-20T10:00:05Z"}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"writing it now."}}}}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Write README.md","kind":"edit","status":"pending","rawInput":{"path":"/tmp/demo-proj/README.md"}}},"timestamp":"2026-11-20T10:00:10Z"}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}},"timestamp":"2026-11-20T10:00:12Z"}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}},"timestamp":"2026-11-20T10:00:15Z"}
+{"params":{"sessionId":"g-1","update":{"sessionUpdate":"turn_completed","prompt_id":"p1","usage":{"inputTokens":10,"outputTokens":5}}},"timestamp":"2026-11-20T10:00:16Z"}
