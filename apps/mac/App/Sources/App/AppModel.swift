@@ -267,11 +267,11 @@ final class AppModel {
         let r = pinVault.verify(pin)
         switch r {
         case .ok: handle(.unlocked)
-        case .wrong, .throttled, .unavailable: sounds.play(.wrongPin)
+        case .wrong, .throttled, .unavailable: if settings.uiSoundsEnabled { sounds.play(.wrongPin) }
         case .notSet:
             // No PIN configured → nothing to protect, unless one existed when this session began
             // (it can't silently vanish mid-session; fail closed).
-            if pinRequiredForSession { sounds.play(.wrongPin) } else { handle(.unlocked) }
+            if !pinRequiredForSession { handle(.unlocked) } else if settings.uiSoundsEnabled { sounds.play(.wrongPin) }
         }
         return r
     }
@@ -347,6 +347,10 @@ final class AppModel {
     }
 
     // MARK: Effects
+
+    /// Whether Silicon Mode can make a sound with the current settings: UI sounds, or a panic alarm
+    /// (panic and its sound both on). Prewarm only starts the audio engine when one can.
+    var soundsMayPlay: Bool { settings.uiSoundsEnabled || (settings.panicEnabled && settings.panicSoundEnabled) }
 
     private func apply(_ events: [ModeEngine.ModeEvent]) {
         guard !events.isEmpty else { return }

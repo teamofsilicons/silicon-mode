@@ -141,10 +141,15 @@ final class SoundPlayer {
     /// Build the graph and start the output once, silently, while nothing is on screen. The first start
     /// of an engine (graph, IO unit, output device) holds the main thread for 150–350 ms; paying it here
     /// keeps it off the countdown's and the entry's first frames. The idle check stops the engine again a
-    /// few seconds later; restarting a built engine on the same device is quick.
-    func warmUp() {
-        guard !offline, panicMode == .off else { return }
-        _ = ensureRunning()
+    /// few seconds later; restarting a built engine on the same device is quick. Callers only warm up
+    /// when a sound can play (`AppModel.soundsMayPlay`). Returns whether the engine is now built and
+    /// started (false offline, or when no output is available: worth trying again later).
+    @discardableResult
+    func warmUp() -> Bool {
+        guard !offline else { return false }
+        // Something is sounding (an alarm or a preview): the engine is already up.
+        guard panicMode == .off else { return graph != nil }
+        return ensureRunning() != nil
     }
 
     // MARK: Panic

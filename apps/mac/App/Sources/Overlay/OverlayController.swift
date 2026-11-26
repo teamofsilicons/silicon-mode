@@ -495,10 +495,10 @@ final class OverlayController {
                 countdownButtonPanel?.buildLayers()
             }))
         }
-        if !audioWarmed {
+        // Only when a sound can play: with every sound off, nothing should start the output device.
+        if !audioWarmed, model.soundsMayPlay {
             steps.append(("audio engine", { [unowned self] in
-                audioWarmed = true
-                model.sounds.warmUp()
+                audioWarmed = model.soundsMayPlay && model.sounds.warmUp()
             }))
         }
         if !shadersWarmed {
