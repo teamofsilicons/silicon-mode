@@ -25,6 +25,7 @@ public enum MoreProviders {
             GeminiProvider(env: env),
             SiliconProvider(env: env),
             OmniProvider(env: env),
+            T3CodeProvider(env: env),
             GrokProvider(env: env),
             CursorProvider(env: env),
             AmpProvider(env: env),
@@ -42,7 +43,7 @@ public enum MoreProviders {
     /// Provider ids that have a dedicated provider in this file group (the fallback skips them).
     static let dedicatedIDs: Set<String> = [
         "hermes", "openclaw", "antigravity", "antigravity-ide", "antigravity-cli", "gemini-cli", "silicon", "omni",
-        "grok", "cursor", "amp", "factory-droid", "kiro", "aider", "qwen-code", "crush", "goose", "copilot",
+        "grok", "cursor", "amp", "factory-droid", "kiro", "aider", "qwen-code", "crush", "goose", "copilot", "t3code",
     ]
 
     /// Owned by the core providers (CoreProviders.swift). Never reported from here.
