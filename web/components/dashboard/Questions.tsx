@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Check, CornerDownLeft, Laptop, Smartphone, X } from "lucide-react";
+import { Check, CornerDownLeft, Laptop, Smartphone, TriangleAlert, X } from "lucide-react";
 import { Button } from "@teamofsilicons/silicon-ui/button";
 import { ProviderMark } from "@/components/ProviderMark";
 import { relativeTime } from "@/lib/format";
@@ -29,7 +29,6 @@ export function Questions({ state, onAnswer, onDismiss }: { state: DashboardStat
             q={q}
             session={q.session_id ? state.sessions[q.session_id] : undefined}
             view={questionView(q, state.answers[q.id], state.local[q.id])}
-            applied={Boolean(state.answers[q.id]?.consumed_at) || q.state === "answered"}
             failed={state.local[q.id]?.phase === "failed" ? (state.local[q.id] as { message: string }).message : null}
             now={now}
             onAnswer={onAnswer}
@@ -47,11 +46,10 @@ function primaryIndex(q: Question): number {
   return i >= 0 ? i : q.options.length > 1 ? -1 : 0;
 }
 
-function QuestionCard({ q, session, view, applied, failed, now, onAnswer, onDismiss }: {
+function QuestionCard({ q, session, view, failed, now, onAnswer, onDismiss }: {
   q: Question;
   session: AgentSession | undefined;
   view: ReturnType<typeof questionView>;
-  applied: boolean;
   failed: string | null;
   now: number;
   onAnswer: Answer;
@@ -62,12 +60,14 @@ function QuestionCard({ q, session, view, applied, failed, now, onAnswer, onDism
   const p = session ? provider(session.provider) : null;
   const done = view.status !== "open" && view.status !== "sending";
 
-  // Resolved cards stay a moment so the outcome registers, then fold away.
+  // Resolved cards stay a moment so the outcome registers, then fold away. An answer the Mac couldn't
+  // apply is not resolved: the agent is still waiting, so that card stays until the Mac closes it.
+  const settled = view.status === "elsewhere" || view.status === "closed" || (view.status === "sent" && view.applied);
   useEffect(() => {
-    if (!(view.status === "elsewhere" || view.status === "closed" || (view.status === "sent" && applied))) return;
+    if (!settled) return;
     const id = window.setTimeout(() => onDismiss(q.id), 14_000);
     return () => window.clearTimeout(id);
-  }, [view.status, applied, q.id, onDismiss]);
+  }, [settled, q.id, onDismiss]);
 
   const send = (optionId: string | null) => {
     setPicked(optionId ?? "__text");
@@ -137,7 +137,16 @@ function QuestionCard({ q, session, view, applied, failed, now, onAnswer, onDism
             <>
               <span className={styles.qIcon} data-tone="ok"><Check size={13} strokeWidth={2.6} /></span>
               <span>
-                <b>{view.label}</b> — {applied ? "applied on the Mac" : "sent, waiting for the Mac"}
+                <b>{view.label}</b> — {view.applied ? "applied on the Mac" : "sent, waiting for the Mac"}
+              </span>
+            </>
+          )}
+          {view.status === "unapplied" && (
+            <>
+              <span className={styles.qIcon} data-tone="warn"><TriangleAlert size={13} strokeWidth={2.4} /></span>
+              <span>
+                {view.from ? <>Answered {view.from} · </> : null}
+                <b>{view.label}</b> — the Mac couldn&apos;t apply it. Answer it on the Mac.
               </span>
             </>
           )}

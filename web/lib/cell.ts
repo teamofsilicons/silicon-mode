@@ -7,6 +7,7 @@
 // The callback page flips to token mode automatically if a cookie sign-in doesn't stick.
 import { createClient, CellsError, type Cells, type Session } from "@teamofsilicons/cells";
 import { APP_ID, CELL_URL, PUBLISHABLE_KEY } from "./config.ts";
+import { markSignIn, takeSignIn } from "./signin.ts";
 import type { CellUser } from "./types.ts";
 
 export type SessionMode = "cookie" | "token";
@@ -80,8 +81,24 @@ export function callbackUrl(): string {
   return `${location.origin}/auth/callback`;
 }
 
-export function signInUrl(method?: "google" | "apple" | "email" | "phone" | "signup"): string {
+function signInUrl(method?: "google" | "apple" | "email" | "phone" | "signup"): string {
   return getCell().signInUrl({ redirectTo: callbackUrl(), app: APP_ID, method });
+}
+
+/**
+ * Sends this tab to the cell's sign-in page. The marker it leaves first is what lets /auth/callback
+ * accept the session that comes back (signin.ts), which is why the bare URL isn't exported.
+ */
+export function startSignIn(options: { replace?: boolean; method?: Parameters<typeof signInUrl>[0] } = {}): void {
+  const href = signInUrl(options.method);
+  markSignIn(storage(), sessionMode());
+  if (options.replace) location.replace(href);
+  else location.href = href;
+}
+
+/** Reads and clears this browser's pending-sign-in marker: the mode it asked for, or null if none is pending. */
+export function takePendingSignIn(): SessionMode | null {
+  return takeSignIn(storage());
 }
 
 export function isUnauthorized(error: unknown): boolean {

@@ -23,26 +23,35 @@ export interface DeviceSnapshot {
 
 export async function loadDeviceSnapshot(cell: CellLike, deviceId: string, signal?: AbortSignal): Promise<DeviceSnapshot> {
   const dev = `eq.${deviceId}`;
-  const [sessions, events, questions, answers] = await Promise.all([
+  const questions = cell.database<Question[]>("questions", {
+    query: { device_id: dev, state: "eq.pending", order: "created_at.asc", limit: "30" }, signal,
+  });
+  // The answer to each of those questions, consumed or not. An unconsumed one is waiting for the Mac;
+  // a consumed one the Mac couldn't apply (outcome failed/stale) still blocks the question, since only
+  // one answer per question is accepted, and the card has to say so after a reload too.
+  const answers = questions.then(async ({ data }) => {
+    const ids = (data ?? []).map((q) => q.id);
+    if (!ids.length) return [];
+    const { data: rows } = await cell.database<Answer[]>("answers", {
+      query: { device_id: dev, question_id: `in.(${ids.join(",")})` }, signal,
+    });
+    return rows ?? [];
+  });
+  const [sessions, events, q, a] = await Promise.all([
     cell.database<AgentSession[]>("agent_sessions", {
       query: { device_id: dev, order: "last_event_at.desc", limit: "50" }, signal,
     }),
     cell.database<AgentEvent[]>("events", {
       query: { device_id: dev, order: "at.desc,seq.desc", limit: "80" }, signal,
     }),
-    cell.database<Question[]>("questions", {
-      query: { device_id: dev, state: "eq.pending", order: "created_at.asc", limit: "30" }, signal,
-    }),
-    // Unconsumed answers: questions somebody already answered that the Mac hasn't applied yet.
-    cell.database<Answer[]>("answers", {
-      query: { device_id: dev, consumed_at: "is.null", order: "created_at.desc", limit: "30" }, signal,
-    }),
+    questions,
+    answers,
   ]);
   return {
     sessions: sessions.data ?? [],
     events: events.data ?? [],
-    questions: (questions.data ?? []).map(normalizeQuestion),
-    answers: answers.data ?? [],
+    questions: (q.data ?? []).map(normalizeQuestion),
+    answers: a,
   };
 }
 

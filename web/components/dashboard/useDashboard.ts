@@ -29,7 +29,8 @@ export function useDashboard(source: Source, onSignedOut: () => void): Dashboard
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const feedRef = useRef<LiveFeed | null>(null);
+  /** This attempt's realtime socket. State, not a ref: the per-Mac effect has to re-run for each new one. */
+  const [feed, setFeed] = useState<LiveFeed | null>(null);
   const [resync, setResync] = useState(0);
   const signedOutRef = useRef(onSignedOut);
   signedOutRef.current = onSignedOut;
@@ -51,12 +52,12 @@ export function useDashboard(source: Source, onSignedOut: () => void): Dashboard
     }
     let cancelled = false;
     const cell = getCell();
-    const feed = new LiveFeed(cell, {
+    const liveFeed = new LiveFeed(cell, {
       onChange: (table, operation, row, old) => dispatch({ type: "change", table, operation, row, old }),
       onStatus: (s) => !cancelled && setLive(s),
       onResync: () => setResync((n) => n + 1),
     });
-    feedRef.current = feed;
+    setFeed(liveFeed);
     setError(null);
     (async () => {
       try {
@@ -71,7 +72,7 @@ export function useDashboard(source: Source, onSignedOut: () => void): Dashboard
         dispatch({ type: "devices", devices });
         if (preferred && devices.some((d) => d.id === preferred)) dispatch({ type: "select", deviceId: preferred });
         setLoading(false);
-        void feed.start();
+        void liveFeed.start();
       } catch (e) {
         if (!cancelled) {
           setLoading(false);
@@ -81,12 +82,12 @@ export function useDashboard(source: Source, onSignedOut: () => void): Dashboard
     })();
     return () => {
       cancelled = true;
-      feed.stop();
-      feedRef.current = null;
+      liveFeed.stop();
     };
   }, [source, attempt, fail]);
 
-  // Per-Mac snapshot whenever the selection changes (or history was trimmed).
+  // Per-Mac subscriptions + snapshot whenever the selection changes, a new socket replaces the old
+  // one (Retry: it starts without them, and nothing was listening in between), or history was trimmed.
   useEffect(() => {
     const id = state.selected;
     if (!id) return;
@@ -94,15 +95,19 @@ export function useDashboard(source: Source, onSignedOut: () => void): Dashboard
       dispatch({ type: "snapshot", deviceId: id, ...demoSnapshot(id, Date.now()) });
       return;
     }
-    feedRef.current?.setDevice(id);
+    if (!feed) return;
+    feed.setDevice(id);
     const ctrl = new AbortController();
+    dispatch({ type: "snapshotRequested", deviceId: id });
     loadDeviceSnapshot(getCell(), id, ctrl.signal)
-      .then((snap) => dispatch({ type: "snapshot", deviceId: id, ...snap }))
+      .then((snap) => {
+        if (!ctrl.signal.aborted) dispatch({ type: "snapshot", deviceId: id, ...snap });
+      })
       .catch((e) => {
         if (!ctrl.signal.aborted) fail(e);
       });
     return () => ctrl.abort();
-  }, [state.selected, source, resync, fail]);
+  }, [state.selected, source, feed, resync, fail]);
 
   // A device list resync after cursor_expired.
   useEffect(() => {

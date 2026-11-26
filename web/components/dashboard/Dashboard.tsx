@@ -9,7 +9,7 @@ import SegmentedControl from "@teamofsilicons/silicon-ui/segmented-control";
 import UserMenu from "@teamofsilicons/silicon-ui/user-menu";
 import { LogoMark } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { restoreUser, signInUrl, signOut } from "@/lib/cell";
+import { restoreUser, signOut, startSignIn } from "@/lib/cell";
 import { counts as countsOf, isOnline } from "@/lib/store";
 import { useTheme } from "@/lib/theme";
 import type { CellUser } from "@/lib/types";
@@ -98,7 +98,7 @@ function SignIn() {
         </div>
         <h1>Sign in to Silicon Mode</h1>
         <p>See each Mac&apos;s status, follow your agents live and answer their questions — from any browser.</p>
-        <Button size="lg" onClick={() => { location.href = signInUrl(); }} className={styles.signInButton}>
+        <Button size="lg" onClick={() => startSignIn()} className={styles.signInButton}>
           <LogIn size={16} strokeWidth={2} aria-hidden="true" /> Continue with Silicon Accounts
         </Button>
         <div className={styles.signInLinks}>
@@ -199,7 +199,7 @@ function Signed({ source, user, onSignedOut }: { source: Source; user: CellUser 
                 <AgentsList sessions={sessions} events={state.events} />
               </div>
               <div className={styles.colSide}>
-                <TailLog events={state.events} sessions={state.sessions} fresh={state.fresh} live={dash.live} onSettle={dash.settle} />
+                <TailLog key={device.id} events={state.events} sessions={state.sessions} fresh={state.fresh} live={dash.live} onSettle={dash.settle} />
               </div>
             </div>
           )}
