@@ -72,7 +72,7 @@ final class OverlayController {
 
         stage.countdownExit = .retract
         stage.countdownFrozenRemaining = nil
-        stage.countdownStart = ProcessInfo.processInfo.systemUptime
+        stage.countdownStart = MonotonicClock.now()
         stage.countdownDuration = max(model.settings.countdownSeconds, 0.1)
         if case .countdown(let start, let duration) = model.phase {
             stage.countdownStart = start
@@ -108,7 +108,7 @@ final class OverlayController {
         guard countdownPanel != nil, countdownTeardown == nil else { return }
         // Called before the engine's phase is mirrored, so this is still the live countdown.
         if case .countdown(let start, let duration) = model.phase {
-            stage.countdownFrozenRemaining = max(0, duration - (ProcessInfo.processInfo.systemUptime - start))
+            stage.countdownFrozenRemaining = max(0, duration - (MonotonicClock.now() - start))
         } else {
             stage.countdownFrozenRemaining = 0
         }

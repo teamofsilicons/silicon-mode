@@ -155,11 +155,13 @@ private struct CountdownDial: View {
     private func timing(now: Date) -> (Double, Double) {
         if let p = preview { return (p.remaining, p.duration) }
         if case .countdown(let start, let duration) = model.phase {
-            return (max(0, duration - (ProcessInfo.processInfo.systemUptime - start)), duration)
+            // Same clock as the engine (MonotonicClock): mixing in systemUptime, which stops during
+            // sleep, made "remaining" 5 s + all sleep since boot (shown as "1,0…").
+            return (min(duration, max(0, duration - (MonotonicClock.now() - start))), duration)
         }
         if let frozen = stage.countdownFrozenRemaining { return (frozen, stage.countdownDuration) }
         let d = stage.countdownDuration
-        return (max(0, d - (ProcessInfo.processInfo.systemUptime - stage.countdownStart)), d)
+        return (min(d, max(0, d - (MonotonicClock.now() - stage.countdownStart))), d)
     }
 
     private func ring(progress: Double, sinceTick: Double) -> some View {
