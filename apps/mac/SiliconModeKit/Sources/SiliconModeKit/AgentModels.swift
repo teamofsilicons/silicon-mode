@@ -297,14 +297,47 @@ public struct AgentCounts: Equatable, Sendable, Codable {
 
 /// Text helpers shared by providers when summarizing events.
 public enum EventText {
-    /// Collapse whitespace and clip to `max` characters with an ellipsis.
+    /// Collapse whitespace into single spaces and clip to `max` characters with an ellipsis.
+    ///
+    /// A clipped line ends on a whole word when a word ends near the cut (else mid-word), never on
+    /// a space or dangling punctuation, and the ellipsis is joined to that word: a wrapping text
+    /// view can't leave the ellipsis alone on a line of its own.
     public static func clip(_ s: String, max: Int = 140) -> String {
-        let one = s.split(whereSeparator: { $0.isNewline || $0 == "\t" }).joined(separator: " ")
-            .replacingOccurrences(of: "  ", with: " ")
-            .trimmingCharacters(in: .whitespaces)
-        if one.count <= max { return one }
-        return String(one.prefix(max - 1)) + "…"
+        guard max > 0 else { return "" }
+        // One pass, stopping one character past `max` (enough to know whether it fits).
+        var one = ""
+        var count = 0, space = false
+        for ch in s {
+            if ch.isWhitespace { space = count > 0; continue }
+            if space { one.append(" "); count += 1; space = false; if count > max { break } }
+            one.append(ch)
+            count += 1
+            if count > max { break }
+        }
+        if count <= max { return one }
+        guard max > 1 else { return "…" }
+
+        let head = one.prefix(max - 1)
+        var cut = head[...]
+        // The cut already falls between words, or a word ends close enough before it.
+        if one[head.endIndex] != " " {
+            let window = Swift.min(24, max / 5)
+            if let sp = head.lastIndex(of: " "), head.distance(from: sp, to: head.endIndex) <= window + 1 {
+                cut = head[..<sp]
+            }
+        }
+        while let last = cut.last, last == " " || Self.danglingAtClip.contains(last) { cut = cut.dropLast() }
+        if cut.isEmpty {
+            // Nothing but punctuation: keep it rather than an ellipsis alone.
+            cut = head
+            while cut.last == " " { cut = cut.dropLast() }
+        }
+        return String(cut) + "…"
     }
+
+    /// Punctuation that reads badly right before a clip's ellipsis ("running as,…", "see (…").
+    private static let danglingAtClip: Set<Character> = [",", ";", ":", ".", "…", "-", "–", "—", "(", "[", "{",
+                                                         "\"", "'", "“", "‘", "/", "&", "+", "="]
 
     /// Shorten an absolute path relative to cwd / home.
     public static func shortPath(_ p: String, cwd: String?) -> String {
