@@ -42,6 +42,16 @@ final class AppModel {
     var simulatedAngle: Double?
 
     // MARK: Agents
+
+    /// Copy the bundled hook helper to its stable path (~/.silicon-mode/bin) so installed agent
+    /// hooks keep working when the app moves or updates.
+    private func installHookHelper() {
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/silicon-mode-hook")
+        guard FileManager.default.isExecutableFile(atPath: bundled.path) else { return }
+        do { try HookInstaller.installHelper(from: bundled) } catch {
+            NSLog("SiliconMode: helper install failed: \(error)")
+        }
+    }
     private(set) var snapshot: AgentHub.Snapshot = .empty
     var sessions: [AgentSession] { snapshot.sessions }
     var counts: AgentCounts { snapshot.counts }
@@ -62,6 +72,8 @@ final class AppModel {
     let hotKeys = HotKeyCenter()
     let account = AccountManager()
     let cloud = CloudSync()
+    /// Local hourly usage history (the Stats window's heatmap; source for cloud usage rows).
+    let usage = UsageTracker(url: HookWire.supportDirectory.appendingPathComponent("usage.json"))
 
     private var engine: ModeEngine
     private var sensorTimer: Timer?
@@ -104,8 +116,10 @@ final class AppModel {
             Task { @MainActor in AppModel.shared.refreshAgentsSoon() }
         }
         do { try hookServer.start() } catch { NSLog("SiliconMode: hook server failed: \(error)") }
-        Task { await hub.setHooks(hookServer) }
+        let disabled = Set(settings.disabledProviders)
+        Task { await hub.setHooks(hookServer); await hub.setDisabled(disabled) }
         updateHoldPolicy()
+        installHookHelper()
 
         // Agent polling.
         agentTask = Task { [weak self] in
@@ -274,6 +288,10 @@ final class AppModel {
             settings.caffeinate ? caffeinator.begin(reason: "Silicon Mode is active") : caffeinator.end()
         }
         if !settings.panicSoundEnabled { sounds.stopPanic() }
+        if settings.disabledProviders != old.disabledProviders {
+            let d = Set(settings.disabledProviders)
+            Task { await hub.setDisabled(d); await refreshAgents() }
+        }
         if settings.tailLogCount != old.tailLogCount {
             let n = settings.tailLogCount
             Task { await hub.setMaxEvents(n) }
@@ -306,6 +324,8 @@ final class AppModel {
 
     func refreshAgents() async {
         let snap = await hub.refresh()
+        usage.sample(running: snap.sessions.filter { $0.state.isRunning }.map { (id: $0.id, provider: $0.provider) },
+                     siliconModeActive: isActive)
         if snap != snapshot {
             let hadQuestions = Set(snapshot.pendingQuestions.map(\.id))
             snapshot = snap

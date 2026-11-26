@@ -55,6 +55,10 @@ public struct ModeSettings: Codable, Equatable, Sendable {
     public var menuBarHoldSeconds: Double = 0
     /// Sync status/logs/questions to the user's Silicon account (mobile + web).
     public var cloudSyncEnabled = true
+    /// Agent providers the user turned off (provider ids, e.g. "hermes").
+    public var disabledProviders: [String] = []
+    /// Onboarding finished (PIN set, hooks offered, face picked).
+    public var onboardingCompleted = false
 
     public init() {}
 
@@ -94,6 +98,8 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         v("launchAtLogin", \.launchAtLogin)
         v("menuBarHoldSeconds", \.menuBarHoldSeconds)
         v("cloudSyncEnabled", \.cloudSyncEnabled)
+        v("disabledProviders", \.disabledProviders)
+        v("onboardingCompleted", \.onboardingCompleted)
         self = s
     }
 

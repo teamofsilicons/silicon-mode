@@ -20,7 +20,19 @@ struct SnapshotItem {
 enum SnapshotHarness {
     static var all: [SnapshotItem] {
         OverlaySnapshots.items + HUDSnapshots.items + FaceSnapshots.items + FaceSnapshotsB.items
-            + MenuBarSnapshots.items + SettingsSnapshots.items
+            + MenuBarSnapshots.items + SettingsSnapshots.items + coreItems
+    }
+
+    /// Views owned by the app shell (Stats window).
+    static var coreItems: [SnapshotItem] {
+        [
+            SnapshotItem(id: "stats-light", size: CGSize(width: 860, height: 760), dark: false) {
+                AnyView(StatsView(preview: StatsView.sampleBuckets()))
+            },
+            SnapshotItem(id: "stats-dark", size: CGSize(width: 860, height: 760), dark: true) {
+                AnyView(StatsView(preview: StatsView.sampleBuckets()))
+            },
+        ]
     }
 
     /// Seconds offset for time-based animations (faces read `SnapshotHarness.time` if set).
