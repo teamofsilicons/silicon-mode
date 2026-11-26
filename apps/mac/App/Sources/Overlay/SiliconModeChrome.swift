@@ -30,7 +30,6 @@ struct SiliconModeChrome: View {
             // thing on the face, redrawn every time the sensor flickers by a degree.
             if !idle {
                 SiliconModeAngleReadout(preview: preview)
-                    .padding(.trailing, 6)
                     .transition(.opacity)
             }
             if hidden && pending > 0 {
@@ -148,6 +147,8 @@ private struct NeedYouPill: View {
         .buttonStyle(ChromePressStyle())
         .focusable(false)
         .chromeGlass(in: Capsule(), hovering: hovering)
+        // Outside the glass, so the capsule resizes along with the label's crossfade.
+        .animation(AgentSummaryMotion.change, value: count)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(peeking ? "Hide the questions" : "Show the questions")
         .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
@@ -164,6 +165,7 @@ private struct NeedYouCount: View {
             .padding(.horizontal, 16)
             .frame(height: ChromeMetrics.height)
             .chromeGlass(in: Capsule(), hovering: false)
+            .animation(AgentSummaryMotion.change, value: count)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
     }
@@ -177,9 +179,9 @@ private struct NeedYouLabel: View {
         Label {
             Text("\(count) need\(count == 1 ? "s" : "") you")
                 .monospacedDigit()
-                // A crossfade (not `.numericText()`, whose roll leaves cached glyph bitmaps behind).
+                // A crossfade (not `.numericText()`, whose roll leaves cached glyph bitmaps behind),
+                // animated by the pill around it.
                 .contentTransition(.opacity)
-                .animation(AgentSummaryMotion.change, value: count)
         } icon: {
             // One solid colour with the label (hierarchical would draw the bell as a translucent,
             // brownish orange on the dark glass).
@@ -298,7 +300,8 @@ struct SiliconModeControl: View {
         .opacity(finalStretch ? 1 : ChromeDim.control(idle: idle, hidden: furnitureHidden))
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .animation(.spring(duration: 0.5, bounce: 0.2), value: showsUnlock)
-        .animation(.easeInOut(duration: 0.3), value: stage.pointerIdle)
+        // The same fade as the rest of the chrome (`SiliconModeChrome`).
+        .animation(.easeInOut(duration: 0.6), value: stage.pointerIdle)
         .animation(.easeInOut(duration: 0.6), value: finalStretch)
     }
 
@@ -452,26 +455,27 @@ final class GraceRingView: NSView {
 
 // MARK: - Lid angle
 
-/// The lid glyph and the current angle, a secondary label on the chrome row (shown while the pointer
-/// moves). Hovering it tells how far the lid can close before the alarm: the angle only matters
-/// next to the panic angle, which follows from the angle Silicon Mode was entered at.
+/// The current lid angle on a small glass chip at the head of the chrome row (shown while the
+/// pointer moves), like a camera's zoom readout: smaller than the controls and not one of them.
+/// The glass keeps it legible over any face. Hovering it tells how far the lid can close before
+/// the alarm: the angle only matters next to the panic angle, which follows from the angle Silicon
+/// Mode was entered at.
 struct SiliconModeAngleReadout: View {
     @Environment(AppModel.self) private var model
     var preview: SiliconModePreview?
+
+    static let height: CGFloat = 30
 
     var body: some View {
         let angle = preview?.angle ?? model.angle
         let degrees = angle.map { Int($0.rounded()) }
         let alarm = alarmAngle.map { Int($0.rounded()) }
         HStack(spacing: 6) {
-            LidGlyph(angle: angle ?? 90)
-                .stroke(.secondary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                .frame(width: 16, height: 12)
-                .animation(.spring(duration: 0.4, bounce: 0.1), value: angle)
-            Text(degrees.map { "\($0)°" } ?? "—")
+            Image(systemName: "laptopcomputer")
                 .font(.subheadline)
+            Text(degrees.map { "\($0)°" } ?? "—")
+                .font(.subheadline.weight(.medium))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
                 // A crossfade, not `.numericText()`. This readout changes every couple of seconds for
                 // as long as Silicon Mode is up (the sensor flickers by a degree), and every animated
                 // numericText change redraws its digits on the CPU at each intermediate scale and blur
@@ -479,10 +483,12 @@ struct SiliconModeAngleReadout: View {
                 // never lets them go: about 0.5 MB per change, i.e. steady growth of ~0.3 MB/s for the
                 // whole session (measured). A crossfade draws the glyphs at one size: nothing new to cache.
                 .contentTransition(.opacity)
-                .animation(.easeInOut(duration: 0.2), value: degrees)
         }
-        // Legible over a bright face without a glass plate of its own.
-        .shadow(color: .black.opacity(0.35), radius: 4)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 11)
+        .frame(height: Self.height)
+        .chromeGlass(in: Capsule(), hovering: false)
+        .animation(.easeInOut(duration: 0.2), value: degrees)
         .help(alarm.map { "Lid angle. Closing the lid below \($0)° while agents run sounds the alarm." } ?? "Lid angle")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(degrees.map { d in
@@ -494,25 +500,5 @@ struct SiliconModeAngleReadout: View {
     private var alarmAngle: Double? {
         guard preview == nil, model.settings.panicEnabled, let base = model.phase.active?.baselineAngle else { return nil }
         return ModeEngine.panicAngle(baseline: base, settings: model.settings)
-    }
-}
-
-/// A laptop seen from the side: base along the bottom, lid hinged at the left.
-private struct LidGlyph: Shape {
-    var angle: Double
-    var animatableData: Double {
-        get { angle }
-        set { angle = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let hinge = CGPoint(x: rect.minX + 1, y: rect.maxY - 1)
-        p.move(to: CGPoint(x: rect.maxX, y: hinge.y))
-        p.addLine(to: hinge)
-        let a = min(max(angle, 0), 180) * .pi / 180
-        let len = rect.width - 2
-        p.addLine(to: CGPoint(x: hinge.x + cos(a) * len, y: hinge.y - sin(a) * min(len, rect.height - 2) * 1.1))
-        return p
     }
 }

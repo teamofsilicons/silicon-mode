@@ -136,7 +136,7 @@ private struct CountdownDial: View {
             let _ = preview == nil ? OverlayTiming.frame(.countdown) : ()
             let (remaining, duration) = timing(now: tl.date)
             let elapsed = max(0, duration - remaining)
-            let digit = max(1, Int(ceil(remaining - 0.0005)))
+            let digit = Self.digit(remaining)
             // Seconds since the last whole-second boundary (drives the per-tick ripple).
             let sinceTick = elapsed - floor(elapsed)
             let progress = min(1, elapsed / max(duration, 0.001))
@@ -157,12 +157,22 @@ private struct CountdownDial: View {
                     .transition(digitTransition)
             }
             .frame(width: diameter, height: diameter)
-            .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.5, bounce: 0.22), value: digit)
+            // Only counting down animates. The dial is built once and kept between entries, so a
+            // new countdown starts by jumping from the last one's digit back up to the first: that
+            // swap happens at once, under the dial's own drop-in.
+            .animation(digit < Self.digit(duration) ? digitAnimation : nil, value: digit)
             .onChange(of: digit) { old, new in
                 guard new < old, preview == nil, visible, model.settings.uiSoundsEnabled else { return }
                 model.sounds.play(.tick)
             }
         }
+    }
+
+    /// The digit shown with `remaining` seconds left: 5 down to 1.
+    private static func digit(_ remaining: Double) -> Int { max(1, Int(ceil(remaining - 0.0005))) }
+
+    private var digitAnimation: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.5, bounce: 0.22)
     }
 
     /// Counting down: the next digit comes from above, the last one falls below. Moves and fades
