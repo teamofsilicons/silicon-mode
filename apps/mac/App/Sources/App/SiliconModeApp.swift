@@ -8,15 +8,8 @@ struct SiliconModeApp: App {
     @State private var model = AppModel.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarContent()
-                .environment(model)
-        } label: {
-            MenuBarIcon()
-                .environment(model)
-        }
-        .menuBarExtraStyle(.window)
-
+        // The menu bar item is an NSStatusItem + custom glass NSPanel (MenuBar/MenuBarController),
+        // so ⌃⌥S and code can open it — MenuBarExtra can't be opened programmatically.
         Settings {
             SettingsView()
                 .environment(model)
@@ -42,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if SnapshotHarness.runIfRequested() { exit(0) }
             let model = AppModel.shared
             model.start()
+            MenuBarController.shared.install()
             if model.needsOnboarding || CommandLine.arguments.contains("--onboarding") {
                 OnboardingPresenter.present()
             }

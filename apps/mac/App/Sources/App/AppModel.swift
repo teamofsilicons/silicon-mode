@@ -93,9 +93,12 @@ final class AppModel {
         RunLoop.main.add(sensorTimer!, forMode: .common)
 
         // Hook server (Claude Code / Codex hooks → real-time state + answerable prompts).
-        hookServer.holdDuration = { [weak self] in
-            // Read on the hook server's queue; reads a snapshot published from the main actor.
-            self?.holdPolicySnapshot.value ?? 0
+        let policy = holdPolicySnapshot
+        hookServer.holdDuration = { agent in
+            // Called on the hook server's queue; reads a snapshot published from the main actor.
+            let p = policy.value
+            // Claude Code answers its own dialog in parallel, so holding is always safe there.
+            return agent == "claude-code" ? max(p, 6 * 3600) : p
         }
         hookServer.onChange = {
             Task { @MainActor in AppModel.shared.refreshAgentsSoon() }

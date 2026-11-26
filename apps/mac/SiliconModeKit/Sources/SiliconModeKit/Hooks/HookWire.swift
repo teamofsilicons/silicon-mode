@@ -10,19 +10,27 @@ import Foundation
 public enum HookWire {
     public static let version = 1
 
-    /// ~/Library/Application Support/Silicon Mode/hook.sock
+    /// ~/Library/Application Support/Silicon Mode — settings, caches, debug state.
     public static var supportDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Silicon Mode", isDirectory: true)
     }
 
-    public static var socketPath: String {
-        supportDirectory.appendingPathComponent("hook.sock").path
+    /// ~/.silicon-mode — runtime files referenced from agent hook commands (no spaces in paths,
+    /// so hook command strings stay simple to quote).
+    public static var runtimeDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".silicon-mode", isDirectory: true)
     }
 
-    /// Stable install location of the helper that agent hook configs point at.
+    /// ~/.silicon-mode/run/hook.sock
+    public static var socketPath: String {
+        runtimeDirectory.appendingPathComponent("run/hook.sock").path
+    }
+
+    /// Stable install location of the helper that agent hook configs point at:
+    /// ~/.silicon-mode/bin/silicon-mode-hook
     public static var installedHelperPath: String {
-        supportDirectory.appendingPathComponent("bin/silicon-mode-hook").path
+        runtimeDirectory.appendingPathComponent("bin/silicon-mode-hook").path
     }
 
     public struct Request: Codable, Sendable {
