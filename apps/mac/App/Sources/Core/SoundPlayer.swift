@@ -70,8 +70,13 @@ final class SoundPlayer {
 
     /// True while the panic alarm (not a settings preview) is sounding or fading in.
     var isPanicPlaying: Bool { panicMode == .alarm }
-    /// When the current alarm loop started from its first sample (for syncing panic visuals to `beat`).
-    private(set) var panicStartedAt: Date?
+    /// Whether the audio engine (and so the output device) is currently running. Diagnostics.
+    var isEngineRunning: Bool { graph?.engine.isRunning ?? false }
+    /// Whether the panic voice is producing sound right now (as last reported by the audio thread).
+    var isPanicAudible: Bool { graph.map { !$0.voice.isSilent } ?? false }
+    /// When the sounding alarm's loop last started from its first sample (for syncing panic visuals to `beat`);
+    /// nil when no alarm is playing.
+    var panicStartedAt: Date? { panicMode == .alarm ? loopStartedAt : nil }
 
     private static let log = Logger(subsystem: "ai.tos.mode", category: "sound")
     nonisolated private static let keypressVariants = ["keypress", "keypress-2", "keypress-3"]
@@ -90,6 +95,7 @@ final class SoundPlayer {
     private var panicMode: PanicMode = .off
     private var panicLoopName: String?
     private var panicGain: Float = 0
+    private var loopStartedAt: Date?
     private var idleTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
 
@@ -136,7 +142,7 @@ final class SoundPlayer {
         // Re-use a loop that's still audible (e.g. stop → start while it fades out) instead of restarting it.
         let restart = panicLoopName != name || g.voice.isSilent
         g.voice.play(loop: restart ? loop : nil, gain: gain, fade: Self.panicFadeIn)
-        if restart || panicStartedAt == nil { panicStartedAt = Date() }
+        if restart || loopStartedAt == nil { loopStartedAt = Date() }
         panicMode = .alarm
         panicLoopName = name
         panicGain = gain
@@ -147,7 +153,6 @@ final class SoundPlayer {
         previewTask?.cancel()
         guard panicMode != .off else { return }
         panicMode = .off
-        panicStartedAt = nil
         guard let g = graph else { return }
         g.voice.stop(fade: Self.panicFadeOut, from: panicGain)
         scheduleIdleCheck()
@@ -172,6 +177,7 @@ final class SoundPlayer {
         let continuing = panicMode == .preview && panicLoopName == name && !g.voice.isSilent
         g.voice.play(loop: continuing ? nil : loop, gain: gain, fade: continuing ? 0.06 : 0.02,
                      stopAfter: frames, stopFade: Self.panicFadeOut)
+        if !continuing { loopStartedAt = Date() }
         panicMode = .preview
         panicLoopName = name
         panicGain = gain
@@ -275,7 +281,7 @@ final class SoundPlayer {
         if panicMode == .preview { panicMode = .off }
         guard let name = resume, let loop = loopRef(named: name), let g = ensureRunning() else { return }
         g.voice.play(loop: loop, gain: panicGain, fade: 0.03)
-        panicStartedAt = Date()
+        loopStartedAt = Date()
     }
 
     private func scheduleIdleCheck(after delay: Double = SoundPlayer.idleTimeout) {

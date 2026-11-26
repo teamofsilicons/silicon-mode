@@ -10,6 +10,7 @@
     uv run scripts/make-sounds.py --only enter,panic-siren --out /tmp/sm
     uv run --with matplotlib scripts/make-sounds.py --spectrograms /tmp/sm-spec
     uv run scripts/make-sounds.py --no-render --check-player   # headless test of SoundPlayer.swift (no audio out)
+    uv run scripts/make-sounds.py --no-render --check-player-live   # real output device, inaudible, ~15 s
 
 Output: 48 kHz, 16-bit, mono PCM WAV (TPDF-dithered). Deterministic: fixed seeds, no clock input.
 
@@ -1012,7 +1013,51 @@ exit(failures == 0 ? 0 : 1)
 '''
 
 
-def check_player(sounds: Path) -> int:
+# Live variant: runs on the real default output device (the render block on the real-time IO thread, idle
+# suspend/restart), inaudibly: UI volume 0 and the alarm at gain 1e-8 (-160 dB).
+PLAYER_LIVE_TEST = r'''import Foundation
+import AVFoundation
+
+// Live (hardware) test, inaudible: UI volume 0 and panic gain ~1e-8 (-160 dB, below the DAC's LSB).
+// Verifies the render block runs on the real-time IO thread without isolation crashes, and that the engine
+// starts on demand and suspends itself when idle.
+let dir = URL(fileURLWithPath: CommandLine.arguments[1])
+var failures = 0
+@MainActor func check(_ cond: Bool, _ msg: String) {
+    print((cond ? "PASS " : "FAIL ") + msg)
+    if !cond { failures += 1 }
+}
+func wait(_ s: Double) { RunLoop.main.run(until: Date().addingTimeInterval(s)) }
+
+let sp = SoundPlayer(soundsDirectory: dir)
+sp.uiVolume = 0
+check(!sp.isEngineRunning, "engine not started by init")
+sp.play(.keypress)
+check(sp.isEngineRunning, "first sound starts the engine")
+sp.startPanic(soundID: "siren", volume: 0.0001)   // gain 1e-8
+wait(0.6)
+check(sp.isPanicPlaying && sp.isPanicAudible, "panic voice rendering on the IO thread (no isolation crash)")
+sp.setPanicVolume(0.0001)
+sp.stopPanic()
+wait(0.5)
+check(!sp.isPanicAudible, "panic voice faded to silence on the IO thread")
+sp.preview(panicSoundID: "glitch", volume: 0.0001)
+wait(0.3)
+check(sp.isPanicAudible, "preview rendering")
+wait(1.6)
+check(!sp.isPanicAudible, "preview stopped by itself after one loop")
+print("waiting for the idle suspend (10 s)…")
+wait(11.5)
+check(!sp.isEngineRunning, "engine suspended itself after 10 s of silence")
+sp.play(.tick)
+check(sp.isEngineRunning, "engine restarts on the next sound")
+wait(0.4)
+print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
+exit(failures == 0 ? 0 : 1)
+'''
+
+
+def check_player(sounds: Path, test: str = PLAYER_TEST) -> int:
     import platform
     import subprocess
     import tempfile
@@ -1020,7 +1065,7 @@ def check_player(sounds: Path) -> int:
     source = ROOT / "apps/mac/App/Sources/Core/SoundPlayer.swift"
     with tempfile.TemporaryDirectory() as tmp:
         main_swift, exe = Path(tmp) / "main.swift", Path(tmp) / "soundplayer-check"
-        main_swift.write_text(PLAYER_TEST)
+        main_swift.write_text(test)
         build = subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-strict-concurrency=complete", "-O",
                                 "-target", f"{platform.machine()}-apple-macos26.0",
                                 str(source), str(main_swift), "-o", str(exe)])
@@ -1038,9 +1083,11 @@ def main() -> int:
     ap.add_argument("--no-render", action="store_true", help="don't render (use with --check-player)")
     ap.add_argument("--check-player", action="store_true",
                     help="compile SoundPlayer.swift with a headless test and run it against --out")
+    ap.add_argument("--check-player-live", action="store_true",
+                    help="same, on the real output device (inaudible; ~15 s)")
     args = ap.parse_args()
     if args.no_render:
-        return check_player(args.out) if args.check_player else 0
+        return checks(args)
     only = {s for s in args.only.split(",") if s}
     args.out.mkdir(parents=True, exist_ok=True)
     if args.spectrograms:
@@ -1060,7 +1107,14 @@ def main() -> int:
         if args.spectrograms:
             spectrogram(args.spectrograms / f"{spec.name}.png", np.tile(back, 2) if spec.loop else back,
                         spec.name + (" (2 loops)" if spec.loop else ""))
-    return check_player(args.out) if args.check_player else 0
+    return checks(args)
+
+
+def checks(args) -> int:
+    status = check_player(args.out) if args.check_player else 0
+    if args.check_player_live and status == 0:
+        status = check_player(args.out, PLAYER_LIVE_TEST)
+    return status
 
 
 if __name__ == "__main__":
