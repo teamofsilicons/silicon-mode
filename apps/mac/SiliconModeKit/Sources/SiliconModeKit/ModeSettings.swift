@@ -46,7 +46,10 @@ public struct ModeSettings: Codable, Equatable, Sendable {
     public var panicVolume: Double = 0.9
 
     // MARK: Unlock
-    public var preferTouchID = false
+    /// Open the lock screen on Touch ID instead of the PIN keypad. Off by default: Touch ID isn't
+    /// always reliable, and the keypad has a Touch ID key anyway. (Replaces `preferTouchID`, whose
+    /// stored value is deliberately ignored so existing installs start on the PIN.)
+    public var touchIDFirst = false
 
     // MARK: App
     public var hotkeyEnabled = true
@@ -95,7 +98,7 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         v("panicSoundID", \.panicSoundID)
         v("panicStyleID", \.panicStyleID)
         v("panicVolume", \.panicVolume)
-        v("preferTouchID", \.preferTouchID)
+        v("touchIDFirst", \.touchIDFirst)
         v("hotkeyEnabled", \.hotkeyEnabled)
         v("uiSoundsEnabled", \.uiSoundsEnabled)
         v("launchAtLogin", \.launchAtLogin)

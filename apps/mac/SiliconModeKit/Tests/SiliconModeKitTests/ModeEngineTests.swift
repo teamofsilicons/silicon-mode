@@ -179,6 +179,57 @@ struct Rig {
         #expect(r.engine.phase.active?.baselineAngle == 40)
     }
 
+    @Test func overCorrectingUpThenBackDoesNotPanic() {
+        var r = Rig { $0.graceSeconds = 0 }
+        r.hold(60, for: 7)                       // Silicon Mode angle 60, panic below 54
+        r.move(from: 60, to: 72, over: 0.5)       // over-correct (still under the 75 trigger)
+        r.hold(72, for: 10)                      // rests there: must NOT raise the baseline
+        #expect(r.engine.phase.active?.baselineAngle == 60)
+        r.move(from: 72, to: 60, over: 0.8)       // put it back where it was, briskly
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        // Opening past the trigger and coming back is fine too.
+        r.move(from: 60, to: 95, over: 0.5)
+        r.hold(95, for: 10)
+        r.move(from: 95, to: 60, over: 1)
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        // Really closing still panics.
+        r.move(from: 60, to: 20, over: 0.6)
+        #expect(r.engine.phase.active?.isPanicking == true)
+    }
+
+    @Test func entryAboveTriggerPanicsThirtyPercentBelowTrigger() {
+        var r = Rig()
+        r.hold(110, for: 2)
+        r.cmd(.enterNow)                         // e.g. the hotkey with the lid wide open
+        r.hold(110, for: 2)
+        #expect(r.engine.phase.active?.baselineAngle == 110)
+        #expect(abs(ModeEngine.panicAngle(baseline: 110, settings: r.engine.settings) - 52.5) < 1e-9)
+        r.move(from: 110, to: 60, over: 1)        // well below 0.9 * 110, but above 52.5
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        r.move(from: 60, to: 40, over: 0.5)
+        #expect(r.engine.phase.active?.isPanicking == true)
+    }
+
+    @Test func baselineFollowsTheLidDownWhenItRests() {
+        var r = Rig { $0.graceSeconds = 0 }
+        r.hold(60, for: 7)
+        r.move(from: 60, to: 40, over: 10)        // slow (2 deg/s): a deliberate lowering, no panic
+        r.hold(40, for: 4)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        #expect(r.engine.phase.active?.baselineAngle == 40)
+        r.move(from: 40, to: 70, over: 0.5)
+        r.hold(70, for: 10)
+        #expect(r.engine.phase.active?.baselineAngle == 40)
+        r.move(from: 70, to: 37, over: 0.8)        // above 0.9 * 40 = 36
+        r.hold(37, for: 0.5)
+        #expect(r.engine.phase.active?.isPanicking == false)
+        r.move(from: 37, to: 25, over: 0.5)
+        #expect(r.engine.phase.active?.isPanicking == true)
+    }
+
     @Test func manualEntryWithLidOpenDoesNotAutoExit() {
         var r = Rig()
         r.hold(110, for: 2)

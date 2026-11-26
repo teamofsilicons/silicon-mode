@@ -40,13 +40,13 @@ struct SettingsUnlockPane: View {
 
             SettingsSectionLabel(text: "Touch ID")
             SettingsCard {
-                SettingsRow(icon: "touchid", title: "Unlock with Touch ID first",
+                SettingsRow(icon: "touchid", title: "Open the lock screen on Touch ID",
                             detail: biometrics
-                                ? "Shows the fingerprint sensor right on the lock screen, with no system pop-up. Your PIN always works too."
+                                ? "Off: the PIN keypad shows first, with a Touch ID key on it. On: the fingerprint sensor shows first, with no system pop-up."
                                 : SettingsBiometrics.unavailableReason) {
-                    Toggle("Unlock with Touch ID", isOn: $model.settings.preferTouchID)
+                    Toggle("Open the lock screen on Touch ID", isOn: $model.settings.touchIDFirst)
                         .settingsSwitch()
-                        .disabled(!biometrics && !model.settings.preferTouchID)
+                        .disabled(!biometrics && !model.settings.touchIDFirst)
                 }
                 if biometrics {
                     SettingsDivider(inset: 54)

@@ -32,7 +32,7 @@ struct SettingsPanicPane: View {
                                 SettingsValueChip(text: SettingsFormat.percent(s.panicRatio), tint: Theme.danger)
                             }
                             SettingsSlider(value: $model.settings.panicRatio, range: 0.5...0.98, step: 0.01, tint: Theme.danger)
-                            Text("of the angle Silicon Mode started at. Started at \(SettingsFormat.degrees(baseline))? Panic below \(SettingsFormat.degrees(baseline * s.panicRatio)).")
+                            Text("of the angle Silicon Mode started at. Started at \(SettingsFormat.degrees(baseline))? Panic below \(SettingsFormat.degrees(baseline * s.panicRatio)). Opening the lid further never moves this up. Started above \(SettingsFormat.degrees(s.thresholdAngle)), e.g. with ⌃⌥S? Panic waits until \(SettingsFormat.degrees(s.thresholdAngle * (1 - ModeEngine.panicHighDrop))).")
                                 .alloText(12)
                                 .foregroundStyle(Theme.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)

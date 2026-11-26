@@ -10,8 +10,11 @@ import Foundation
 /// - First `graceSeconds` inside: can be turned off without PIN, and lifting the lid back up ends it.
 ///   After that it locks: only PIN / Touch ID (`.unlocked`) exits. Never auto-exits.
 /// - Any exit disarms auto-entry until the lid has been back up for `rearmSeconds`.
-/// - Panic: while active and agents run, the lid *closing* below `panicRatio * angle` → panic.
-///   Not on opening, not right after wake.
+/// - Panic: while active and agents run, the lid *closing* below the panic angle → panic.
+///   Not on opening, not right after wake. The panic angle is `panicRatio * angle`, or 30% below the
+///   trigger angle when the Silicon Mode angle is above it (see `panicAngle`). The Silicon Mode angle
+///   only follows the lid *down* when it rests somewhere lower; opening the lid further never raises
+///   it, so putting the lid back where it was after over-correcting can't alarm.
 public struct ModeEngine: Sendable {
     public enum Phase: Equatable, Sendable {
         case idle
@@ -79,8 +82,18 @@ public struct ModeEngine: Sendable {
     public var panicSettleSeconds = 3.0
     /// Minimum angle that counts as a deliberate new position (not closing).
     public var panicSettleMinAngle = 15.0
-    /// Baseline follows the lid when it rests at a new angle this long.
+    /// Baseline follows the lid down when it rests at a lower angle this long.
     public var rebaselineSeconds = 3.0
+    /// When the Silicon Mode angle is above the trigger angle, panic waits until the lid is this
+    /// fraction below the trigger angle (75° → 52.5°).
+    public static let panicHighDrop = 0.30
+
+    /// The angle below which a closing lid panics, for a given Silicon Mode angle.
+    public static func panicAngle(baseline: Double, settings: ModeSettings) -> Double {
+        baseline > settings.thresholdAngle
+            ? settings.thresholdAngle * (1 - panicHighDrop)
+            : baseline * settings.panicRatio
+    }
     public var wakeSuppressSeconds = 4.0
 
     // MARK: State
@@ -305,17 +318,17 @@ public struct ModeEngine: Sendable {
             act.baselineAngle = sampler.median(now: now)
             return []
         }
-        let trigger = baseline * settings.panicRatio
         let settled = sampler.stableDuration(now: now, tolerance: 2.5)
 
         if act.panicSince == nil {
-            // Follow deliberate re-positioning so small adjustments don't alarm.
-            // (Also covers re-opening after sleep: no closing motion, so the new rest angle wins.)
-            if settled >= rebaselineSeconds, abs(a - baseline) > 2.5, a >= panicSettleMinAngle {
+            // Follow deliberate re-positioning *down* (a slow, settled lowering). Never up: after
+            // opening the lid further, returning it to where it was must not alarm.
+            if settled >= rebaselineSeconds, baseline - a > 2.5, a >= panicSettleMinAngle {
                 baseline = a
                 act.baselineAngle = a
                 ev.append(.baselineChanged(a))
             }
+            let trigger = Self.panicAngle(baseline: baseline, settings: settings)
             let closing = sampler.velocity(now: now) <= -panicMinClosingSpeed
             if settings.panicEnabled, agentsRunning > 0, now >= wakeSuppressUntil,
                a < trigger, closing {
@@ -323,6 +336,7 @@ public struct ModeEngine: Sendable {
                 ev.append(.panicStarted)
             }
         } else {
+            let trigger = Self.panicAngle(baseline: baseline, settings: settings)
             if a >= trigger + 1 {
                 act.panicSince = nil
                 ev.append(.panicEnded(.lidReopened))

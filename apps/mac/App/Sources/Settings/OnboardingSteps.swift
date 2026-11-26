@@ -236,7 +236,6 @@ struct OnboardingTouchIDStep: View {
     @Environment(AppModel.self) private var model
     var firstRun: Bool
     @State private var available = false
-    @State private var defaulted = false
 
     var body: some View {
         @Bindable var model = model
@@ -244,22 +243,22 @@ struct OnboardingTouchIDStep: View {
             OnboardingFingerprint()
                 .frame(width: 92, height: 92)
             OnboardingTitle(text: "Unlock with a touch")
-            Text("Touch ID can unlock Silicon Mode right on its lock screen, with no system pop-up. Your PIN always works as a backup.")
+            Text("The lock screen opens on your PIN keypad. Touch ID is one tap away on the keypad, with no system pop-up.")
                 .alloText(14).foregroundStyle(Theme.textMuted).multilineTextAlignment(.center)
                 .frame(maxWidth: 470)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
-                choice(title: "Touch ID, then PIN", detail: available ? "Fastest. Recommended." : "Not available on this Mac right now.",
-                       icon: "touchid", selected: model.settings.preferTouchID, enabled: available) {
-                    model.settings.preferTouchID = true
+                choice(title: "PIN first", detail: available ? "Touch ID key on the keypad. Recommended." : "Recommended.",
+                       icon: "circle.grid.3x3", selected: !model.settings.touchIDFirst, enabled: true) {
+                    model.settings.touchIDFirst = false
                 }
-                choice(title: "PIN only", detail: "Never asks for a fingerprint.", icon: "circle.grid.3x3",
-                       selected: !model.settings.preferTouchID, enabled: true) {
-                    model.settings.preferTouchID = false
+                choice(title: "Touch ID first", detail: available ? "Opens on the fingerprint sensor." : "Not available on this Mac right now.",
+                       icon: "touchid", selected: model.settings.touchIDFirst, enabled: available) {
+                    model.settings.touchIDFirst = true
                 }
             }
             .padding(.top, 6)
-            if available && model.settings.preferTouchID {
+            if available {
                 SettingsTouchIDTry()
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .frame(width: 516)
@@ -272,14 +271,9 @@ struct OnboardingTouchIDStep: View {
             }
         }
         .padding(.horizontal, 44)
-        .animation(Theme.Motion.moderate, value: model.settings.preferTouchID)
+        .animation(Theme.Motion.moderate, value: model.settings.touchIDFirst)
         .onAppear {
             available = SettingsBiometrics.available
-            // On first run, make Touch ID the default when it works (it's pop-up free).
-            if firstRun, available, !defaulted, !SettingsRender.isSnapshot {
-                defaulted = true
-                model.settings.preferTouchID = true
-            }
         }
     }
 

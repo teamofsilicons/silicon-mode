@@ -400,7 +400,7 @@ struct UnlockView: View {
         guard preview == nil else { return }
         if !HUDRender.isSnapshot { bio.refresh() }
         bio.onOutcome = { outcome in handleBiometrics(outcome) }
-        if model.settings.preferTouchID, bio.isAvailable {
+        if model.settings.touchIDFirst, bio.isAvailable {
             mode = .touchID
             bio.arm()
         }
