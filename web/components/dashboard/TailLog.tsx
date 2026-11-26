@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ProviderMark } from "@/components/ProviderMark";
 import type { AgentEvent, AgentSession, EventKind } from "@/lib/types";
 import type { LiveStatus } from "@/lib/realtime";
+import { tailView } from "@/lib/store";
 import styles from "./dashboard.module.css";
 
 const KIND: Record<EventKind, string> = {
@@ -22,9 +23,8 @@ export function TailLog({ events, sessions, fresh, live, onSettle }: {
   live: LiveStatus | "demo";
   onSettle: (ids: string[]) => void;
 }) {
-  const [filter, setFilter] = useState<string | null>(null);
-  const shown = (filter ? events.filter((e) => e.session_id === filter) : events).slice(0, 60);
-  const active = Object.values(sessions).filter((s) => events.some((e) => e.session_id === s.id));
+  const [picked, setPicked] = useState<string | null>(null);
+  const { chips, filter, shown } = tailView(events, sessions, picked);
 
   // Clear the "just arrived" highlight once its animation has played.
   useEffect(() => {
@@ -43,11 +43,11 @@ export function TailLog({ events, sessions, fresh, live, onSettle }: {
           {live === "live" ? "Live" : live === "demo" ? "Sample" : live === "connecting" ? "Connecting" : live === "reconnecting" ? "Reconnecting" : "Offline"}
         </span>
       </header>
-      {active.length > 1 && (
+      {chips.length > 0 && (
         <div className={styles.tailFilter} role="group" aria-label="Show events from">
-          <button type="button" aria-pressed={filter === null} onClick={() => setFilter(null)}>All</button>
-          {active.map((s) => (
-            <button key={s.id} type="button" aria-pressed={filter === s.id} onClick={() => setFilter(filter === s.id ? null : s.id)}>
+          <button type="button" aria-pressed={filter === null} onClick={() => setPicked(null)}>All</button>
+          {chips.map((s) => (
+            <button key={s.id} type="button" aria-pressed={filter === s.id} onClick={() => setPicked(filter === s.id ? null : s.id)}>
               <ProviderMark id={s.provider} size={14} />
               <span>{s.project || s.title || s.provider}</span>
             </button>

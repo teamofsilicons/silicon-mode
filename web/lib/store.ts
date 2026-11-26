@@ -29,16 +29,33 @@ export interface DashboardState {
   local: Record<string, LocalAnswer>;
   /** Event row ids that arrived live (for the slide-in animation). */
   fresh: Record<string, true>;
+  /**
+   * Keys of per-device rows realtime changed since the pending snapshot was requested (null when none
+   * is pending). Those changes are newer than anything the snapshot can hold, so they survive it;
+   * every other row is replaced by the snapshot.
+   */
+  inflight: Touched | null;
 }
 
-export const initialState: DashboardState = {
-  devices: {}, statuses: {}, selected: null, ready: false,
-  sessions: {}, events: [], questions: {}, answers: {}, local: {}, fresh: {},
-};
+/** Row keys realtime touched: session id, question id, and question id for answers. */
+export interface Touched {
+  sessions: Record<string, true>;
+  questions: Record<string, true>;
+  answers: Record<string, true>;
+}
+
+/** The per-device part of the state as it is before the selected Mac's snapshot arrives. */
+const CLEARED = {
+  ready: false, sessions: {}, events: [], questions: {}, answers: {}, local: {}, fresh: {}, inflight: null,
+} satisfies Omit<DashboardState, "devices" | "statuses" | "selected">;
+
+export const initialState: DashboardState = { devices: {}, statuses: {}, selected: null, ...CLEARED };
 
 export type Action =
   | { type: "devices"; devices: DeviceWithStatus[] }
   | { type: "select"; deviceId: string | null }
+  /** A snapshot fetch for this Mac is starting: from now on, realtime changes outrank it. */
+  | { type: "snapshotRequested"; deviceId: string }
   | { type: "snapshot"; deviceId: string; sessions: AgentSession[]; events: AgentEvent[]; questions: Question[]; answers: Answer[] }
   | { type: "change"; table: string; operation: "INSERT" | "UPDATE" | "DELETE"; row: Record<string, unknown> | null; old: Record<string, unknown> | null }
   | { type: "local"; questionId: string; local: LocalAnswer | null }
@@ -83,27 +100,37 @@ export function reducer(state: DashboardState, action: Action): DashboardState {
       }
       const selected = state.selected && devices[state.selected] ? state.selected : pickDefault(devices, statuses);
       const switched = selected !== state.selected;
-      return {
-        ...state, devices, statuses, selected,
-        ...(switched ? { ready: false, sessions: {}, events: [], questions: {}, answers: {}, local: {}, fresh: {} } : {}),
-      };
+      return { ...state, devices, statuses, selected, ...(switched ? CLEARED : {}) };
     }
     case "select": {
       if (action.deviceId === state.selected) return state;
-      return { ...state, selected: action.deviceId, ready: false, sessions: {}, events: [], questions: {}, answers: {}, local: {}, fresh: {} };
+      return { ...state, selected: action.deviceId, ...CLEARED };
+    }
+    case "snapshotRequested": {
+      if (action.deviceId !== state.selected) return state;
+      return { ...state, inflight: { sessions: {}, questions: {}, answers: {} } };
     }
     case "snapshot": {
       if (action.deviceId !== state.selected) return state;
+      // The snapshot is the truth for sessions, questions and answers: rows that changed or went away
+      // while nothing was listening (a Retry, or a resync after cursor_expired) must not outlive it.
+      // Only what realtime delivered after the fetch began is newer, so those rows win.
+      const touched = state.inflight ?? { sessions: {}, questions: {}, answers: {} };
       const answers: Record<string, Answer> = {};
       for (const a of action.answers) answers[a.question_id] = a;
-      // Keep anything realtime already delivered while the snapshot was in flight.
+      const questions = overlay(byId(action.questions), state.questions, touched.questions);
+      const local: Record<string, LocalAnswer> = {};
+      for (const [id, l] of Object.entries(state.local)) if (id in questions) local[id] = l;
       return {
         ...state,
         ready: true,
-        sessions: { ...byId(action.sessions), ...state.sessions },
+        inflight: null,
+        sessions: overlay(byId(action.sessions), state.sessions, touched.sessions),
+        // Events are history, not state: older rows stay true, so merge rather than replace.
         events: sortEvents(dedupeEvents([...state.events, ...action.events])),
-        questions: { ...byId(action.questions), ...state.questions },
-        answers: { ...answers, ...state.answers },
+        questions,
+        answers: overlay(answers, state.answers, touched.answers),
+        local,
       };
     }
     case "change":
@@ -118,6 +145,23 @@ export function reducer(state: DashboardState, action: Action): DashboardState {
       return fresh === state.fresh ? state : { ...state, fresh };
     }
   }
+}
+
+/** The snapshot's rows, except that rows realtime touched since the request keep their live value (or stay deleted). */
+function overlay<T>(snapshot: Record<string, T>, live: Record<string, T>, touched: Record<string, true>): Record<string, T> {
+  const out = { ...snapshot };
+  for (const k of Object.keys(touched)) {
+    if (k in live) out[k] = live[k];
+    else delete out[k];
+  }
+  return out;
+}
+
+/** Records that realtime changed this per-device row while a snapshot is in flight. */
+function touch(state: DashboardState, table: keyof Touched, key: string): DashboardState {
+  const t = state.inflight;
+  if (!t || t[table][key]) return state;
+  return { ...state, inflight: { ...t, [table]: { ...t[table], [key]: true } } };
 }
 
 function dedupeEvents(events: AgentEvent[]): AgentEvent[] {
@@ -168,7 +212,7 @@ export function applyChange(
         const selected = state.selected === d.id ? pickDefault(devices, statuses) : state.selected;
         return selected === state.selected
           ? { ...state, devices, statuses }
-          : { ...state, devices, statuses, selected, ready: false, sessions: {}, events: [], questions: {}, answers: {}, local: {}, fresh: {} };
+          : { ...state, devices, statuses, selected, ...CLEARED };
       }
       const devices = { ...state.devices, [d.id]: { ...state.devices[d.id], ...d } };
       return { ...state, devices, selected: state.selected ?? d.id };
@@ -181,8 +225,9 @@ export function applyChange(
     case "agent_sessions": {
       if (!mine(r)) return state;
       const s = r as unknown as AgentSession;
-      if (operation === "DELETE") return { ...state, sessions: omit(state.sessions, s.id) };
-      return { ...state, sessions: { ...state.sessions, [s.id]: { ...state.sessions[s.id], ...s } } };
+      const next = touch(state, "sessions", s.id);
+      if (operation === "DELETE") return { ...next, sessions: omit(state.sessions, s.id) };
+      return { ...next, sessions: { ...state.sessions, [s.id]: { ...state.sessions[s.id], ...s } } };
     }
     case "events": {
       if (!mine(r)) return state;
@@ -197,17 +242,19 @@ export function applyChange(
     case "questions": {
       if (!mine(r)) return state;
       const q = r as unknown as Question;
-      if (operation === "DELETE") return { ...state, questions: omit(state.questions, q.id) };
-      return { ...state, questions: { ...state.questions, [q.id]: { ...state.questions[q.id], ...q } } };
+      const next = touch(state, "questions", q.id);
+      if (operation === "DELETE") return { ...next, questions: omit(state.questions, q.id) };
+      return { ...next, questions: { ...state.questions, [q.id]: { ...state.questions[q.id], ...q } } };
     }
     case "answers": {
       if (!mine(r)) return state;
       const a = r as unknown as Answer;
       if (operation === "DELETE") {
         const cur = state.answers[a.question_id];
-        return cur && cur.id === a.id ? { ...state, answers: omit(state.answers, a.question_id) } : state;
+        return cur && cur.id === a.id ? { ...touch(state, "answers", a.question_id), answers: omit(state.answers, a.question_id) } : state;
       }
-      return { ...state, answers: { ...state.answers, [a.question_id]: { ...state.answers[a.question_id], ...a } } };
+      const next = touch(state, "answers", a.question_id);
+      return { ...next, answers: { ...state.answers, [a.question_id]: { ...state.answers[a.question_id], ...a } } };
     }
     default:
       return state;
@@ -219,11 +266,23 @@ export function applyChange(
 export type QuestionView =
   | { status: "open" }
   | { status: "sending" }
-  | { status: "sent"; label: string }
+  /** `applied`: the Mac reported it used this answer (only then is the question really settled). */
+  | { status: "sent"; label: string; applied: boolean }
   | { status: "elsewhere"; from: string; label: string | null }
+  /**
+   * An answer reached the Mac but it couldn't use it (outcome failed/stale) and the question is still
+   * waiting there. Only one answer per question is accepted, so it can only be answered on the Mac now.
+   * `from` is null when the answer was ours.
+   */
+  | { status: "unapplied"; from: string | null; label: string }
   | { status: "closed"; reason: string };
 
 const FROM: Record<string, string> = { mac: "on the Mac", iphone: "on iPhone", android: "on Android", web: "on the web" };
+
+/** The Mac picked this answer up but reported it didn't apply it. */
+export function isUnapplied(answer: Answer | undefined): boolean {
+  return Boolean(answer?.consumed_at) && answer?.outcome !== "applied";
+}
 
 /**
  * What a question card should show. "Answered elsewhere" covers both race outcomes: our
@@ -235,10 +294,19 @@ export function questionView(q: Question, answer: Answer | undefined, local: Loc
     (optionId ? q.options.find((o) => o.id === optionId)?.label ?? optionId : null) ?? (text ? `“${text}”` : "Answered");
 
   if (local?.phase === "sending") return { status: "sending" };
-  if (local?.phase === "sent" && (!answer || answer.id === local.answerId)) {
-    return { status: "sent", label: labelOf(local.optionId, local.text) };
+  const ours = local?.phase === "sent" && (!answer || answer.id === local.answerId);
+  // The Mac only marks a question "answered" after applying an answer, so that state settles it.
+  if (answer && isUnapplied(answer) && q.state !== "answered") {
+    if (q.state === "pending") {
+      return { status: "unapplied", from: ours ? null : FROM[answer.answered_from] ?? "elsewhere", label: labelOf(answer.option_id, answer.text) };
+    }
+    // The Mac has since closed the question itself; its state says how.
+    return stateView(q);
   }
-  if (answer && !(local?.phase === "sent" && answer.id === local.answerId)) {
+  if (local?.phase === "sent" && ours) {
+    return { status: "sent", label: labelOf(local.optionId, local.text), applied: answer?.outcome === "applied" || q.state === "answered" };
+  }
+  if (answer) {
     return { status: "elsewhere", from: FROM[answer.answered_from] ?? "elsewhere", label: labelOf(answer.option_id, answer.text) };
   }
   if (local?.phase === "lost") {
@@ -247,6 +315,10 @@ export function questionView(q: Question, answer: Answer | undefined, local: Loc
     }
     return { status: "closed", reason: closedReason(local.reason) };
   }
+  return stateView(q);
+}
+
+function stateView(q: Question): QuestionView {
   if (q.state === "resolved_on_mac") return { status: "elsewhere", from: FROM.mac, label: null };
   if (q.state === "answered") return { status: "elsewhere", from: "elsewhere", label: null };
   if (q.state !== "pending") return { status: "closed", reason: closedReason(q.state) };
@@ -261,6 +333,24 @@ function closedReason(reason: string): string {
     case "invalid_option": return "That option is no longer offered.";
     default: return "This question is closed.";
   }
+}
+
+/**
+ * The live tail. `chips` are the sessions it can be narrowed to (only when more than one has events
+ * in it), `filter` is the session actually applied, `shown` the rows to render.
+ */
+export function tailView(
+  events: AgentEvent[],
+  sessions: Record<string, AgentSession>,
+  picked: string | null,
+  limit = 60,
+): { chips: AgentSession[]; filter: string | null; shown: AgentEvent[] } {
+  const withEvents = Object.values(sessions).filter((s) => events.some((e) => e.session_id === s.id));
+  const chips = withEvents.length > 1 ? withEvents : [];
+  // A pick only counts while its chip is on screen. Otherwise (a session of the Mac shown before, or
+  // one whose events aged out of the tail) it would hide every row with no chip left to undo it.
+  const filter = picked && chips.some((s) => s.id === picked) ? picked : null;
+  return { chips, filter, shown: (filter ? events.filter((e) => e.session_id === filter) : events).slice(0, limit) };
 }
 
 export interface Counts {
@@ -280,7 +370,9 @@ export function counts(state: DashboardState): Counts {
       finished: s?.agents_finished ?? 0, questions: s?.questions_pending ?? 0,
     };
   }
-  const pendingQuestions = Object.values(state.questions).filter((q) => q.state === "pending" && !state.answers[q.id]).length;
+  // An answer the Mac couldn't apply leaves the question waiting on the Mac, so it still counts.
+  const pendingQuestions = Object.values(state.questions)
+    .filter((q) => q.state === "pending" && (!state.answers[q.id] || isUnapplied(state.answers[q.id]))).length;
   return {
     working: sessions.filter((x) => x.state === "working" || x.state === "starting").length,
     waiting: sessions.filter((x) => x.state === "waiting").length,

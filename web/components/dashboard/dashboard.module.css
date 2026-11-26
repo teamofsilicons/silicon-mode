@@ -675,6 +675,11 @@
   color: var(--background);
 }
 
+.qIcon[data-tone="warn"] {
+  background: var(--warning);
+  color: var(--surface);
+}
+
 @keyframes pop {
   from { transform: scale(0.4); }
   to { transform: none; }
