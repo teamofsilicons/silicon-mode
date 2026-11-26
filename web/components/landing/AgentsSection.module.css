@@ -1,0 +1,117 @@
+.wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: var(--space-page);
+  align-items: center;
+}
+
+.copy {
+  display: grid;
+  gap: var(--space-inset);
+}
+
+.ticker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 99px;
+  font: var(--label);
+  font-size: 15px;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.stat > :first-child {
+  font-weight: 600;
+  font-size: 17px;
+}
+
+.stat[data-tone="need"] {
+  color: var(--amber);
+  background: color-mix(in oklab, var(--amber) 10%, var(--surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--amber) 28%, transparent);
+}
+
+.stat[data-tone="done"] {
+  color: var(--success);
+}
+
+.stat[data-tone="work"] {
+  color: var(--accent);
+}
+
+.body {
+  font: var(--body);
+  line-height: var(--leading-read);
+  color: var(--text-secondary);
+  max-width: 46ch;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-resting);
+  font: var(--label);
+  letter-spacing: var(--label-tracking);
+  min-width: 0;
+  transition: transform var(--duration-standard) var(--ease-spring);
+}
+
+.agent span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent:hover {
+  transform: translateY(-2px);
+}
+
+.own {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text-secondary);
+  border: 0;
+}
+
+.plus {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+@media (max-width: 900px) {
+  .wrap {
+    grid-template-columns: 1fr;
+    gap: var(--space-block);
+  }
+}
+
+@media (max-width: 520px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

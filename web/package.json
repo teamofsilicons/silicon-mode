@@ -1,0 +1,35 @@
+{
+  "name": "@teamofsilicons/silicon-mode-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Silicon Mode on the web: landing page, live dashboard and native sign-in bounce pages for https://mode.teamofsilicons.com (Next.js static export).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "assets": "node scripts/assets.mjs",
+    "dev": "node scripts/assets.mjs && node scripts/next.mjs dev --hostname localhost --port 3000",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "build": "node scripts/assets.mjs && node scripts/next.mjs build && node scripts/csp.mjs && node scripts/check-site.mjs",
+    "serve": "node scripts/serve.mjs",
+    "live-check": "node scripts/live-check.mjs"
+  },
+  "dependencies": {
+    "@teamofsilicons/cells": "0.3.0",
+    "@teamofsilicons/silicon-ui": "0.6.0",
+    "lucide-react": "1.80.0",
+    "motion": "13.5.1",
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.11",
+    "@types/react": "19.3.3",
+    "@types/react-dom": "19.3.0",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,294 @@
+.devices {
+  position: relative;
+  min-height: 470px;
+}
+
+.browser {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 84%;
+  border-radius: var(--radius-surface);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-floating);
+  overflow: hidden;
+}
+
+.chrome {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.chrome i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.url {
+  margin-left: 10px;
+  padding: 3px 12px;
+  border-radius: 99px;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
+  font: var(--caption);
+  color: var(--text-muted);
+}
+
+.browserBody {
+  padding: 16px 18px 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.browserHead {
+  display: grid;
+  gap: 2px;
+  font: var(--label);
+}
+
+.browserHead span {
+  font: var(--small);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.heat {
+  width: 100%;
+  height: auto;
+}
+
+.heat rect {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.l0 { fill: var(--heat-0); }
+.l1 { fill: var(--heat-1); }
+.l2 { fill: var(--heat-2); }
+.l3 { fill: var(--heat-3); }
+.l4 { fill: var(--heat-4); }
+
+[data-inview] .heat rect {
+  animation: pop 520ms var(--ease-enter) both;
+}
+
+@keyframes pop {
+  from { opacity: 0; transform: scale(0.3); }
+  to { opacity: 1; transform: none; }
+}
+
+.phone {
+  position: absolute;
+  right: 0;
+  top: 40px;
+  width: 236px;
+  padding: 8px;
+  border-radius: 42px;
+  background: #0b0b0d;
+  box-shadow: 0 0 0 1px #2a2a2e, var(--shadow-floating);
+}
+
+.phoneScreen {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 40px 12px 16px;
+  border-radius: 34px;
+  background: var(--background);
+  min-height: 420px;
+  align-content: start;
+}
+
+.island {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 72px;
+  height: 20px;
+  border-radius: 99px;
+  background: #0b0b0d;
+  transform: translateX(-50%);
+}
+
+.macRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: #0b0b0d;
+  color: rgb(242 242 242 / 0.7);
+  font: var(--caption);
+  font-weight: 400;
+}
+
+.macRow b {
+  color: #f2f2f2;
+  font-weight: 600;
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7fc79a;
+  box-shadow: 0 0 0 3px rgb(127 199 154 / 0.2);
+}
+
+.counts {
+  display: flex;
+  gap: 6px;
+  font: var(--caption);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.counts span {
+  flex: 1;
+  padding: 6px 4px;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.counts b {
+  display: block;
+  font: var(--label);
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.counts [data-tone="need"] b {
+  color: var(--amber);
+}
+
+.question {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--amber) 35%, var(--border)), var(--shadow-raised);
+  font: var(--caption);
+  font-weight: 400;
+  overflow: hidden;
+}
+
+.question p {
+  font: var(--label);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.question code {
+  font-size: 11px;
+  background: var(--surface-muted);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.qHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
+.qActions {
+  display: flex;
+  gap: 6px;
+}
+
+.qActions span {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: 10px;
+  text-align: center;
+  font: var(--caption);
+}
+
+.allow {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.deny {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.answered {
+  position: absolute;
+  inset: auto 0 0;
+  padding: 9px 12px;
+  background: color-mix(in oklab, var(--success) 12%, var(--surface));
+  color: var(--success);
+  font: var(--caption);
+  transform: translateY(100%);
+}
+
+[data-inview] .allow {
+  animation: press 6s var(--ease-standard) infinite;
+}
+
+[data-inview] .answered {
+  animation: answered 6s var(--ease-enter) infinite;
+}
+
+@keyframes press {
+  0%, 38% { transform: none; }
+  41% { transform: scale(0.94); }
+  45%, 100% { transform: none; }
+}
+
+@keyframes answered {
+  0%, 42% { transform: translateY(100%); }
+  50%, 88% { transform: none; }
+  96%, 100% { transform: translateY(100%); }
+}
+
+.tail {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: var(--caption);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.tail li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .devices {
+    min-height: 0;
+    display: grid;
+    gap: var(--space-section);
+    justify-items: center;
+  }
+  .browser,
+  .phone {
+    position: relative;
+    top: auto;
+    left: auto;
+    right: auto;
+  }
+  .browser {
+    width: 100%;
+  }
+}

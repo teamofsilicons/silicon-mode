@@ -1,0 +1,36 @@
+.footer {
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-screen);
+}
+
+.inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-inset);
+  flex-wrap: wrap;
+  padding-block: var(--space-block);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: var(--label);
+}
+
+.by {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.links {
+  display: flex;
+  gap: var(--space-section);
+  font: var(--small);
+  color: var(--text-secondary);
+}
+
+.links a:hover {
+  color: var(--foreground);
+}

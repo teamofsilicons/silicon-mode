@@ -1,0 +1,87 @@
+.main {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-inset);
+  padding-top: clamp(56px, 9vw, 112px);
+  text-align: center;
+}
+
+.icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-bottom: 8px;
+  filter: drop-shadow(0 18px 36px rgb(30 30 28 / 0.18));
+}
+
+.icon svg {
+  border-radius: 24px;
+}
+
+.ring {
+  position: absolute;
+  inset: -14px;
+  border-radius: 32px;
+  border: 1.5px solid color-mix(in oklab, var(--bloom-from) 70%, transparent);
+  animation: ring 2.8s var(--ease-enter) infinite;
+}
+
+@keyframes ring {
+  0% { transform: scale(0.85); opacity: 0.9; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+
+.badge {
+  padding: 4px 12px;
+  border-radius: 99px;
+  background: var(--silicon-gradient);
+  font: var(--caption);
+  color: color-mix(in oklab, var(--foreground) 82%, transparent);
+}
+
+.main h1 {
+  font: var(--weight-title) clamp(30px, 4.6vw, 48px) / 1.06 var(--font-display);
+  letter-spacing: -0.04em;
+  max-width: 18ch;
+}
+
+.lede {
+  font: var(--body);
+  line-height: var(--leading-read);
+  color: var(--text-secondary);
+  max-width: 52ch;
+}
+
+.reqs {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  font: var(--small);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.reqs li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.reqs svg {
+  color: var(--success);
+  flex: none;
+}
+
+.ctas {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ctas a {
+  gap: 8px;
+}

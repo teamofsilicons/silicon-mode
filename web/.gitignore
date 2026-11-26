@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+.vercel/
+next-env.d.ts
+*.tsbuildinfo
+# Copied from shared/design/fonts by scripts/assets.mjs (single source of truth lives there)
+app/fonts/AlloVariable.woff2
+public/fonts/AlloVariable.woff2
+public/fonts/OFL.txt
