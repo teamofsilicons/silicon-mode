@@ -1,15 +1,21 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, Check } from "lucide-react";
+import { ArrowRight, Check, Download } from "lucide-react";
 import { ButtonLink } from "@teamofsilicons/silicon-ui/button-link";
 import { SiteHeader } from "@/components/SiteHeader";
 import { SiteFooter } from "@/components/SiteFooter";
 import { LogoMark } from "@/components/Logo";
 import styles from "./download.module.css";
 
+// Filled in by the release (scripts/release-mac.sh → web/public/downloads/).
+const VERSION = "0.1.0";
+const FILE = `/downloads/SiliconMode-${VERSION}.dmg`;
+const SHA256 = "ddb370d68397e96d1f768838ccd4805c7f1c3ac26ec5f0265ecb23dd3fe8e544";
+const SIZE = "11 MB";
+
 export const metadata: Metadata = {
   title: "Download for Mac",
-  description: "Silicon Mode for macOS — the notarized build is on its way.",
+  description: "Download Silicon Mode for macOS — signed and notarized by Apple.",
 };
 
 export default function DownloadPage() {
@@ -21,11 +27,11 @@ export default function DownloadPage() {
           <LogoMark size={88} />
           <span className={styles.ring} aria-hidden="true" />
         </div>
-        <span className={styles.badge}>Coming soon</span>
-        <h1>The notarized Mac build is on its way.</h1>
+        <span className={styles.badge}>Version {VERSION}</span>
+        <h1>Silicon Mode for Mac</h1>
         <p className={styles.lede}>
-          We&apos;re signing and notarizing Silicon Mode with Apple so it opens without warnings. It will be a small,
-          free download that lives in your menu bar.
+          Signed with Developer ID and notarized by Apple, so it opens without warnings. Drag it to Applications,
+          open it, set your 6-digit PIN, and tilt your lid below 75° the next time your agents are working.
         </p>
         <ul className={styles.reqs}>
           <li><Check size={15} strokeWidth={2.4} aria-hidden="true" /> macOS 26 or later</li>
@@ -33,13 +39,19 @@ export default function DownloadPage() {
           <li><Check size={15} strokeWidth={2.4} aria-hidden="true" /> Works without an account — sign in only for phone, web and community faces</li>
         </ul>
         <div className={styles.ctas}>
-          <ButtonLink href="/app?demo" variant="primary" as={Link}>
+          <ButtonLink href={FILE} variant="primary" download>
+            <Download size={15} strokeWidth={2} aria-hidden="true" /> Download Silicon Mode {VERSION} ({SIZE})
+          </ButtonLink>
+          <ButtonLink href="/app?demo" variant="ghost" as={Link}>
             Try the dashboard with sample data <ArrowRight size={15} strokeWidth={2} aria-hidden="true" />
           </ButtonLink>
           <ButtonLink href="/" variant="ghost" as={Link}>
             Back to Silicon Mode
           </ButtonLink>
         </div>
+        <p className={styles.lede} style={{ fontSize: 12, marginTop: 24, wordBreak: "break-all" }}>
+          SHA-256 <code>{SHA256}</code>
+        </p>
       </main>
       <SiteFooter />
     </>

@@ -19,3 +19,4 @@ apps/android/local.properties
 apps/mac/SiliconMode.xcodeproj/
 dist/
 .claude/
+web/public/downloads/*.dmg
