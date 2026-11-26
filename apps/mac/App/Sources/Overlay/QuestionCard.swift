@@ -7,12 +7,13 @@ import SiliconModeKit
 /// The card is neutral Liquid Glass with a denser dim than the other furniture (it has to be read
 /// over any face); "needs you" shows only as the dot on the asker's avatar.
 /// - Short single-choice answers are trailing-aligned glass buttons in dialog order: the default
-///   (primary) trailing and prominent, a permission's "Deny" as a plain cancel button. They stack,
-///   default on top, when they don't fit side by side.
+///   (primary) trailing and prominent, the way out ("Deny", "Keep planning") leading as a plain
+///   cancel button. They stack in the agent's own order, default on top and the way out at the
+///   bottom, when they don't fit side by side.
 /// - Answers with descriptions (or more than three) are full-width rows.
 /// - Multi-select answers are check rows plus a Send button.
 /// - `allowsFreeText` adds a reply field (alone, for pure input prompts).
-/// - Unanswerable questions show the options as quiet hints and "Answer in <agent>".
+/// - Unanswerable questions list the options as plain text and say "Answer in <agent>".
 /// New cards spring in.
 struct QuestionCard: View {
     let question: AgentQuestion
@@ -100,7 +101,7 @@ struct QuestionCard: View {
     /// the session below with the full width.
     private var header: some View {
         HStack(spacing: 10) {
-            AgentAvatarView(provider: question.provider, identity: identity, state: .needsYou, size: 30, showsState: true)
+            avatar
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(askerName)
@@ -108,9 +109,11 @@ struct QuestionCard: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // Quieter than the session line, as a notification's time is (secondary, not
+                    // tertiary: the card has to stay legible over a bright face).
                     TimelineView(.everyMinute) { tl in
                         Text(HUDFormat.ago(question.createdAt, now: HUDRender.isSnapshot ? Date() : tl.date))
-                            .font(.subheadline)
+                            .font(.footnote)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -127,21 +130,49 @@ struct QuestionCard: View {
         }
     }
 
-    /// Commands and file paths in SF Mono on a recessed well; prose in SF Pro.
+    /// The asker's avatar with the furniture's needs-you dot (the orange the agents pill, the logs
+    /// and "Waiting on You" use; the avatar's own dot is the faces' amber), in a knocked-out ring.
+    private var avatar: some View {
+        let size: CGFloat = 30, dot: CGFloat = 10, ring: CGFloat = 1.5
+        let offset = CGSize(width: dot * 0.2, height: dot * 0.2)
+        return AgentAvatarView(provider: question.provider, identity: identity, size: size, showsState: false)
+            .mask {
+                Rectangle()
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle().frame(width: dot + ring * 2, height: dot + ring * 2)
+                            .offset(offset).blendMode(.destinationOut)
+                    }
+                    .compositingGroup()
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Circle().fill(HUDTint.needsYou)
+                    .frame(width: dot, height: dot)
+                    .frame(width: dot + ring * 2, height: dot + ring * 2)
+                    .offset(offset)
+            }
+            .accessibilityLabel("\(askerName), \(AgentState.needsYou.label)")
+    }
+
+    /// Commands and file paths in SF Mono on a recessed well; prose in SF Pro. A permission's
+    /// detail is what gets approved, so it is always shown verbatim in the well; a document (a plan:
+    /// a heading or paragraphs) in SF Pro there.
     private func detailView(_ detail: String) -> some View {
-        let looksLikeCode = question.kind == .permission || detail.contains("/") || detail.contains("$") || detail.hasPrefix("git ")
+        let isDocument = detail.hasPrefix("#") || detail.contains("\n\n")
+        let inWell = question.kind == .permission || (!isDocument && (detail.contains("/") || detail.contains("$") || detail.hasPrefix("git ")))
         let isPath = detail.hasPrefix("/") || detail.hasPrefix("~") || detail.hasPrefix("./")
+        let multiline = detail.contains("\n")
         return Group {
-            if looksLikeCode {
+            if inWell {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: isPath ? "doc.text" : "terminal")
+                    Image(systemName: isDocument ? "doc.plaintext" : isPath ? "doc.text" : "terminal")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    Text(detail)
-                        .font(.callout.monospaced())
+                    Text(isDocument ? Self.withoutHeadingMarks(detail) : detail)
+                        .font(isDocument ? .callout : .callout.monospaced())
                         .foregroundStyle(.primary)
-                        .lineLimit(5)
-                        .truncationMode(.middle)
+                        .lineLimit(isDocument ? 6 : 5)
+                        // A long command keeps its start and end; several lines read from the top.
+                        .truncationMode(multiline ? .tail : .middle)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -159,6 +190,15 @@ struct QuestionCard: View {
         }
     }
 
+    /// A Markdown document's text with its headings' "#" marks dropped (nothing else changes).
+    static func withoutHeadingMarks(_ s: String) -> String {
+        s.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            let t = line.drop { $0 == " " }
+            guard t.hasPrefix("#") else { return String(line) }
+            return String(t.drop { $0 == "#" }.drop { $0 == " " })
+        }.joined(separator: "\n")
+    }
+
     // MARK: Answering
 
     @ViewBuilder
@@ -173,7 +213,7 @@ struct QuestionCard: View {
                     }
                 } else {
                     QuestionButtonRow(spacing: 8) {
-                        ForEach(Self.alertOrder(question.options)) { o in optionButton(o) }
+                        ForEach(Self.dialogOrder(question.options)) { o in optionButton(o) }
                     }
                 }
             }
@@ -189,23 +229,32 @@ struct QuestionCard: View {
         question.options.contains { ($0.detail ?? "").isEmpty == false } || question.options.count > 3
     }
 
-    /// Buttons in macOS alert order: cancel / destructive first, the default (primary) last, so it
-    /// sits trailing (and on top when stacked). The rest keep the agent's order.
-    static func alertOrder(_ options: [AgentQuestion.Option]) -> [AgentQuestion.Option] {
-        options.filter { $0.style == .destructive } + options.filter { $0.style == .neutral }
-            + options.filter { $0.style == .primary }
+    /// The answer that turns a request down: a destructive option, or the one every provider
+    /// sends as "deny" ("Deny", "Reject", Claude Code's "Keep planning").
+    static func isWayOut(_ o: AgentQuestion.Option) -> Bool { o.style == .destructive || o.id == "deny" }
+
+    /// Left to right, the order a macOS dialog lays its buttons out in. Agents list the default
+    /// first and the way out last, as NSAlert adds its buttons ("Allow, Always allow, Deny";
+    /// "Approve, Approve and auto-accept edits, Keep planning"), and NSAlert puts the first one
+    /// trailing: so the row is the agent's list reversed. The way out still goes leading and the
+    /// default trailing if an agent lists them elsewhere. Stacked, `QuestionButtonRow` reads this
+    /// bottom to top, which is the agent's own order: default on top, the way out at the bottom.
+    static func dialogOrder(_ options: [AgentQuestion.Option]) -> [AgentQuestion.Option] {
+        let reversed = options.reversed()
+        return reversed.filter(isWayOut)
+            + reversed.filter { !isWayOut($0) && $0.style != .primary }
+            + reversed.filter { !isWayOut($0) && $0.style == .primary }
     }
 
-    /// A permission's "Deny" cancels the request: a plain button, not a red destructive one.
+    /// A permission's way out cancels the request: a plain button, not a red destructive one.
     private func displayStyle(_ o: AgentQuestion.Option) -> AgentQuestion.Option.Style {
         o.style == .destructive && question.kind == .permission ? .neutral : o.style
     }
 
+    /// The way out cancels (a destructive answer to a real question stays destructive).
     private func role(_ o: AgentQuestion.Option) -> ButtonRole? {
-        switch o.style {
-        case .destructive: question.kind == .permission ? .cancel : .destructive
-        case .primary, .neutral: nil
-        }
+        guard Self.isWayOut(o) else { return nil }
+        return o.style == .destructive && question.kind != .permission ? .destructive : .cancel
     }
 
     private func optionButton(_ o: AgentQuestion.Option) -> some View {
@@ -421,29 +470,24 @@ struct QuestionCard: View {
     }
 }
 
-/// The options of a question that must be answered in the agent's own window, as quiet hints.
+/// The options of a question that must be answered in the agent's own window: plain text, not
+/// capsules or outlines, so nothing that can't be clicked reads as a button.
 private struct FlowHints: View {
     let options: [AgentQuestion.Option]
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(options.prefix(4)) { o in
-                Text(o.label)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.horizontal, 10)
-                    .frame(height: 26)
-                    .background(HUDInset(shape: Capsule(), style: .recessed))
-            }
-        }
-        .accessibilityHidden(true)
+        Text(options.prefix(4).map(\.label).joined(separator: "  ·  "))
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Answers: \(options.map(\.label).joined(separator: ", "))")
     }
 }
 
-/// Answer buttons as macOS lays out a dialog's: trailing-aligned in one row, the last (the default)
-/// trailing, each hugging its label but no narrower than `minWidth` (so short answers such as
-/// Deny / Allow match). When they can't share the row they stack full-width, the default on top,
-/// as an alert's do.
+/// Answer buttons as macOS lays out a dialog's: trailing-aligned in one row in the given order (the
+/// last, the default, trailing), each hugging its label but no narrower than `minWidth` (so short
+/// answers such as Deny / Allow match). When they can't share the row they stack full-width in the
+/// reverse order, as an alert's do: the default on top, the first (the way out) at the bottom.
 struct QuestionButtonRow: Layout {
     var spacing: CGFloat = 8
     var minWidth: CGFloat = 84

@@ -9,6 +9,9 @@ import SiliconModeKit
 /// instead of overflowing.
 struct QuestionsPiece: View {
     @Environment(AppModel.self) private var model
+    /// The questions the layer planned this piece for (live; they follow the model one update
+    /// late, so the cards change in the same transaction as the piece's room).
+    @Environment(\.plannedQuestions) private var planned
     let budget: CGFloat
     let width: CGFloat
     let leading: Bool
@@ -29,7 +32,7 @@ struct QuestionsPiece: View {
     @State private var arrived = HUDRender.isSnapshot
 
     var body: some View {
-        let live = FurnitureOrder.questions(preview?.questions ?? model.pendingQuestions)
+        let live = FurnitureOrder.questions(preview?.questions ?? planned ?? model.pendingQuestions)
         let liveSessions = preview?.sessions ?? model.modeAgents
         let errors = preview?.answerErrors ?? model.answerErrors
         QuestionStack(questions: live.isEmpty ? retained.questions : live,
@@ -93,6 +96,11 @@ struct QuestionsPiece: View {
         let row = widths.reduce(0, +) + 8 * CGFloat(options.count - 1)
         return row <= FurnitureMetrics.leadingWidth - 32 ? 36 : CGFloat(options.count) * 34 + 8 * CGFloat(options.count - 1)
     }
+}
+
+extension EnvironmentValues {
+    /// Set by `FurnitureLayer` (live): the questions its plan was made for.
+    @Entry var plannedQuestions: [AgentQuestion]? = nil
 }
 
 /// The column of question cards (shared by the piece and its snapshot gallery). Only mounted

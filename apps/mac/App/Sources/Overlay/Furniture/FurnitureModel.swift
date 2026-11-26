@@ -171,11 +171,6 @@ struct FurniturePlan: Equatable {
 
     func placements(_ slot: FurnitureSlot) -> [Placement] { slots[slot] ?? [] }
 
-    /// The pieces actually placed, slot by slot. It changes when a piece mounts or unmounts without
-    /// the user's layout changing (the first question arrives, the last is answered, a piece no
-    /// longer fits), so the layer animates on it: the slot transition runs and neighbours glide.
-    var placedIDs: [String] { FurnitureSlot.allCases.flatMap { placements($0).map(\.id) } }
-
     static func make(pieces: [FurniturePiece], size: CGSize, demand: (FurniturePiece) -> FurnitureDemand) -> FurniturePlan {
         var plan = FurniturePlan()
         let m = FurnitureMetrics.self

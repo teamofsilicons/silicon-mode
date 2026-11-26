@@ -34,7 +34,7 @@ enum HUDSnapshots {
                 FurniturePiece(id: "system-b", kind: .system, slot: .bottomTrailing),
                 FurniturePiece(id: "clock-c", kind: .clock, slot: .bottomTrailing, options: [FurnitureOptions.Clock.style: .string("words")]),
             ]), size: CGSize(width: 1280, height: 800)),
-            SnapshotItem(id: "hud.questions", size: CGSize(width: 820, height: 980)) {
+            SnapshotItem(id: "hud.questions", size: CGSize(width: 820, height: 1120)) {
                 AnyView(HUDSample.questionGallery)
             },
 
@@ -273,6 +273,14 @@ enum HUDSample {
                                    options: [.init(id: "keep", label: "Keep for 2 weeks", detail: "Dual-read, then remove", style: .primary),
                                              .init(id: "drop", label: "Drop it now", detail: "Logs everyone out once", style: .destructive)],
                                    createdAt: Date().addingTimeInterval(-300))
+        // Claude Code's plan approval, as the hook server builds it: three answers that can't share a row.
+        let plan = AgentQuestion(id: "q-plan", sessionID: "claude-code:s1", provider: "claude-code", kind: .permission,
+                                 title: "Approve the plan?",
+                                 detail: "## Refresh tokens before the session check\n\n1. Move refreshIfNeeded() ahead of loadSession()\n2. Cover an expired token on a live session in auth.test.ts",
+                                 options: [.init(id: "allow", label: "Approve", style: .primary),
+                                           .init(id: "allow_always", label: "Approve, auto-accept edits", style: .neutral),
+                                           .init(id: "deny", label: "Keep planning", style: .neutral)],
+                                 allowsFreeText: true, createdAt: Date().addingTimeInterval(-15))
         return ZStack(alignment: .top) {
             backdrop
             HStack(alignment: .top, spacing: 28) {
@@ -286,6 +294,7 @@ enum HUDSample {
                 VStack(spacing: 18) {
                     QuestionCard(question: pick, sessionTitle: s[2].title) { _, _ in }
                     QuestionCard(question: choose, sessionTitle: s[0].title, previewSending: "keep") { _, _ in }
+                    QuestionCard(question: plan, sessionTitle: s[0].title) { _, _ in }
                 }
                 .frame(width: 368)
             }
