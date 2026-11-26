@@ -105,28 +105,57 @@ enum FaceSnapshots {
 
     private static var marks: [SnapshotItem] {
         [
-            SnapshotItem(id: "provider-marks", size: CGSize(width: 1240, height: 220), view: { AnyView(ProviderMarkSheet()) }),
+            SnapshotItem(id: "provider-marks", size: CGSize(width: 1880, height: 1060), view: { AnyView(ProviderMarkSheet()) }),
         ]
     }
 }
 
-/// Every provider mark at a few sizes, for checking logos and fallbacks.
+/// Every provider mark (each catalog provider, a few aliases and an unknown one) from 120 pt down to
+/// 13 pt on the night background, plus small sizes on a light ground, for checking logos.
 struct ProviderMarkSheet: View {
-    static let providers = ["claude-code", "codex", "gemini-cli", "antigravity", "opencode", "cursor-cli", "copilot-cli",
-                            "grok", "qwen-code", "pi", "hermes", "openclaw", "silicon", "omni", "amp", "mystery"]
+    static let providers: [String] = ProviderCatalog.known.map(\.id) + ["cursor-agent", "codex-cli", "agy", "zed", "mystery"]
+    private static let columns = 8
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach([56.0, 28.0, 16.0], id: \.self) { size in
-                HStack(spacing: size * 0.3) {
-                    ForEach(Self.providers, id: \.self) { p in
-                        ProviderMark(provider: p, size: size)
+        let rows = stride(from: 0, to: Self.providers.count, by: Self.columns).map {
+            Array(Self.providers[$0..<min($0 + Self.columns, Self.providers.count)])
+        }
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(rows, id: \.self) { row in
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(row, id: \.self) { p in cell(p) }
+                }
+            }
+            HStack(spacing: 6) {
+                ForEach(Self.providers, id: \.self) { p in
+                    VStack(spacing: 6) {
+                        ProviderMark(provider: p, size: 16)
+                        ProviderMark(provider: p, size: 13)
                     }
                 }
             }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: "F2F2F2")))
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.Night.background)
+    }
+
+    private func cell(_ p: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .bottom, spacing: 8) {
+                ProviderMark(provider: p, size: 120)
+                VStack(alignment: .leading, spacing: 8) {
+                    ProviderMark(provider: p, size: 56)
+                    HStack(alignment: .bottom, spacing: 8) {
+                        ProviderMark(provider: p, size: 28)
+                        ProviderMark(provider: p, size: 13)
+                    }
+                }
+            }
+            Text(p).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
+        }
+        .frame(width: 214, alignment: .leading)
     }
 }
