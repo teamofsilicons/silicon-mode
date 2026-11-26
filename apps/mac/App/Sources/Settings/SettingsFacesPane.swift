@@ -37,7 +37,9 @@ struct SettingsFacesPane: View {
                 }
                 ForEach(selected.options) { spec in
                     SettingsDivider(inset: 54)
-                    SettingsFaceOptionRow(spec: spec, faceID: selected.id)
+                    SettingsFaceOptionRow(spec: spec, values: Binding(
+                        get: { model.settings.faceOptions[selected.id] ?? [:] },
+                        set: { model.settings.faceOptions[selected.id] = $0 }))
                 }
                 if !selected.options.isEmpty {
                     SettingsDivider(inset: 14)
@@ -167,38 +169,65 @@ struct SettingsFaceGrid: View {
     }
 }
 
-/// One auto-generated control for a face option.
+/// One auto-generated control for an option, editing a `[key: value]` dictionary: a face's
+/// options (`settings.faceOptions[faceID]`) or a furniture piece's (`FurniturePiece.options`).
+/// Toggle → switch, slider → slider row, a choice of four or fewer → segmented, more → menu.
 struct SettingsFaceOptionRow: View {
-    @Environment(AppModel.self) private var model
     let spec: FaceOptionSpec
-    let faceID: String
+    @Binding var values: [String: FaceOptionValue]
+    /// Row glyph; nil picks one for the option's kind.
+    var icon: String?
+    var detail: String?
+    /// Nested under something else (a furniture piece): a small glyph instead of the icon tile,
+    /// tighter rows.
+    var dense: Bool
 
-    private var current: FaceOptionValue {
-        model.settings.faceOptions[faceID]?[spec.key] ?? spec.defaultValue
+    init(spec: FaceOptionSpec, values: Binding<[String: FaceOptionValue]>, icon: String? = nil,
+         detail: String? = nil, dense: Bool = false) {
+        self.spec = spec
+        _values = values
+        self.icon = icon
+        self.detail = detail
+        self.dense = dense
     }
 
-    private func write(_ v: FaceOptionValue) {
-        var opts = model.settings.faceOptions[faceID] ?? [:]
-        opts[spec.key] = v
-        model.settings.faceOptions[faceID] = opts
+    private var current: FaceOptionValue { values[spec.key] ?? spec.defaultValue }
+
+    private func write(_ v: FaceOptionValue) { values[spec.key] = v }
+
+    private var glyph: String {
+        if let icon { return icon }
+        switch spec.kind {
+        case .toggle: return "switch.2"
+        case .slider: return "slider.horizontal.3"
+        case .choice: return "list.bullet.circle"
+        }
     }
 
     var body: some View {
         switch spec.kind {
         case .toggle(let d):
-            SettingsRow(icon: "switch.2", title: spec.label) {
+            row {
                 Toggle(spec.label, isOn: Binding(get: { current.bool ?? d }, set: { write(.bool($0)) })).settingsSwitch()
             }
         case .slider(let lo, let hi, let step, let d):
-            SettingsSliderRow(icon: "slider.horizontal.3", title: spec.label,
+            SettingsSliderRow(icon: dense ? nil : glyph, title: spec.label, detail: detail,
                               value: Binding(get: { current.number ?? d }, set: { write(.number($0)) }),
                               range: lo...hi, step: step,
                               format: { v in step < 1 ? String(format: "%.1f", v) : "\(Int(v.rounded()))" })
         case .choice(let options, let d):
             let sel = Binding<String>(get: { current.string ?? d }, set: { write(.string($0)) })
-            SettingsRow(icon: "list.bullet.circle", title: spec.label) {
+            row {
                 if options.count <= 4 {
                     SettingsSegmented(options: options.map { (id: $0.id, label: $0.label) }, selection: sel)
+                } else if SettingsRender.isSnapshot {
+                    // Menus are AppKit-backed and don't render offscreen.
+                    Text(options.first { $0.id == sel.wrappedValue }?.label ?? sel.wrappedValue)
+                        .alloText(13, .medium)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(SettingsTint.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
                 } else {
                     Menu {
                         ForEach(options, id: \.id) { o in
@@ -211,6 +240,34 @@ struct SettingsFaceOptionRow: View {
                     .fixedSize()
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func row<Trailing: View>(@ViewBuilder _ trailing: () -> Trailing) -> some View {
+        if dense {
+            HStack(spacing: 10) {
+                Image(systemName: glyph)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(spec.label).alloText(12.5, .medium).foregroundStyle(Theme.textSecondary)
+                    if let detail {
+                        Text(detail)
+                            .alloText(11.5)
+                            .foregroundStyle(Theme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 12)
+                trailing()
+            }
+            .padding(.trailing, 14)
+            .padding(.vertical, 6)
+            .frame(minHeight: 36)
+        } else {
+            SettingsRow(icon: glyph, title: spec.label, detail: detail) { trailing() }
         }
     }
 }

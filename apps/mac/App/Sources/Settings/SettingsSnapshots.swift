@@ -34,6 +34,28 @@ enum SettingsSnapshots {
         settings("settings-account-signedin", .account, dark: false) { SettingsRender.previewSignedIn = true }
         settings("settings-agents-dark-tall", .agents, dark: true, height: 1000)
 
+        // Face furniture: a fuller layout, hidden, empty, and the preview on its own.
+        settings("settings-furniture-full", .furniture, dark: false, height: 1500) { SettingsRender.previewFurniture = furnitureSample }
+        settings("settings-furniture-full-dark", .furniture, dark: true, height: 1500) { SettingsRender.previewFurniture = furnitureSample }
+        settings("settings-furniture-hidden", .furniture, dark: false) {
+            SettingsRender.previewFurniture = furnitureSample
+            SettingsRender.previewFurnitureHidden = true
+        }
+        settings("settings-furniture-empty", .furniture, dark: false, height: 1000) { SettingsRender.previewFurniture = [] }
+        let previewSize = CGSize(width: 1134, height: 737)
+        out.append(SnapshotItem(id: "settings-furniture-preview", size: previewSize, dark: true, view: {
+            AnyView(SettingsFurniturePreview(pieces: furnitureSample))
+        }))
+        out.append(SnapshotItem(id: "settings-furniture-preview-styles", size: previewSize, dark: true, view: {
+            AnyView(SettingsFurniturePreview(pieces: furnitureStyles, highlighted: "clock-words"))
+        }))
+        out.append(SnapshotItem(id: "settings-furniture-preview-crowded", size: previewSize, dark: true, view: {
+            AnyView(SettingsFurniturePreview(pieces: furnitureCrowded))
+        }))
+        out.append(SnapshotItem(id: "settings-furniture-preview-hidden", size: previewSize, dark: true, view: {
+            AnyView(SettingsFurniturePreview(pieces: furnitureSample, hidden: true))
+        }))
+
         settings("settings-agents-hooks", .agents, dark: false, height: 900) {
             SettingsRender.previewHookStatuses = ["claude-code": .installed, "codex": .notInstalled]
         }
@@ -87,8 +109,48 @@ enum SettingsSnapshots {
         SettingsRender.previewSignedIn = false
         SettingsRender.previewBiometrics = true
         SettingsRender.previewHookStatuses = nil
+        SettingsRender.previewFurniture = FurniturePiece.defaults
+        SettingsRender.previewFurnitureHidden = false
         unlockFlowOpen = false
     }
+
+    /// Every kind placed, with options (fixed ids: snapshots never touch the user's settings).
+    static let furnitureSample: [FurniturePiece] = [
+        FurniturePiece(id: "agents", kind: .agents, slot: .topLeading),
+        FurniturePiece(id: "clock-digital", kind: .clock, slot: .topTrailing,
+                       options: [SettingsFurnitureOption.style: .string(SettingsFurnitureOption.digital),
+                                 SettingsFurnitureOption.use24h: .bool(true)]),
+        FurniturePiece(id: "questions", kind: .questions, slot: .topTrailing),
+        FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+        FurniturePiece(id: "system", kind: .system, slot: .bottomTrailing,
+                       options: [SettingsFurnitureOption.network: .bool(false)]),
+    ]
+
+    /// The other clock styles, and system activity at the top.
+    static let furnitureStyles: [FurniturePiece] = [
+        FurniturePiece(id: "system", kind: .system, slot: .topLeading),
+        FurniturePiece(id: "clock-analog", kind: .clock, slot: .topTrailing,
+                       options: [SettingsFurnitureOption.style: .string(SettingsFurnitureOption.analog),
+                                 SettingsFurnitureOption.seconds: .bool(true)]),
+        FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+        FurniturePiece(id: "clock-words", kind: .clock, slot: .bottomTrailing,
+                       options: [SettingsFurnitureOption.style: .string(SettingsFurnitureOption.words)]),
+        FurniturePiece(id: "clock-12h", kind: .clock, slot: .bottomTrailing,
+                       options: [SettingsFurnitureOption.use24h: .bool(false), SettingsFurnitureOption.seconds: .bool(true)]),
+    ]
+
+    /// More than fits: the agents list and the log body have to shrink.
+    static let furnitureCrowded: [FurniturePiece] = [
+        FurniturePiece(id: "clock-digital", kind: .clock, slot: .topLeading),
+        FurniturePiece(id: "agents", kind: .agents, slot: .topLeading),
+        FurniturePiece(id: "system", kind: .system, slot: .topLeading),
+        FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+        FurniturePiece(id: "questions", kind: .questions, slot: .topTrailing),
+        FurniturePiece(id: "system-2", kind: .system, slot: .bottomTrailing,
+                       options: [SettingsFurnitureOption.cpu: .bool(false), SettingsFurnitureOption.battery: .bool(false)]),
+        FurniturePiece(id: "clock-analog", kind: .clock, slot: .bottomTrailing,
+                       options: [SettingsFurnitureOption.style: .string(SettingsFurnitureOption.analog)]),
+    ]
 }
 
 /// All the Silicon controls on one page, for design review.

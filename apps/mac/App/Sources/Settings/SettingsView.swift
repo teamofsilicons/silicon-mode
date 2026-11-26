@@ -3,7 +3,7 @@ import AppKit
 import SiliconModeKit
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, mode, faces, overlay, panic, unlock, agents, account, debug
+    case general, mode, faces, furniture, panic, unlock, agents, account, debug
 
     var id: String { rawValue }
 
@@ -12,7 +12,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: "General"
         case .mode: "Silicon Mode"
         case .faces: "Faces"
-        case .overlay: "Overlay"
+        case .furniture: "Face furniture"
         case .panic: "Panic"
         case .unlock: "Unlock"
         case .agents: "Agents"
@@ -26,7 +26,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: "Startup, shortcut, sounds and sync."
         case .mode: "When Silicon Mode starts, and how long it stays easy to leave."
         case .faces: "What your Mac shows while agents work."
-        case .overlay: "What sits on top of the face."
+        case .furniture: "What sits on top of the face, corner by corner."
         case .panic: "If someone closes the lid on running agents."
         case .unlock: "How you get back in once Silicon Mode locks."
         case .agents: "Which agents Silicon Mode watches, and which can be answered from here."
@@ -40,7 +40,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .mode: "laptopcomputer"
         case .faces: "face.smiling"
-        case .overlay: "text.below.photo"
+        case .furniture: "sofa"
         case .panic: "light.beacon.max"
         case .unlock: "lock"
         case .agents: "sparkles"
@@ -49,7 +49,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         }
     }
 
-    static let main: [SettingsPane] = [.general, .mode, .faces, .overlay, .panic, .unlock, .agents, .account]
+    static let main: [SettingsPane] = [.general, .mode, .faces, .furniture, .panic, .unlock, .agents, .account]
 }
 
 /// The Settings window: a floating glass sidebar and a scrolling detail pane.
@@ -225,7 +225,7 @@ struct SettingsView: View {
         case .general: SettingsGeneralPane()
         case .mode: SettingsModePane()
         case .faces: SettingsFacesPane()
-        case .overlay: SettingsOverlayPane()
+        case .furniture: SettingsFurniturePane()
         case .panic: SettingsPanicPane()
         case .unlock: SettingsUnlockPane()
         case .agents: SettingsAgentsPane()
