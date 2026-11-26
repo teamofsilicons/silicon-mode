@@ -447,7 +447,11 @@ final class AppModel {
     }
 
     func refreshAgents() async {
-        let snap = await hub.refresh()
+        var snap = await hub.refresh()
+        if !debugDemoSessions.isEmpty {
+            snap.sessions += debugDemoSessions
+            snap.counts = AgentCounts(snap.sessions)
+        }
         // A caller resuming late must not apply an older snapshot over a newer one. Snapshot
         // equality ignores `takenAt`, so an unchanged scan isn't stored: track the newest applied
         // time separately, or a late older scan could replace content a newer equal scan confirmed.
@@ -483,7 +487,21 @@ final class AppModel {
         if faceSessions != shown { faceSessions = shown }
     }
 
+    /// QA only (`--debug-control`, `demo=question|permission|off`): demo agents merged into every
+    /// scan, so question cards (and their reply field) can be exercised live without a real agent.
+    private(set) var debugDemoSessions: [AgentSession] = []
+
+    func setDebugDemo(_ kind: String) {
+        debugDemoSessions = DebugDemo.sessions(kind)
+        Task { await refreshAgents() }
+    }
+
     func answer(_ q: AgentQuestion, optionIDs: [String] = [], text: String? = nil, source: AgentAnswer.Source) {
+        if debugDemoSessions.contains(where: { $0.id == q.sessionID }) {
+            debugDemoSessions.removeAll { $0.id == q.sessionID }
+            Task { await refreshAgents() }
+            return
+        }
         let a = AgentAnswer(questionID: q.id, optionIDs: optionIDs, text: text, source: source)
         answerErrors[q.id] = nil
         Task {

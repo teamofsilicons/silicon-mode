@@ -73,6 +73,7 @@ enum DebugCommands {
                    let s = try? JSONDecoder().decode(ModeSettings.self, from: d) { m.settings = s }
             }
         case "refresh": Task { await m.refreshAgents() }
+        case "demo": m.setDebugDemo(val)
         case "type":
             // Inject key presses through the app's own event path (same as a real keyboard).
             let codes: [Character: UInt16] = ["0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25]
@@ -140,6 +141,42 @@ enum DebugCommands {
         let url = HookWire.supportDirectory.appendingPathComponent("debug-state.json")
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: url)
+        }
+    }
+}
+
+/// Demo agents for live QA (`demo=…`). Made-up titles and text only.
+enum DebugDemo {
+    static func sessions(_ kind: String) -> [AgentSession] {
+        let now = Date()
+        let events = [
+            AgentEvent(id: "demo.1", at: now.addingTimeInterval(-40), kind: .user, text: "You: tidy up the settings keys"),
+            AgentEvent(id: "demo.2", at: now.addingTimeInterval(-30), kind: .tool, text: "Read Sources/Settings/Keys.swift"),
+            AgentEvent(id: "demo.3", at: now.addingTimeInterval(-20), kind: .assistant, text: "Said: Two names would work here."),
+        ]
+        switch kind {
+        case "question":
+            let q = AgentQuestion(id: "demo-q1", sessionID: "claude-code:demo-qa", provider: "claude-code", kind: .question,
+                                  title: "Which name should the new key use?",
+                                  detail: "The old key stays readable for one release either way.",
+                                  options: [.init(id: "a", label: "touchIDFirst", detail: "Matches the toggle's wording"),
+                                            .init(id: "b", label: "preferTouchID", detail: "Keeps the old name")],
+                                  allowsFreeText: true, createdAt: now)
+            return [AgentSession(provider: "claude-code", nativeID: "demo-qa", title: "Demo: rename the settings keys",
+                                 state: .needsYou, startedAt: now.addingTimeInterval(-60), updatedAt: now,
+                                 recentEvents: events, pendingQuestions: [q])]
+        case "permission":
+            let q = AgentQuestion(id: "demo-p1", sessionID: "codex:demo-qa", provider: "codex", kind: .permission,
+                                  title: "Run command", detail: "swift test --filter Settings",
+                                  options: [.init(id: "allow", label: "Allow", style: .primary),
+                                            .init(id: "always", label: "Always allow"),
+                                            .init(id: "deny", label: "Deny", style: .destructive)],
+                                  createdAt: now)
+            return [AgentSession(provider: "codex", nativeID: "demo-qa", title: "Demo: run the settings tests",
+                                 state: .needsYou, startedAt: now.addingTimeInterval(-90), updatedAt: now,
+                                 recentEvents: events, pendingQuestions: [q])]
+        default:
+            return []
         }
     }
 }
