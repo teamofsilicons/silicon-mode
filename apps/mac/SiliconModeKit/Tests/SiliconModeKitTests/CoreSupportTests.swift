@@ -163,6 +163,27 @@ struct StubHooks: HookStateReader {
         #expect(t.envelope == "event_msg" && t.payload == "token_count")
     }
 
+    @Test func browserStepsCollapse() {
+        var log = EventLog()
+        let t = Date()
+        log.append(ToolSummary.call(name: "navigate", input: ["url": "https://example.com/login", "tabId": 1], cwd: nil), id: "n1", at: t)
+        log.append(ToolSummary.call(name: "computer", input: ["action": "left_click", "tabId": 1], cwd: nil), id: "c1", at: t)
+        log.append(ToolSummary.call(name: "computer", input: ["action": "wait", "tabId": 1], cwd: nil), id: "c2", at: t)
+        log.append(ToolSummary.call(name: "computer", input: ["action": "type", "tabId": 1], cwd: nil), id: "c3", at: t)
+        log.append(ToolSummary.call(name: "mcp__Claude_Browser__computer", input: ["action": "screenshot"], cwd: nil), id: "c4", at: t)
+        log.append(ToolSummary.call(name: "ToolSearch", input: [:], cwd: nil), id: "x", at: t)
+        log.append(ToolSummary.call(name: "mcp__ccd_turn__wrap_up", input: [:], cwd: nil), id: "y", at: t)
+        #expect(log.events.map(\.text) == ["Opened example.com", "Used the browser · 3 steps"])
+        // A real tool named `find` (opencode/pi) is still a search.
+        #expect(ToolSummary.call(name: "find", input: ["pattern": "*.ts"], cwd: nil).text == "Searched \"*.ts\"")
+    }
+
+    @Test func proseFromMarkdown() {
+        #expect(CoreText.firstSentence("```json\n{\"a\": 1}\n```\n**Done** with `npm test`. Next steps follow.") == "Done with npm test.")
+        #expect(CoreText.firstSentence("## Summary\n- Fixed the race in the cart timer. Also more.") == "Summary")
+        #expect(CoreText.firstSentence("ok") == "ok")
+    }
+
     @Test func cleansPrompts() {
         #expect(CoreText.prompt("<command-name>/review</command-name><command-args>PR 12</command-args>") == "/review PR 12")
         #expect(CoreText.prompt("<local-command-stdout>ok</local-command-stdout>") == nil)

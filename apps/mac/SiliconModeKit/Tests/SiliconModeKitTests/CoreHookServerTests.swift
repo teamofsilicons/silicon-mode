@@ -258,9 +258,27 @@ final class FakeHelper {
         let h3 = try #require(FakeHelper(socketPath: path))
         h3.send(event: "PermissionRequest", payload: permissionPayload(input: ["command": "make"]))
         #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        // An earlier Bash call finishing, or a parallel one with other input, is not this prompt.
+        server.reconcile(agent: "claude-code", sessionID: sid,
+                         progress: .init(boundary: nil, resolvedTools: [("Bash", CoreJSON.canonical(["command": "make"]), Date().addingTimeInterval(-0.5)),
+                                                                        ("Bash", CoreJSON.canonical(["command": "ls"]), Date().addingTimeInterval(1))],
+                                         lastRecordAt: Date().addingTimeInterval(2), openTools: [("Bash", CoreJSON.canonical(["command": "make"]))]))
+        #expect(h3.isPending())
         server.reconcile(agent: "claude-code", sessionID: sid,
                          progress: .init(boundary: nil, resolvedTools: [("Bash", CoreJSON.canonical(["command": "make"]), Date().addingTimeInterval(1))]))
         #expect(h3.response()?.stdout == nil)
+        #expect(server.heldQuestionIDs.isEmpty)
+
+        // 3) The transcript caught up and no Bash call is open any more (inputs differed in shape).
+        let h4 = try #require(FakeHelper(socketPath: path))
+        h4.send(event: "PermissionRequest", payload: permissionPayload(input: ["command": "make test"]))
+        #expect(waitFor { !server.heldQuestionIDs.isEmpty })
+        server.reconcile(agent: "claude-code", sessionID: sid,
+                         progress: .init(boundary: nil, resolvedTools: [], lastRecordAt: Date().addingTimeInterval(0.5), openTools: []))
+        #expect(h4.isPending()) // transcript not caught up yet
+        server.reconcile(agent: "claude-code", sessionID: sid,
+                         progress: .init(boundary: nil, resolvedTools: [], lastRecordAt: Date().addingTimeInterval(3), openTools: []))
+        #expect(h4.response()?.stdout == nil)
         #expect(server.heldQuestionIDs.isEmpty)
     }
 

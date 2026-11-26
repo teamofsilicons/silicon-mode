@@ -153,8 +153,24 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
     struct Progress: Sendable {
         /// Newest turn boundary (prompt submitted, turn finished, interrupted).
         var boundary: Date?
-        /// Tool calls that got a result: name, canonical input, result time.
+        /// Tool calls that got a result: name, canonical input ("" = unknown), result time.
         var resolvedTools: [(name: String, inputKey: String, at: Date)] = []
+        /// Time of the newest transcript record.
+        var lastRecordAt: Date?
+        /// Tool calls still waiting for a result, when the transcript records them (nil = unknown).
+        var openTools: [(name: String, inputKey: String)]?
+
+        /// Whether a prompt for `tool` (with `inputKey`, "" = unknown) created at `at` is behind us.
+        func movedPast(tool: String, inputKey: String, createdAt at: Date) -> Bool {
+            if let b = boundary, b > at.addingTimeInterval(0.5) { return true }
+            if resolvedTools.contains(where: { t in
+                t.name == tool && t.at > at && (t.inputKey == inputKey || t.inputKey.isEmpty || inputKey.isEmpty)
+            }) { return true }
+            // The transcript has caught up past the prompt and no call of that tool is still open.
+            if let open = openTools, let last = lastRecordAt, last > at.addingTimeInterval(1),
+               !open.contains(where: { $0.name == tool }) { return true }
+            return false
+        }
     }
 
     func reconcile(agent: String, sessionID: String, progress: Progress) {
@@ -162,29 +178,17 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
             let key = Store.key(agent, sessionID)
             var released = false
             var ids: [UInt64] = []
-            for (heldID, h) in store.held where h.sessionKey == key {
-                var moved = false
-                if let b = progress.boundary, b > h.createdAt.addingTimeInterval(0.5) { moved = true }
-                if !moved {
-                    let sameName = store.held.values.filter { $0.sessionKey == key && $0.toolName == h.toolName }.count
-                    moved = progress.resolvedTools.contains { t in
-                        t.name == h.toolName && t.at > h.createdAt.addingTimeInterval(-1)
-                            && (t.inputKey == h.inputKey || sameName == 1)
-                    }
-                }
-                if moved {
-                    ids.append(h.connID)
-                    removeHeld(heldID, state: nil)
-                    released = true
-                }
+            for (heldID, h) in store.held where h.sessionKey == key
+                && progress.movedPast(tool: h.toolName, inputKey: h.inputKey, createdAt: h.createdAt) {
+                ids.append(h.connID)
+                removeHeld(heldID, state: nil)
+                released = true
             }
             if var s = store.sessions[key] {
                 let before = s.displayOnly.count
                 let tools = store.displayTool
                 s.displayOnly.removeAll { q in
-                    if let b = progress.boundary, b > q.createdAt.addingTimeInterval(0.5) { return true }
-                    let tool = tools[q.id] ?? ""
-                    return progress.resolvedTools.contains { $0.name == tool && $0.at > q.createdAt.addingTimeInterval(-1) }
+                    progress.movedPast(tool: tools[q.id] ?? "", inputKey: "", createdAt: q.createdAt)
                 }
                 for q in store.sessions[key]?.displayOnly ?? [] where !s.displayOnly.contains(where: { $0.id == q.id }) {
                     store.displayTool.removeValue(forKey: q.id)
@@ -350,8 +354,7 @@ public final class HookServer: HookStateReader, @unchecked Sendable {
                 }
             case "PostToolUse", "PostToolUseFailure", "PermissionDenied":
                 let ikey = CoreJSON.canonical(toolInput)
-                let sameName = store.held.values.filter { $0.sessionKey == key && $0.toolName == toolName }
-                for h in sameName where h.inputKey == ikey || sameName.count == 1 {
+                for h in store.held.values where h.sessionKey == key && h.toolName == toolName && h.inputKey == ikey {
                     released.append(h.connID)
                     removeHeld(h.id, state: nil)
                 }

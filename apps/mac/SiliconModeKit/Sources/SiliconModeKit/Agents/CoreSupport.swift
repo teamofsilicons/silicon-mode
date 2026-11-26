@@ -258,9 +258,27 @@ enum CoreText {
         return EventText.clip(String(line), max: max)
     }
 
-    /// First sentence (or line), clipped.
+    /// First line of prose from Markdown: skips code fences, drops heading/quote/list markers,
+    /// emphasis and inline-code backticks.
+    static func firstProseLine(_ s: String, max: Int = 400) -> String {
+        var inFence = false
+        for raw in s.split(whereSeparator: \.isNewline) {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") || line.hasPrefix("~~~") { inFence.toggle(); continue }
+            if inFence || line.isEmpty || line.allSatisfy({ "-*_=|:".contains($0) || $0 == " " }) { continue }
+            while let f = line.first, "#>".contains(f) { line.removeFirst() }
+            line = line.trimmingCharacters(in: .whitespaces)
+            for marker in ["- ", "* ", "+ "] where line.hasPrefix(marker) { line.removeFirst(2) }
+            line = line.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "__", with: "")
+                .replacingOccurrences(of: "`", with: "")
+            if !line.isEmpty { return EventText.clip(line, max: max) }
+        }
+        return firstLine(s, max: max)
+    }
+
+    /// First sentence (or line) of prose, clipped.
     static func firstSentence(_ s: String, max: Int = 80) -> String {
-        let line = firstLine(s, max: 400)
+        let line = firstProseLine(s, max: 400)
         // Shortest prefix ending a sentence that is at least 12 characters long.
         var searchFrom = line.startIndex
         while let r = line.range(of: #"[.!?](\s|$)"#, options: .regularExpression, range: searchFrom..<line.endIndex) {
@@ -328,9 +346,13 @@ struct EventSpec {
     var plural: String?
     /// Replace the previous event of the same group instead of counting (e.g. plan updates).
     var replace = false
+    /// Count every occurrence (not distinct items), e.g. browser steps.
+    var countEach = false
 
-    init(_ kind: AgentEvent.Kind, _ text: String, group: String? = nil, item: String? = nil, plural: String? = nil, replace: Bool = false) {
-        self.kind = kind; self.text = text; self.group = group; self.item = item; self.plural = plural; self.replace = replace
+    init(_ kind: AgentEvent.Kind, _ text: String, group: String? = nil, item: String? = nil, plural: String? = nil,
+         replace: Bool = false, countEach: Bool = false) {
+        self.kind = kind; self.text = text; self.group = group; self.item = item; self.plural = plural
+        self.replace = replace; self.countEach = countEach
     }
 }
 
@@ -343,6 +365,7 @@ enum ToolSummary {
             for k in keys { if let p = input.nonEmpty(k) { return p } }
             return nil
         }
+        if let b = browser(name: name, input: input) { return b }
         switch lower {
         case "bash", "shell", "exec_command", "local_shell", "run_command", "terminal":
             let cmd = input.nonEmpty("command") ?? input.nonEmpty("cmd") ?? (input["command"] as? [String])?.last ?? ""
@@ -379,7 +402,7 @@ enum ToolSummary {
             return EventSpec(.tool, "Fetched " + CoreText.host(input.str("url") ?? ""))
         case "websearch", "web_search":
             return EventSpec(.tool, "Searched web: " + EventText.clip(input.str("query") ?? "", max: 40))
-        case "task", "agent", "subagent", "workflow":
+        case "task", "agent", "subagent":
             let d = input.nonEmpty("description") ?? input.nonEmpty("subagent_type") ?? input.nonEmpty("prompt").map { CoreText.firstLine($0, max: 50) } ?? "task"
             return EventSpec(.tool, "Started subagent: " + EventText.clip(d, max: 50), group: "agent", item: d, plural: "Started %d subagents")
         case "todowrite", "todo_write", "todos":
@@ -392,6 +415,21 @@ enum ToolSummary {
             return EventSpec(.question, "Proposed a plan")
         case "skill":
             return EventSpec(.tool, "Used skill " + (input.nonEmpty("skill") ?? input.nonEmpty("name") ?? ""))
+        case "toolsearch", "taskoutput", "bashoutput", "killshell", "listmcpresourcestool":
+            return EventSpec(.status, "", group: "hidden")
+        case "sendmessage":
+            return EventSpec(.tool, "Messaged " + EventText.clip(input.str("to") ?? "an agent", max: 40))
+        case "senduserfile":
+            return EventSpec(.tool, "Shared a file")
+        case "taskstop":
+            return EventSpec(.tool, "Stopped a task")
+        case "pushnotification":
+            return EventSpec(.tool, "Sent a notification")
+        case "workflow":
+            return EventSpec(.tool, "Started a workflow", group: "workflow", plural: "Started %d workflows", countEach: true)
+        case "artifact":
+            let action = input.str("action") ?? "publish"
+            return EventSpec(.tool, action == "publish" ? "Published a page" : "Artifact: \(action)")
         default:
             break
         }
@@ -409,6 +447,54 @@ enum ToolSummary {
             }
         }
         return EventSpec(.tool, "Used " + name)
+    }
+
+    static let browserTools: Set<String> = ["computer", "navigate", "javascript_tool", "read_page", "get_page_text", "form_input",
+                                            "resize_window", "read_console_messages", "read_network_requests", "browser_batch",
+                                            "tabs_create_mcp", "tabs_context_mcp", "tabs_close_mcp", "gif_creator", "upload_image",
+                                            "file_upload", "find", "preview_start", "preview_stop", "preview_logs", "tabs_create",
+                                            "tabs_context", "tabs_select", "tabs_close", "screenshot"]
+
+    /// Browser / computer-use steps (Claude in Chrome, the built-in browser, computer use): consecutive
+    /// steps collapse into one "Used the browser · N steps" line; navigations stay visible.
+    static func browser(name: String, input: JSONObject) -> EventSpec? {
+        var tool = name
+        if name.hasPrefix("mcp__") {
+            let (server, t) = mcpParts(name)
+            let s = server.lowercased()
+            guard s.contains("browser") || s.contains("chrome") || s.contains("computer") else { return nil }
+            tool = t
+        } else {
+            guard browserTools.contains(name), name != "find" || input["tabId"] != nil else { return nil }
+        }
+        if name.hasPrefix("mcp__computer") || name.hasPrefix("mcp__remote-devices__computer") { tool = "computer:" + tool }
+        let step = { (text: String) in EventSpec(.tool, text, group: "browser", plural: "Used the browser · %d steps", countEach: true) }
+        switch tool {
+        case "navigate":
+            let url = input.str("url") ?? ""
+            if url == "back" || url == "forward" { return step("Went \(url)") }
+            return EventSpec(.tool, "Opened " + CoreText.host(url.hasPrefix("http") ? url : "https://" + url))
+        case "computer":
+            switch input.str("action") ?? "" {
+            case "wait": return EventSpec(.status, "", group: "hidden")
+            case "screenshot": return step("Took a screenshot")
+            case "left_click", "right_click", "double_click", "triple_click": return step("Clicked")
+            case "type": return step("Typed text")
+            case "key": return step("Pressed keys")
+            case "scroll", "scroll_to": return step("Scrolled")
+            case "zoom": return step("Zoomed in")
+            case "left_click_drag": return step("Dragged")
+            default: return step("Used the browser")
+            }
+        case "javascript_tool": return step("Ran a page script")
+        case "read_page", "get_page_text": return step("Read the page")
+        case "form_input": return step("Filled a form")
+        case "find": return step("Looked for " + EventText.clip(input.str("query") ?? "an element", max: 30))
+        case "browser_batch": return step("Ran browser steps")
+        default:
+            if tool.hasPrefix("computer:") { return EventSpec(.tool, "Used the computer", group: "computer", plural: "Used the computer · %d steps", countEach: true) }
+            return step("Browser: " + tool.replacingOccurrences(of: "_", with: " "))
+        }
     }
 
     /// `mcp__ccd_session__mark_chapter` → ("session", "mark_chapter"); long server ids are shortened.
@@ -494,7 +580,7 @@ struct EventLog: Sendable {
     private var entries: [Entry] = []
     let capacity: Int
 
-    init(capacity: Int = 40) { self.capacity = capacity }
+    init(capacity: Int = 60) { self.capacity = capacity }
 
     var events: [AgentEvent] { entries.map(\.event) }
     var last: AgentEvent? { entries.last?.event }
@@ -513,7 +599,7 @@ struct EventLog: Sendable {
                 entries[entries.count - 1] = lastEntry
                 return
             }
-            let item = spec.item ?? text
+            let item = spec.countEach ? "#\(lastEntry.items.count)" : (spec.item ?? text)
             if !lastEntry.items.contains(item) { lastEntry.items.append(item) }
             if lastEntry.items.count > 1, let plural = lastEntry.plural {
                 lastEntry.event.text = String(format: plural, lastEntry.items.count)

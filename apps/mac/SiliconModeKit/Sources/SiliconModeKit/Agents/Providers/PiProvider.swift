@@ -44,6 +44,8 @@ final class PiProvider: AgentProvider, @unchecked Sendable {
     }
 
     static func isPiProcess(_ p: ProcessEntry) -> Bool {
+        // Cheap prefilter on p_comm: pi runs as `pi` or under node/bun.
+        guard p.name == "pi" || p.name.hasPrefix("node") || p.name == "bun" else { return false }
         if CoreProcess.command(p) == "pi" { return true }
         return p.args.prefix(3).contains { $0.contains("pi-coding-agent") || $0.hasSuffix("node_modules/.bin/pi") }
     }

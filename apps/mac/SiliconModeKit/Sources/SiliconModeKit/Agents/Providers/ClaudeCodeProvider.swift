@@ -108,9 +108,8 @@ final class ClaudeCodeProvider: AgentProvider, @unchecked Sendable {
             }
             var t: ClaudeTranscript?
             if let path {
-                let tr = c.transcripts[sid] ?? ClaudeTranscript(sessionID: sid, path: path)
-                if tr.tail.path != path { c.transcripts[sid] = ClaudeTranscript(sessionID: sid, path: path) }
-                let cur = c.transcripts[sid] ?? tr
+                var cur = c.transcripts[sid] ?? ClaudeTranscript(sessionID: sid, path: path)
+                if cur.tail.path != path { cur = ClaudeTranscript(sessionID: sid, path: path) }
                 cur.refresh()
                 c.transcripts[sid] = cur
                 t = cur
@@ -128,7 +127,9 @@ final class ClaudeCodeProvider: AgentProvider, @unchecked Sendable {
             // Tell the hook server what the transcript shows, so stale held prompts get released.
             if let t, let hookServer, let hook, !hook.pending.isEmpty {
                 hookServer.reconcile(agent: ClaudeCodeProvider.id, sessionID: sid,
-                                     progress: .init(boundary: t.boundary, resolvedTools: t.resolvedTools))
+                                     progress: .init(boundary: t.boundary, resolvedTools: t.resolvedTools,
+                                                     lastRecordAt: t.lastActivity,
+                                                     openTools: t.openTools.values.map { ($0.name, $0.inputKey) }))
             }
             let hookNow = hookServer.flatMap { $0.state(agent: ClaudeCodeProvider.id, sessionID: sid) } ?? hook
 

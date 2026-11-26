@@ -104,6 +104,7 @@ final class CodexProvider: AgentProvider, @unchecked Sendable {
             guard seenThreads.insert(tid).inserted else { continue }
 
             if let hookServer, let hook, !hook.pending.isEmpty {
+                // Rollouts don't record pending calls, so only explicit progress counts.
                 hookServer.reconcile(agent: CodexProvider.id, sessionID: tid,
                                      progress: .init(boundary: r.boundary, resolvedTools: r.resolvedTools))
             }
