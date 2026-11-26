@@ -65,7 +65,8 @@ final class AppModel {
     var counts: AgentCounts { snapshot.counts }
     /// Questions shown, oldest first (QA demo questions first of all).
     var pendingQuestions: [AgentQuestion] { snapshot.pendingQuestions }
-    /// Agents running as the mode engine counts them: real agents only.
+    /// Agents running as the mode engine counts them (and Settings' panic test and entry hint, which
+    /// explain the engine): real agents only.
     var runningAgents: Int { hubSnapshot.counts.running }
     /// Last error shown after a failed answer, keyed by question id.
     var answerErrors: [String: String] = [:]
@@ -524,12 +525,18 @@ final class AppModel {
 
     func answer(_ q: AgentQuestion, optionIDs: [String] = [], text: String? = nil, source: AgentAnswer.Source) {
         if isDebugDemo(q) {
-            // Like a real agent, the demo picks the answer up a moment later and carries on working
-            // (`demo=off` ends it).
+            // Like a real agent, the demo picks the answer up a moment later, works a little, then
+            // ends its turn (finished; `demo=off` removes it).
             answerErrors[q.id] = nil
             Task {
                 try? await Task.sleep(for: .milliseconds(400))
-                debugDemoSessions = debugDemoSessions.map { DebugDemo.answered($0, q, optionIDs: optionIDs, text: text) }
+                let answeredAt = Date()
+                debugDemoSessions = debugDemoSessions.map {
+                    DebugDemo.answered($0, q, optionIDs: optionIDs, text: text, now: answeredAt)
+                }
+                showAgents()
+                try? await Task.sleep(for: .seconds(4))
+                debugDemoSessions = debugDemoSessions.map { DebugDemo.finished($0, answeredAt: answeredAt, now: Date()) }
                 showAgents()
             }
             return
