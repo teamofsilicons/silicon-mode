@@ -1,4 +1,4 @@
-# Silicon Mode — status (2026-11-26)
+# Silicon Mode — status (2026-11-27, Mac app 0.1.1)
 
 ## What exists
 
@@ -36,14 +36,40 @@
 - Adversarial review: 42 confirmed findings across lock, hooks, providers, sync, crash-safety, web and
   mobile — all fixed (see `docs/review/*.md`); 141 Kit unit tests, web 27 tests.
 
+## 0.1.1 (Mac)
+
+- **Face furniture**: everything on top of the face is a piece the user places in a corner, like a
+  home screen: agents, logs (a tab per agent, every line since entry, scrollable, minimisable),
+  clocks (digital, analog, words), system activity. All on Liquid Glass. The eye button hides
+  them all.
+- **Questions** is the one piece that always stays: it can be moved to any corner but not removed,
+  takes no room until an agent asks something, and still shows with the furniture hidden.
+- **Faces never show questions** (no "?" signs, blocks or badges, no question text): an agent waiting
+  on you is drawn as a quiet, paused agent; the question is answered on its card.
+- PIN is the default unlock; the agent list shows only active agents and those finished since entry;
+  panic never re-baselines upward and, entered above the trigger angle, needs 30 % below it.
+- Silicons show as one row with their profile photo and the TOS mark.
+- **CPU**: ~38 % → ~17–25 % of one core in Silicon Mode (face and furniture are separate layers, calm
+  scenes drop to 20 fps). **Memory**: a glyph-cache leak in the lid-angle readout (~18 MB/min) is
+  fixed, and the same animated-digit pattern removed everywhere.
+- Overlay layers are prewarmed and reused, so entry and exit don't rebuild them (the exit freeze is gone).
+- QA demo agents (`smctl demo=…`, debug builds only) are UI only: never synced, counted or answered
+  for real.
+- Verified: 245 Kit tests; six on/off cycles across all five faces (one with a demo question) in one
+  launch, each active in ~1 s with the overlay on screen and fully gone after turning off.
+
 ## Not verified / known gaps
 
 - **Touch ID with a real finger** (needs a person; code path follows Apple's embedded `LAAuthenticationView`).
 - **⌃⌥S** physically pressed (registered via Carbon; no Accessibility permission needed).
 - **Real browser sign-in** on Mac/web/phones (needs a person at Silicon Accounts); every hop after the
   browser was tested with a real si:tos session.
-- **CPU**: Silicon Mode uses ~20–30 % of one core while showing a face (WindowServer ~20 %). Next step:
-  put the animated face and the glass HUD in separate windows so the HUD isn't re-rendered every frame.
+- **Memory** still grows ~100 MB/hour in Silicon Mode: the entrance effect keeps an offscreen
+  render pass alive after the face settles. A fix (drop the effect once settled, without resetting
+  the face) is on branch `r3-face` but not merged: it needs another review pass.
+- **Phase 2 polish** not done on purpose: faces moving around the furniture (on `r3-face`), finer
+  visual details. Getting everything working reliably came first.
+- The countdown digits and Touch ID were not seen live with a real lid tilt / finger in this round.
 - **Push notifications** to phones (needs APNs/FCM + a cell trigger) — not built.
 - **Marketplace faces / local silicon** — out of scope for tonight (spec says later).
 - Android release signing and iOS App Store upload are not configured.
