@@ -14,7 +14,7 @@ struct QuestionsSection: View {
             MBSectionLabel(title: "Needs you", count: questions.count, tint: Theme.warning, pulsing: true)
                 .padding(.bottom, 1)
             ForEach(questions) { q in
-                QuestionCard(question: q,
+                MenuBarQuestionCard(question: q,
                              project: sessions.first { $0.id == q.sessionID }?.projectName,
                              error: errors[q.id],
                              selected: presentation.selection == "q:\(q.id)") { ids, text in
@@ -29,7 +29,7 @@ struct QuestionsSection: View {
     }
 }
 
-struct QuestionCard: View {
+struct MenuBarQuestionCard: View {
     let question: AgentQuestion
     let project: String?
     let error: String?
