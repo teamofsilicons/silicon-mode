@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import SiliconModeKit
 
 // Building blocks shared by the in-mode HUD (counts, agent list, tail log) and question cards.
@@ -177,15 +178,55 @@ struct HUDStateDot: View {
         let c = Theme.stateColor(state)
         ZStack {
             if state == .needsYou && !reduceMotion && !HUDRender.isSnapshot {
-                Circle()
-                    .fill(c.opacity(0.55))
-                    .phaseAnimator([false, true]) { v, on in
-                        v.scaleEffect(on ? 2.4 : 1).opacity(on ? 0 : 0.7)
-                    } animation: { on in on ? .easeOut(duration: 1.4) : .linear(duration: 0.01) }
+                HUDPulse(color: NSColor(c), size: size * 3.2)
+                    .frame(width: size * 3.2, height: size * 3.2)
+                    .allowsHitTesting(false)
             }
-            Circle().fill(c)
+            Circle().fill(c).frame(width: size, height: size)
         }
         .frame(width: size, height: size)
+    }
+}
+
+/// An endlessly repeating "ping" ring driven by Core Animation, so it costs the main thread
+/// nothing while the HUD sits on screen for hours (a SwiftUI repeatForever re-renders per frame).
+struct HUDPulse: NSViewRepresentable {
+    let color: NSColor
+    let size: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        v.wantsLayer = true
+        let ring = CAShapeLayer()
+        let d = size / 3.2
+        ring.path = CGPath(ellipseIn: CGRect(x: (size - d) / 2, y: (size - d) / 2, width: d, height: d), transform: nil)
+        ring.fillColor = color.withAlphaComponent(0.6).cgColor
+        ring.frame = CGRect(x: 0, y: 0, width: size, height: size)
+        ring.opacity = 0
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1
+        scale.toValue = 3
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.75
+        fade.toValue = 0
+        let ping = CAAnimationGroup()
+        ping.animations = [scale, fade]
+        ping.duration = 1.4
+        ping.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        // 1.4 s ping, then a 1 s rest.
+        let cycle = CAAnimationGroup()
+        cycle.animations = [ping]
+        cycle.duration = 2.4
+        cycle.repeatCount = .infinity
+        cycle.isRemovedOnCompletion = false
+        ring.add(cycle, forKey: "ping")
+        v.layer?.addSublayer(ring)
+        return v
+    }
+
+    func updateNSView(_ v: NSView, context: Context) {
+        (v.layer?.sublayers?.first as? CAShapeLayer)?.fillColor = color.withAlphaComponent(0.6).cgColor
     }
 }
 

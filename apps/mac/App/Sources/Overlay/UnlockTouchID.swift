@@ -102,16 +102,19 @@ struct UnlockTouchIDWell: NSViewRepresentable {
     let generation: Int
     var onAttach: (Int) -> Void
 
+    /// Frame for the well (matches `.regular`).
+    static let side: CGFloat = 64
+
     func makeNSView(context ctx: Context) -> UnlockTouchIDHost {
-        let host = UnlockTouchIDHost(frame: NSRect(x: 0, y: 0, width: 64, height: 64))
-        let la = LAAuthenticationView(context: context, controlSize: .large)
+        let host = UnlockTouchIDHost(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
+        // The view pins its own (required) square size per control size: .small 32, .regular 64,
+        // .large 128 (probed on macOS 27). Use .regular and only center it, so nothing conflicts.
+        let la = LAAuthenticationView(context: context, controlSize: .regular)
         la.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(la)
         NSLayoutConstraint.activate([
             la.centerXAnchor.constraint(equalTo: host.centerXAnchor),
             la.centerYAnchor.constraint(equalTo: host.centerYAnchor),
-            la.widthAnchor.constraint(equalTo: host.widthAnchor),
-            la.heightAnchor.constraint(equalTo: host.heightAnchor),
         ])
         host.generation = generation
         host.onAttach = onAttach

@@ -246,7 +246,7 @@ struct UnlockView: View {
 
     private var touchIDBody: some View {
         VStack(spacing: 0) {
-            UnlockTouchIDRing(state: ringState, successStage: successStage, shake: shake) {
+            UnlockTouchIDRing(state: ringState, successStage: successStage) {
                 if HUDRender.isSnapshot || preview != nil {
                     Image(systemName: "touchid")
                         .font(.system(size: 44, weight: .light))
@@ -257,10 +257,20 @@ struct UnlockView: View {
                         bio.viewAttached(generation: g)
                     }
                     .id(bio.generation)
-                    .frame(width: 64, height: 64)
+                    .frame(width: UnlockTouchIDWell.side, height: UnlockTouchIDWell.side)
                 }
             } onTap: {
                 if status == .touchIDPaused { bio.arm(); status = .idle }
+            }
+            .keyframeAnimator(initialValue: 0.0, trigger: shake) { v, x in
+                v.offset(x: x)
+            } keyframes: { _ in
+                KeyframeTrack {
+                    CubicKeyframe(-10, duration: 0.06)
+                    CubicKeyframe(8, duration: 0.08)
+                    CubicKeyframe(-5, duration: 0.07)
+                    CubicKeyframe(0, duration: 0.08)
+                }
             }
             .padding(.top, 26)
             .padding(.bottom, 28)
@@ -423,7 +433,12 @@ struct UnlockView: View {
             if pin.count == Self.length { submit() }
         case .delete:
             guard !pin.isEmpty, status != .verifying, status != .success else { return }
-            withAnimation(Theme.Motion.fast) { pin.removeLast() }
+            if case .wrong = status, pin.count == Self.length {
+                // The red row is a rejected attempt: delete clears it entirely.
+                withAnimation(Theme.Motion.moderate) { pin = "" }
+            } else {
+                withAnimation(Theme.Motion.fast) { pin = String(pin.dropLast()) }
+            }
         case .touchID:
             switchMode(.touchID)
         case .blank:
@@ -451,7 +466,7 @@ struct UnlockView: View {
         status = .verifying
         let vault = model.pinVault
         Task { @MainActor in
-            // Let the sixth dot land before the (≈50 ms) key derivation.
+            // Let the sixth dot land before the (≈20 ms) key derivation.
             try? await Task.sleep(for: .milliseconds(120))
             let result = await Task.detached(priority: .userInitiated) { vault.verify(entered) }.value
             switch result {
@@ -471,7 +486,8 @@ struct UnlockView: View {
                 status = .wrong(attemptsLeft: left)
                 shake += 1
                 try? await Task.sleep(for: .milliseconds(520))
-                if case .wrong = status { withAnimation(Theme.Motion.moderate) { pin = "" } }
+                // Only clear if the user hasn't already started typing the next attempt.
+                if case .wrong = status, pin == entered { withAnimation(Theme.Motion.moderate) { pin = "" } }
             case .throttled(let retry):
                 if model.settings.uiSoundsEnabled { model.sounds.play(.wrongPin) }
                 now = Date()
@@ -569,7 +585,6 @@ struct UnlockTouchIDRing<Content: View>: View {
 
     let state: UnlockRingState
     let successStage: Int
-    let shake: Int
     @ViewBuilder var content: Content
     var onTap: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -600,16 +615,6 @@ struct UnlockTouchIDRing<Content: View>: View {
         .frame(width: 112, height: 112)
         .contentShape(Circle())
         .onTapGesture(perform: onTap)
-        .keyframeAnimator(initialValue: 0.0, trigger: shake) { v, x in
-            v.offset(x: x)
-        } keyframes: { _ in
-            KeyframeTrack {
-                CubicKeyframe(-10, duration: 0.06)
-                CubicKeyframe(8, duration: 0.08)
-                CubicKeyframe(-5, duration: 0.07)
-                CubicKeyframe(0, duration: 0.08)
-            }
-        }
         .animation(.spring(duration: 0.36, bounce: 0.3), value: successStage)
         .animation(Theme.Motion.moderate, value: state)
     }

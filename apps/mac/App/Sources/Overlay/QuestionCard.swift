@@ -94,7 +94,14 @@ struct QuestionCard: View {
             withAnimation(Theme.Motion.expressive) { appeared = true }
             withAnimation(reduceMotion ? .linear(duration: 0.2) : .easeOut(duration: 2.6).delay(0.25)) { glow = 0.18 }
         }
-        .onChange(of: error) { _, e in if e != nil { sending = nil } }
+        .onChange(of: error) { _, e in if e != nil { withAnimation(Theme.Motion.fast) { sending = nil } } }
+        .task(id: sending) {
+            // A sent answer normally removes the card within a second. If the question is still
+            // here after a while (agent slow to pick it up), let the user try again.
+            guard sending != nil else { return }
+            try? await Task.sleep(for: .seconds(8))
+            if !Task.isCancelled { withAnimation(Theme.Motion.fast) { sending = nil } }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(info.name) asks: \(question.title)")
     }
