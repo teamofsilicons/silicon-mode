@@ -125,7 +125,8 @@ final class AppModel {
         hotKeys.onPress = { [weak self] in self?.toggleFromShortcut() }
         if settings.hotkeyEnabled { hotKeys.register() }
 
-        LoginItem.sync(enabled: settings.launchAtLogin)
+        // Dev builds also *unregister* themselves, cleaning up any earlier registration.
+        LoginItem.sync(enabled: Flags.noLoginItem ? false : settings.launchAtLogin)
         account.restore()
         cloud.attach(model: self)
     }
@@ -265,7 +266,7 @@ final class AppModel {
         if settings.hotkeyEnabled != old.hotkeyEnabled {
             settings.hotkeyEnabled ? hotKeys.register() : hotKeys.unregister()
         }
-        if settings.launchAtLogin != old.launchAtLogin { LoginItem.sync(enabled: settings.launchAtLogin) }
+        if settings.launchAtLogin != old.launchAtLogin, !Flags.noLoginItem { LoginItem.sync(enabled: settings.launchAtLogin) }
         if settings.caffeinate != old.caffeinate, isActive {
             settings.caffeinate ? caffeinator.begin(reason: "Silicon Mode is active") : caffeinator.end()
         }
@@ -340,4 +341,14 @@ final class LockedValue<T: Sendable>: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _value }
         set { lock.lock(); _value = newValue; lock.unlock() }
     }
+}
+
+/// Launch flags for development and automated checks.
+enum Flags {
+    /// Don't register a login item (dev builds launched from build folders / worktrees).
+    static let noLoginItem = CommandLine.arguments.contains("--no-login-item") || isDevBuild
+    /// Don't engage the kiosk lock (presentation options) — overlays still show.
+    static let noKiosk = CommandLine.arguments.contains("--no-kiosk")
+    /// Debug builds outside /Applications never register as login items.
+    static var isDevBuild: Bool { !Bundle.main.bundlePath.hasPrefix("/Applications/") }
 }

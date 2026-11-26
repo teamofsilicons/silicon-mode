@@ -69,7 +69,7 @@ final class KioskLock {
     private var previous: NSApplication.PresentationOptions = []
 
     func engage() {
-        guard !engaged else { return }
+        guard !engaged, !Flags.noKiosk else { return }
         engaged = true
         NSApp.activate(ignoringOtherApps: true)
         previous = NSApp.presentationOptions

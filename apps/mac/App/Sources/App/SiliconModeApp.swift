@@ -39,6 +39,7 @@ enum WindowID {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            if SnapshotHarness.runIfRequested() { exit(0) }
             let model = AppModel.shared
             model.start()
             if model.needsOnboarding || CommandLine.arguments.contains("--onboarding") {
