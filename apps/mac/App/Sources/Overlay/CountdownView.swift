@@ -121,8 +121,8 @@ private enum CountdownStyle {
 
 // MARK: - Dial
 
-/// Ring + rolling numeral. Each second a faint ripple leaves the ring — the same motif the
-/// enter shockwave pays off.
+/// Ring + falling numeral. Each second a faint ripple leaves the ring — the same motif the
+/// enter shockwave pays off — and the next digit drops in from above as the last one falls away.
 private struct CountdownDial: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -136,30 +136,52 @@ private struct CountdownDial: View {
             let _ = preview == nil ? OverlayTiming.frame(.countdown) : ()
             let (remaining, duration) = timing(now: tl.date)
             let elapsed = max(0, duration - remaining)
-            let digit = max(1, Int(ceil(remaining - 0.0005)))
-            // Seconds since the last whole-second boundary (drives the per-tick ripple and pop).
+            let digit = Self.digit(remaining)
+            // Seconds since the last whole-second boundary (drives the per-tick ripple).
             let sinceTick = elapsed - floor(elapsed)
             let progress = min(1, elapsed / max(duration, 0.001))
 
             ZStack {
                 ring(progress: progress, sinceTick: sinceTick)
+                // One view per digit, swapped with a move + fade. Not `.numericText()`: its roll
+                // draws the glyphs at every intermediate scale and blur on the CPU, and CoreGraphics
+                // keeps each of those bitmaps cached for good (large ones here, five per entry).
                 Text("\(digit)")
                     .font(Theme.allo(diameter * 0.5, .medium))
                     .monospacedDigit()
                     .tracking(-diameter * 0.012)
                     .foregroundStyle(CountdownStyle.numeral)
                     .shadow(color: Theme.Night.lavender.opacity(0.35), radius: 24)
-                    .contentTransition(.numericText(countsDown: true))
-                    .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.5, bounce: 0.22), value: digit)
-                    .scaleEffect(reduceMotion ? 1 : 1 + 0.045 * exp(-sinceTick * 9))
                     .offset(y: -diameter * 0.01)
+                    .id(digit)
+                    .transition(digitTransition)
             }
             .frame(width: diameter, height: diameter)
+            // Only counting down animates. The dial is built once and kept between entries, so a
+            // new countdown starts by jumping from the last one's digit back up to the first: that
+            // swap happens at once, under the dial's own drop-in.
+            .animation(digit < Self.digit(duration) ? digitAnimation : nil, value: digit)
             .onChange(of: digit) { old, new in
                 guard new < old, preview == nil, visible, model.settings.uiSoundsEnabled else { return }
                 model.sounds.play(.tick)
             }
         }
+    }
+
+    /// The digit shown with `remaining` seconds left: 5 down to 1.
+    private static func digit(_ remaining: Double) -> Int { max(1, Int(ceil(remaining - 0.0005))) }
+
+    private var digitAnimation: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.5, bounce: 0.22)
+    }
+
+    /// Counting down: the next digit comes from above, the last one falls below. Moves and fades
+    /// only (Reduce Motion: fades).
+    private var digitTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let d = diameter * 0.16
+        return .asymmetric(insertion: .offset(y: -d).combined(with: .opacity),
+                           removal: .offset(y: d).combined(with: .opacity))
     }
 
     private func timing(now: Date) -> (Double, Double) {
@@ -291,7 +313,7 @@ struct CountdownAgentsLine: View {
                 .shadow(color: Theme.stateColor(state).opacity(0.8), radius: 4)
             Text("\(n) \(label)")
                 .foregroundStyle(Theme.Night.secondary)
-                .contentTransition(.numericText())
+                .contentTransition(.opacity)
         }
     }
 }

@@ -82,7 +82,9 @@ struct SystemPiece: View {
                     .font(.title2.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
-                    .contentTransition(.numericText())
+                    // New every 2 s: a crossfade if it is ever animated, never a numericText roll
+                    // (which leaves glyph bitmaps cached for good).
+                    .contentTransition(.opacity)
             }
             .frame(width: 84, alignment: .leading)
             SystemSparkline(values: a?.cpuHistory ?? [])

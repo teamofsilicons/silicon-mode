@@ -300,7 +300,7 @@ struct MBSectionLabel: View {
             Text("\(count)")
                 .font(Theme.allo(11, .semibold))
                 .monospacedDigit()
-                .contentTransition(.numericText(value: Double(count)))
+                .contentTransition(.opacity)
                 .animation(MB.Motion.digit, value: count)
                 .foregroundStyle(tint)
                 .padding(.horizontal, 5)

@@ -153,7 +153,10 @@ struct SettingsAngleReadout: View {
                 .font(Theme.allo(large ? 56 : 38, .semibold))
                 .tracking(Theme.tracking(large ? 56 : 38, display: true))
                 .monospacedDigit()
-                .contentTransition(.numericText(value: angle ?? 0))
+                // A crossfade, not `.numericText()`: the live angle re-animates on every degree of
+                // sensor jitter, and each numericText roll leaves its intermediate glyph bitmaps in
+                // CoreGraphics’ cache for good (measured: steady growth while shown).
+                .contentTransition(.opacity)
                 .animation(Theme.Motion.moderate, value: angle.map { Int($0.rounded()) })
             .animation(Theme.Motion.moderate, value: below)
             HStack(spacing: 6) {

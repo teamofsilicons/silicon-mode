@@ -8,7 +8,7 @@ import SiliconModeKit
 /// Where each piece of furniture lands on a screen, following the overlay's rules
 /// (`FurniturePlan`, with the same `FurnitureMetrics`):
 /// - four corner slots: top slots stack down from the top edge, bottom slots stack up from the
-///   bottom edge (bottom-left above the lid-angle readout, bottom-right above the Unlock button);
+///   bottom edge (bottom-left level with the chrome row, bottom-right above the Unlock button);
 /// - per side, the top slot gets what it needs up to 55% of the screen height, the bottom slot the
 ///   rest, and the top slot takes back whatever the bottom slot leaves unused;
 /// - the agents list and the log body shrink to fit, everything else keeps its size.
@@ -202,8 +202,9 @@ struct SettingsFurnitureLayout {
 // MARK: - Preview
 
 /// A live, always-dark schematic of the overlay: the face, the four corner slots, each placed
-/// piece drawn as its real silhouette, and the chrome that always stays (Unlock, the eye toggle,
-/// the lid angle). Hovering a piece highlights it (and its row in the pane).
+/// piece drawn as its real silhouette, and the chrome that always stays (Unlock and the eye toggle,
+/// dimmed as they are while nobody is at the Mac). Hovering a piece highlights it (and its row in
+/// the pane).
 struct SettingsFurniturePreview: View {
     let pieces: [FurniturePiece]
     var hidden = false
@@ -318,41 +319,31 @@ struct SettingsFurniturePreview: View {
     // MARK: Chrome (always there)
 
     private var chrome: some View {
-        ZStack {
-            HStack(spacing: 10) {
-                Image(systemName: hidden ? "eye.slash" : "eye")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.Night.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 42, height: 42)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1.5))
-                HStack(spacing: 8) {
-                    Image(systemName: "lock.fill").font(.system(size: 13, weight: .semibold))
-                    SilhouetteBar(width: 52, height: 10, opacity: 0.85)
-                }
-                .foregroundStyle(Theme.Night.foreground)
-                .padding(.horizontal, 18)
-                .frame(height: 42)
-                .background(Capsule().fill(Theme.Night.accent.opacity(0.2)))
-                .background(Capsule().fill(Color.white.opacity(0.06)))
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 1.5))
+        // The overlay's idle look (`ChromeDim`): the eye recedes most, the control stays legible.
+        HStack(spacing: 10) {
+            Image(systemName: hidden ? "eye.slash" : "eye")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.Night.secondary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 42, height: 42)
+                .background(Circle().fill(Color.white.opacity(0.08)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1.5))
+                .opacity(ChromeDim.toggle(idle: true, hidden: hidden))
+            HStack(spacing: 8) {
+                Image(systemName: "lock.fill").font(.system(size: 13, weight: .semibold))
+                SilhouetteBar(width: 52, height: 10, opacity: 0.85)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            .padding(.trailing, 28)
-            .padding(.bottom, 26)
-
-            HStack(spacing: 7) {
-                SilhouetteLidMark()
-                    .stroke(Theme.Night.muted, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-                    .frame(width: 16, height: 12)
-                SilhouetteBar(width: 26, height: 8, color: Theme.Night.muted, opacity: 0.8)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-            .padding(.leading, 30)
-            .padding(.bottom, 32)
+            .foregroundStyle(Theme.Night.foreground)
+            .padding(.horizontal, 18)
+            .frame(height: 42)
+            .background(Capsule().fill(Theme.Night.accent.opacity(0.2)))
+            .background(Capsule().fill(Color.white.opacity(0.06)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 1.5))
+            .opacity(ChromeDim.control(idle: true, hidden: hidden))
         }
-        .opacity(hidden ? 0.35 : 0.8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(.trailing, 28)
+        .padding(.bottom, 26)
         .allowsHitTesting(false)
     }
 
@@ -533,17 +524,15 @@ private struct AgentsSilhouette: View {
 
     private var pill: some View {
         HStack(spacing: 10) {
-            HStack(spacing: -7) {
-                ForEach(SilhouetteAgent.sample.prefix(3)) { a in
-                    AgentAvatarView(provider: a.provider, identity: a.identity, state: a.state, size: 28, showsState: false)
-                }
-            }
+            // The overlay pill's stack: no badges, each avatar cut out of the one beneath it.
+            AgentsAvatarStack(items: SilhouetteAgent.sample.prefix(3).map { .init(id: $0.id, provider: $0.provider, identity: $0.identity) },
+                              size: 28)
             summary
             Image(systemName: "chevron.down")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Theme.Night.muted)
         }
-        .padding(.leading, 8)
+        .padding(.leading, (SettingsFurnitureLayout.agentPill - 28) / 2)
         .padding(.trailing, 16)
         .frame(height: SettingsFurnitureLayout.agentPill)
         .silhouetteCapsule()
@@ -812,7 +801,7 @@ private struct SystemSilhouette: View {
             HStack(spacing: 10) {
                 glyph("cpu")
                 Text(measured ? "\(Int((r.cpu * 100).rounded()))%" : "–")
-                    .contentTransition(.numericText())
+                    .contentTransition(.opacity)
                     .font(Theme.allo(22, .semibold))
                     .monospacedDigit()
                     .foregroundStyle(Theme.Night.foreground)
@@ -907,20 +896,6 @@ private struct SilhouetteSparkline: Shape {
             p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
             p.closeSubpath()
         }
-        return p
-    }
-}
-
-/// A laptop seen from the side (the lid-angle readout's glyph).
-private struct SilhouetteLidMark: Shape {
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        let hinge = CGPoint(x: r.minX + r.width * 0.12, y: r.maxY)
-        p.move(to: CGPoint(x: r.maxX, y: r.maxY))
-        p.addLine(to: hinge)
-        let a = 62.0 * .pi / 180
-        p.move(to: hinge)
-        p.addLine(to: CGPoint(x: hinge.x + CGFloat(cos(a)) * r.height * 1.1, y: hinge.y - CGFloat(sin(a)) * r.height * 1.1))
         return p
     }
 }

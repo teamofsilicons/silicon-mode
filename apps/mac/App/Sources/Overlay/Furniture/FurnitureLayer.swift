@@ -31,9 +31,14 @@ struct FurnitureLayer: View {
             let plan = FurniturePlan.make(pieces: pieces, size: geo.size) { piece in
                 demand(piece, screen: geo.size, agentCount: agentCount, collapsed: collapsed, questions: questions)
             }
+            // The collapsed agents pill offers its list only if the list, opened, would fit a row.
+            let agentsCanExpand = !collapsed || AgentsPiece.canExpand(count: agentCount, in: FurniturePlan.make(pieces: pieces, size: geo.size) {
+                demand($0, screen: geo.size, agentCount: agentCount, collapsed: false, questions: questions)
+            })
             ZStack {
                 ForEach(FurnitureSlot.allCases, id: \.self) { slot in
                     slotStack(slot, plan.placements(slot))
+                        .environment(\.agentsCanExpand, agentsCanExpand)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)

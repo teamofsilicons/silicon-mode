@@ -27,7 +27,7 @@ struct SettingsFurniturePane: View {
             SettingsCard {
                 SettingsRow(icon: hidden ? "eye.slash" : "eye", title: "Show face furniture",
                             detail: hidden
-                                ? "Off: Silicon Mode shows just the face. Unlock and the lid angle always stay, and a small pill still tells you when an agent needs you."
+                                ? "Off: Silicon Mode shows just the face. Unlock always stays, and a small pill still tells you when an agent needs you."
                                 : "Agents, logs, questions, clocks and system activity on top of the face. In Silicon Mode, the eye button next to Unlock hides them all.") {
                     Toggle("Show face furniture", isOn: Binding(
                         get: { !hidden },
