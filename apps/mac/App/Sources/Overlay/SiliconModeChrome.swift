@@ -434,7 +434,13 @@ struct SiliconModeAngleReadout: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
-                .contentTransition(.numericText())
+                // A crossfade, not `.numericText()`. This readout changes every couple of seconds for
+                // as long as Silicon Mode is up (the sensor flickers by a degree), and every animated
+                // numericText change redraws its digits on the CPU at each intermediate scale and blur
+                // of the roll. CoreGraphics caches the glyph bitmaps of every one of those frames and
+                // never lets them go: about 0.5 MB per change, i.e. steady growth of ~0.3 MB/s for the
+                // whole session (measured). A crossfade draws the glyphs at one size: nothing new to cache.
+                .contentTransition(.opacity)
                 .animation(.spring(duration: 0.3), value: angle)
         }
         .accessibilityElement(children: .ignore)
