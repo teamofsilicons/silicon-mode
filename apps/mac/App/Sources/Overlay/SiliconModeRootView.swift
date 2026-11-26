@@ -13,11 +13,151 @@ struct SiliconModePreview {
     var panicStyleID: String?
     var angle: Double? = 62
     var faceID: String?
+    /// Furniture data (nil: `sessions` with the default furniture).
+    var furniture: FurnitureSource?
+    var furnitureHidden = false
+    var questionsPeek = false
+
+    /// What the furniture layer draws.
+    var furnitureSource: FurnitureSource {
+        var f = furniture ?? FurnitureSource(sessions: sessions)
+        f.settings.furnitureHidden = furnitureHidden
+        f.questionsPeek = questionsPeek
+        return f
+    }
 }
 
-/// Everything shown on one display while Silicon Mode is active:
-/// face (inside the enter shockwave) → HUD → controls → unlock sheet → panic.
+/// Silicon Mode on one display as a single SwiftUI view: the face stage under the top stage.
+/// Snapshots and previews use this; the live overlay hosts the two stages in separate hosting
+/// views of the same window (`OverlayPanel.hostLayered`), so a face frame never re-renders the
+/// furniture and chrome, and furniture changes never re-render the face.
 struct SiliconModeRootView: View {
+    let stage: OverlayStage
+    let displayID: CGDirectDisplayID
+    var preview: SiliconModePreview?
+
+    var body: some View {
+        ZStack {
+            SiliconModeFaceStage(stage: stage, displayID: displayID, preview: preview)
+            SiliconModeTopStage(stage: stage, displayID: displayID, preview: preview)
+        }
+    }
+}
+
+// MARK: - Face stage (bottom host)
+
+/// The opaque base and the face inside the enter shockwave; scaled, blurred and dimmed behind the
+/// unlock sheet. Purely visual (never hit-tested).
+///
+/// The face pauses while it can't be seen properly (under the unlock sheet, during panic) and
+/// runs at about 10 frames per second on displays other than the focused or built-in one.
+struct SiliconModeFaceStage: View {
+    @Environment(AppModel.self) private var model
+    let stage: OverlayStage
+    let displayID: CGDirectDisplayID
+    var preview: SiliconModePreview?
+
+    private var isPanicking: Bool { preview?.panicking ?? model.isPanicking }
+    private var unlockHere: Bool {
+        if let p = preview { return p.unlockPresented }
+        return model.unlockPresented && stage.focusedDisplay == displayID
+    }
+    private var exiting: Bool { stage.exitStartedAt != nil }
+    /// The opaque base is up once the entrance wave has passed and until the exit starts.
+    private var baseOpaque: Bool { preview != nil || (stage.enterStartedAt != nil && !exiting) }
+    private var panicStyleID: String { preview?.panicStyleID ?? model.settings.panicStyleID }
+
+    var body: some View {
+        ZStack {
+            // Opaque base: nothing behind Silicon Mode (the user's desktop) may ever show through,
+            // even while the face is scaled/blurred behind the unlock sheet. Fades in with the
+            // entrance and out with the exit so the shockwave still reveals the face.
+            Theme.Night.background
+                .opacity(baseOpaque ? 1 : 0)
+                .animation(baseOpaque ? .easeIn(duration: 0.35).delay(1.0) : .easeOut(duration: 0.2), value: baseOpaque)
+
+            EnterTransition(enterStartedAt: stage.enterStartedAt, exitStartedAt: stage.exitStartedAt) {
+                ZStack {
+                    Theme.Night.background
+                    SiliconModeFaceLayer(preview: preview,
+                                         paused: unlockHere || isPanicking,
+                                         fullRate: preview != nil || stage.focusedDisplay == displayID
+                                            || CGDisplayIsBuiltin(displayID) != 0)
+                }
+                .modifier(PanicGlitchEffect(active: isPanicking && panicStyleID == "glitch"))
+            }
+            .scaleEffect(unlockHere ? 0.965 : 1)
+            .blur(radius: unlockHere ? 22 : 0)
+            .overlay { Color.black.opacity(unlockHere ? 0.42 : 0) }
+            .animation(.spring(duration: 0.5, bounce: 0.1), value: unlockHere)
+        }
+        .allowsHitTesting(false)
+        .ignoresSafeArea()
+        .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The selected face. Its inputs are compared as one value, so settings or model changes that
+/// don't concern the face (furniture, grace seconds…) don't re-render it.
+private struct SiliconModeFaceLayer: View {
+    @Environment(AppModel.self) private var model
+    var preview: SiliconModePreview?
+    var paused: Bool
+    var fullRate: Bool
+
+    var body: some View {
+        let s = model.settings
+        let descriptor = FaceRegistry.face(preview?.faceID ?? s.faceID)
+        let interval = 1.0 / max(15, s.faceFrameRate)
+        FaceLayerContent(input: FaceLayerInput(
+            faceID: descriptor.id,
+            sessions: preview?.sessions ?? model.faceSessions,
+            options: descriptor.resolvedOptions(s.faceOptions[descriptor.id]),
+            showClock: s.showClock,
+            isPanicking: preview?.panicking ?? model.isPanicking,
+            // Other displays (not focused, not built in) show the face at about 10 frames per second.
+            frameInterval: fullRate ? interval : max(interval, 0.1),
+            paused: paused))
+        .equatable()
+        .id(descriptor.id)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct FaceLayerInput: Equatable, Sendable {
+    var faceID: String
+    var sessions: [AgentSession]
+    var options: [String: FaceOptionValue]
+    var showClock: Bool
+    var isPanicking: Bool
+    var frameInterval: Double
+    var paused: Bool
+}
+
+private struct FaceLayerContent: View, Equatable {
+    let input: FaceLayerInput
+
+    nonisolated static func == (a: Self, b: Self) -> Bool { a.input == b.input }
+
+    var body: some View {
+        let i = input
+        FaceRegistry.face(i.faceID).make(FaceContext(
+            sessions: i.sessions,
+            counts: AgentCounts(i.sessions),
+            options: i.options,
+            showClock: i.showClock,
+            isPreview: false,
+            isPanicking: i.isPanicking,
+            frameInterval: i.frameInterval,
+            paused: i.paused))
+    }
+}
+
+// MARK: - Top stage (top host)
+
+/// Everything above the face: furniture, chrome, the unlock sheet and panic. Transparent; empty
+/// space isn't hit-testable.
+struct SiliconModeTopStage: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let stage: OverlayStage
@@ -40,60 +180,35 @@ struct SiliconModeRootView: View {
         return model.unlockPresented && stage.focusedDisplay == displayID
     }
     private var exiting: Bool { stage.exitStartedAt != nil }
-    /// The opaque base is up once the entrance wave has passed and until the exit starts.
-    private var baseOpaque: Bool { preview != nil || (stage.enterStartedAt != nil && !exiting) }
     private var chromeShown: Bool { chromeIn && !exiting }
 
     private struct EntryKey: Equatable { var enter: Date?; var exit: Date? }
 
     var body: some View {
         ZStack {
-            // Opaque base: nothing behind Silicon Mode (the user's desktop) may ever show through,
-            // even while the face is scaled/blurred behind the unlock sheet. Fades in with the
-            // entrance and out with the exit so the shockwave still reveals the face.
-            Theme.Night.background
-                .opacity(baseOpaque ? 1 : 0)
-                .animation(baseOpaque ? .easeIn(duration: 0.35).delay(1.0) : .easeOut(duration: 0.2), value: baseOpaque)
-                .allowsHitTesting(false)
-
-            // (a) Face, inside the shockwave. Dimmed + blurred behind the unlock sheet.
-            EnterTransition(enterStartedAt: stage.enterStartedAt, exitStartedAt: stage.exitStartedAt) {
-                ZStack {
-                    Theme.Night.background
-                    SiliconModeFaceLayer(preview: preview)
-                }
-                .modifier(PanicGlitchEffect(active: isPanicking && panicStyleID == "glitch"))
-            }
-            .scaleEffect(unlockHere ? 0.965 : 1)
-            .blur(radius: unlockHere ? 22 : 0)
-            .overlay { Color.black.opacity(unlockHere ? 0.42 : 0).allowsHitTesting(false) }
-            .animation(.spring(duration: 0.5, bounce: 0.1), value: unlockHere)
-
-            // (b) HUD, full size.
-            HUDView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .modifier(OverlayChromeEntrance(shown: chromeShown && !unlockHere, rise: 18))
+            // Furniture and chrome rise in with the entrance. Under the unlock sheet they only fade
+            // (no blur or offset over full-screen glass while the sheet springs in).
+            FurnitureLayer(preview: preview?.furnitureSource, stage: preview == nil ? stage : nil)
+                .modifier(OverlayChromeEntrance(shown: chromeShown, rise: 18))
+                .opacity(unlockHere ? 0 : 1)
                 .allowsHitTesting(!unlockHere)
 
-            // (c) Controls + lid angle.
-            chrome
-                .modifier(OverlayChromeEntrance(shown: chromeShown && !unlockHere))
-                .opacity(stage.pointerIdle && preview == nil ? 0.45 : 1)
-                .animation(.easeInOut(duration: 0.6), value: stage.pointerIdle)
+            SiliconModeChrome(stage: stage, displayID: displayID, preview: preview)
+                .modifier(OverlayChromeEntrance(shown: chromeShown))
+                .opacity(unlockHere ? 0 : 1)
+                .allowsHitTesting(!unlockHere)
 
-            // (d) Unlock sheet.
+            // Unlock sheet.
             if unlockHere {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture { withAnimation(Theme.Motion.slow) { model.unlockPresented = false } }
+                // The card pops itself in (scale, rise, sharpen); the full-screen layer only fades.
                 UnlockView()
-                    .transition(.asymmetric(
-                        insertion: .modifier(active: SheetPop(p: 0), identity: SheetPop(p: 1)),
-                        removal: .modifier(active: SheetPop(p: 0, out: true), identity: SheetPop(p: 1, out: true))))
+                    .transition(.opacity)
                     .zIndex(2)
             }
 
-            // (e) Panic.
             if isPanicking {
                 PanicView(styleID: preview?.panicStyleID, running: preview.map { AgentCounts($0.sessions).running })
                     .transition(.opacity.animation(.easeOut(duration: 0.12)))
@@ -101,7 +216,7 @@ struct SiliconModeRootView: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.spring(duration: 0.48, bounce: 0.24), value: unlockHere)
+        .animation(.easeOut(duration: 0.22), value: unlockHere)
         .animation(.easeOut(duration: 0.25), value: isPanicking)
         .animation(.spring(duration: 0.6, bounce: 0.18), value: chromeIn)
         .animation(.easeIn(duration: 0.18), value: exiting)
@@ -115,8 +230,6 @@ struct SiliconModeRootView: View {
         }
     }
 
-    private var panicStyleID: String { preview?.panicStyleID ?? model.settings.panicStyleID }
-
     private func runChromeEntrance() async {
         guard preview == nil else { return }
         if stage.exitStartedAt != nil { return }
@@ -129,217 +242,5 @@ struct SiliconModeRootView: View {
             if Task.isCancelled { return }
         }
         chromeIn = true
-    }
-
-    private var chrome: some View {
-        ZStack {
-            SiliconModeControl(stage: stage, displayID: displayID, preview: preview)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(.trailing, 28)
-                .padding(.bottom, 26)
-            SiliconModeAngleReadout(preview: preview)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .padding(.leading, 30)
-                .padding(.bottom, 32)
-        }
-    }
-}
-
-/// Unlock sheet entrance: spring scale-up from slightly below with blur-to-sharp.
-private struct SheetPop: ViewModifier {
-    var p: Double
-    var out = false
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(out ? 0.96 + 0.04 * p : 0.88 + 0.12 * p)
-            .offset(y: out ? 0 : 24 * (1 - p))
-            .blur(radius: 10 * (1 - p))
-            .opacity(p)
-    }
-}
-
-// MARK: - Face
-
-/// The selected face, isolated so agent refreshes don't re-render the chrome (and vice versa).
-private struct SiliconModeFaceLayer: View {
-    @Environment(AppModel.self) private var model
-    var preview: SiliconModePreview?
-
-    var body: some View {
-        let s = model.settings
-        let id = preview?.faceID ?? s.faceID
-        let descriptor = FaceRegistry.face(id)
-        let sessions = preview?.sessions ?? model.faceSessions
-        descriptor.make(FaceContext(
-            sessions: sessions,
-            counts: AgentCounts(sessions),
-            options: descriptor.resolvedOptions(s.faceOptions[descriptor.id]),
-            showClock: s.showClock,
-            isPreview: false,
-            isPanicking: preview?.panicking ?? model.isPanicking,
-            frameInterval: 1.0 / max(15, s.faceFrameRate)))
-        .id(descriptor.id)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - Control (grace / locked)
-
-/// Bottom-right glass control. During the grace period: "Turn off · no PIN for 0:42" with a
-/// draining ring. Once locked it morphs into "Unlock".
-struct SiliconModeControl: View {
-    @Environment(AppModel.self) private var model
-    let stage: OverlayStage
-    let displayID: CGDirectDisplayID
-    var preview: SiliconModePreview?
-    @Namespace private var ns
-    @State private var hovering = false
-
-    private var locked: Bool { preview?.locked ?? model.isLocked }
-    private var grace: Double? { preview.map { $0.locked ? nil : $0.graceRemaining } ?? model.graceRemaining }
-    private var graceTotal: Double { preview?.graceTotal ?? max(model.settings.graceSeconds, 1) }
-    private var showsUnlock: Bool { locked || grace == nil }
-
-    var body: some View {
-        HStack(spacing: 10) {
-                if showsUnlock {
-                    if !stage.pointerIdle || preview != nil {
-                        Text("Press any key")
-                            .alloText(12, .medium)
-                            .foregroundStyle(Theme.Night.muted)
-                            .transition(.opacity)
-                    }
-                    Button(action: unlock) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "lock.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                                .contentTransition(.symbolEffect(.replace))
-                            Text("Unlock").alloText(14, .semibold)
-                        }
-                        .padding(.horizontal, 18)
-                        .frame(height: 42)
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.Night.foreground)
-                    .overlayGlass(tint: Theme.Night.accent.opacity(hovering ? 0.32 : 0.2), in: Capsule())
-                    .glassEffectID("control", in: ns)
-                } else if let g = grace {
-                    Button(action: { model.turnOff() }) {
-                        HStack(spacing: 10) {
-                            GraceRing(fraction: g / graceTotal)
-                                .frame(width: 18, height: 18)
-                            Text("Turn off").alloText(14, .semibold)
-                                .foregroundStyle(Theme.Night.foreground)
-                            Text("·").foregroundStyle(Theme.Night.faint)
-                            Text("no PIN for \(Self.clock(g))")
-                                .alloText(13, .medium)
-                                .monospacedDigit()
-                                .foregroundStyle(Theme.Night.secondary)
-                                .contentTransition(.numericText(countsDown: true))
-                        }
-                        .padding(.leading, 12)
-                        .padding(.trailing, 18)
-                        .frame(height: 42)
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .overlayGlass(in: Capsule())
-                    .glassEffectID("control", in: ns)
-                }
-        }
-        .overlayGlassContainer(spacing: 10)
-        .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
-        .animation(.spring(duration: 0.5, bounce: 0.2), value: showsUnlock)
-        .animation(.easeInOut(duration: 0.3), value: stage.pointerIdle)
-    }
-
-    private func unlock() {
-        guard preview == nil else { return }
-        model.overlay.focus(display: displayID)
-        withAnimation(Theme.Motion.slow) { model.unlockPresented = true }
-    }
-
-    static func clock(_ seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded(.up)))
-        return String(format: "%d:%02d", s / 60, s % 60)
-    }
-}
-
-/// Small draining ring for the grace period.
-private struct GraceRing: View {
-    let fraction: Double
-    var body: some View {
-        ZStack {
-            Circle().stroke(.white.opacity(0.16), lineWidth: 2.2)
-            ClockwiseArc(fraction: max(0, min(1, fraction)))
-                .stroke(LinearGradient(colors: [Theme.Night.lavender, Theme.Night.peach],
-                                       startPoint: .top, endPoint: .bottom),
-                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
-                .animation(.linear(duration: 0.1), value: fraction)
-        }
-    }
-}
-
-/// Arc from 12 o'clock, clockwise (no rotationEffect: it sits inside glass).
-private struct ClockwiseArc: Shape {
-    var fraction: Double
-    var animatableData: Double {
-        get { fraction }
-        set { fraction = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        guard fraction > 0.001 else { return p }
-        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY), radius: min(rect.width, rect.height) / 2,
-                 startAngle: .degrees(-90), endAngle: .degrees(-90 + 360 * fraction), clockwise: false)
-        return p
-    }
-}
-
-// MARK: - Lid angle
-
-/// Tiny lid glyph + current angle, bottom-left. Subtle on purpose.
-private struct SiliconModeAngleReadout: View {
-    @Environment(AppModel.self) private var model
-    var preview: SiliconModePreview?
-
-    var body: some View {
-        let angle = preview?.angle ?? model.angle
-        HStack(spacing: 7) {
-            LidGlyph(angle: angle ?? 90)
-                .stroke(Theme.Night.muted, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
-                .frame(width: 16, height: 12)
-                .animation(.spring(duration: 0.4, bounce: 0.1), value: angle)
-            Text(angle.map { "\(Int($0.rounded()))°" } ?? "—")
-                .alloText(11, .medium)
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.spring(duration: 0.3), value: angle)
-        }
-        .foregroundStyle(Theme.Night.muted)
-        .opacity(0.7)
-        .accessibilityLabel(angle.map { "Lid angle \(Int($0)) degrees" } ?? "Lid angle unavailable")
-    }
-}
-
-/// A laptop seen from the side: base along the bottom, lid hinged at the left.
-private struct LidGlyph: Shape {
-    var angle: Double
-    var animatableData: Double {
-        get { angle }
-        set { angle = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let hinge = CGPoint(x: rect.minX + 1, y: rect.maxY - 1)
-        p.move(to: CGPoint(x: rect.maxX, y: hinge.y))
-        p.addLine(to: hinge)
-        let a = min(max(angle, 0), 180) * .pi / 180
-        let len = rect.width - 2
-        p.addLine(to: CGPoint(x: hinge.x + cos(a) * len, y: hinge.y - sin(a) * min(len, rect.height - 2) * 1.1))
-        return p
     }
 }

@@ -11,6 +11,8 @@ import SiliconModeKit
 struct QuestionCard: View {
     let question: AgentQuestion
     var sessionTitle: String?
+    /// The asking agent's identity (a Silicon shows its photo and TOS badge).
+    var identity: AgentIdentity? = nil
     var error: String?
     /// Snapshot hook: render as if this option were being sent.
     var previewSending: String? = nil
@@ -31,6 +33,8 @@ struct QuestionCard: View {
     }
 
     private var info: AgentProviderInfo { ProviderCatalog.info(for: question.provider) }
+    /// A Silicon by its name, anything else by its provider.
+    private var askerName: String { identity?.isSilicon == true ? (identity?.name ?? info.name) : info.name }
     private var isSending: Bool { (sending ?? previewSending) != nil }
     private var sendingID: String? { sending ?? previewSending }
     private static let freeTextID = "__text__"
@@ -103,19 +107,19 @@ struct QuestionCard: View {
             if !Task.isCancelled { withAnimation(Theme.Motion.fast) { sending = nil } }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(info.name) asks: \(question.title)")
+        .accessibilityLabel("\(askerName) asks: \(question.title)")
     }
 
     // MARK: Header
 
     private var header: some View {
         HStack(spacing: 8) {
-            ProviderMark(provider: question.provider, size: 20)
+            AgentAvatarView(provider: question.provider, identity: identity, size: 20, showsState: false)
             VStack(alignment: .leading, spacing: 0) {
-                Text(info.name)
+                Text(askerName)
                     .font(Theme.allo(12.5, .semibold))
                     .foregroundStyle(Theme.Night.foreground)
-                if let sessionTitle {
+                if let sessionTitle, sessionTitle != askerName {
                     Text(sessionTitle)
                         .font(Theme.allo(11, .regular))
                         .foregroundStyle(Theme.Night.muted)

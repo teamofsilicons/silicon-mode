@@ -75,9 +75,12 @@ struct UnlockView: View {
                 .onTapGesture { cancel() }
                 .accessibilityHidden(true)
 
+            // The card pops itself in: scale up from slightly below, sharpening. Only the card
+            // moves; the full-screen scrim just fades (cheap to composite).
             card
-                .scaleEffect(dissolving ? 1.06 : (appeared ? 1 : 0.92))
-                .blur(radius: dissolving ? 14 : (appeared ? 0 : 10))
+                .scaleEffect(dissolving ? 1.06 : (appeared ? 1 : 0.9))
+                .offset(y: dissolving || appeared ? 0 : 22)
+                .blur(radius: dissolving ? 14 : (appeared ? 0 : 8))
                 .opacity(dissolving ? 0 : (appeared ? 1 : 0))
         }
         .environment(\.colorScheme, .dark)
@@ -126,7 +129,7 @@ struct UnlockView: View {
                                                startPoint: .top, endPoint: .bottom))
         }
         .hudGlass(in: Self.cardShape)
-        .overlay(Self.cardShape.strokeBorder(HUDEdge.gradient, lineWidth: 0.75).allowsHitTesting(false))
+        .hudHairline(Self.cardShape)
         .shadow(color: Color.black.opacity(0.45), radius: 40, y: 18)
         .animation(Theme.Motion.slow, value: mode)
         .animation(Theme.Motion.moderate, value: status)
@@ -150,9 +153,10 @@ struct UnlockView: View {
             Circle()
                 .fill(tint.opacity(0.16))
                 .opacity(calm ? 0 : 1)
-            Circle()
-                .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.24), Color.white.opacity(0.03)],
-                                             startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
+            // A gradient masked by a solid stroke (GPU), not a gradient stroke (CPU-painted on every
+            // frame of the card's entrance).
+            LinearGradient(colors: [Color.white.opacity(0.24), Color.white.opacity(0.03)], startPoint: .top, endPoint: .bottom)
+                .mask(Circle().strokeBorder(Color.black, lineWidth: 0.75))
             Image(systemName: success ? "lock.open.fill" : "lock.fill")
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(tint)
@@ -638,18 +642,76 @@ struct UnlockTouchIDRing<Content: View>: View {
             .strokeBorder(AngularGradient(colors: colors, center: .center), lineWidth: 2)
             .opacity(state == .paused ? 0.35 : 0.9)
         if state == .waiting && !reduceMotion && !HUDRender.isSnapshot {
-            // Hue drifts around the ring (a gradient rotation, no glass involved).
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
-                let t = tl.date.timeIntervalSinceReferenceDate
-                Circle()
-                    .strokeBorder(AngularGradient(colors: colors, center: .center,
-                                                  angle: .degrees((t * 40).truncatingRemainder(dividingBy: 360))),
-                                  lineWidth: 2)
-                    .opacity(0.9)
-            }
+            // Hue drifts around the ring: a conic gradient layer turned by Core Animation in the
+            // render server (no SwiftUI frames, no CPU gradient paint), at most 30 fps.
+            UnlockRingLayer(colors: colors.map { NSColor($0) }, lineWidth: 2)
+                .opacity(0.9)
+                .allowsHitTesting(false)
         } else {
             stroke
         }
+    }
+}
+
+/// A ring stroked with a conic gradient that turns once every 9 s.
+private struct UnlockRingLayer: NSViewRepresentable {
+    let colors: [NSColor]
+    let lineWidth: CGFloat
+
+    func makeNSView(context: Context) -> UnlockRingView { UnlockRingView(lineWidth: lineWidth) }
+
+    func updateNSView(_ v: UnlockRingView, context: Context) { v.setColors(colors) }
+}
+
+final class UnlockRingView: NSView {
+    private let gradient = CAGradientLayer()
+    private let ring = CAShapeLayer()
+    private let lineWidth: CGFloat
+
+    init(lineWidth: CGFloat) {
+        self.lineWidth = lineWidth
+        super.init(frame: .zero)
+        wantsLayer = true
+        gradient.type = .conic
+        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        ring.fillColor = nil
+        ring.strokeColor = NSColor.black.cgColor
+        ring.lineWidth = lineWidth
+        gradient.mask = ring
+        layer?.addSublayer(gradient)
+
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = -2 * Double.pi
+        spin.duration = 9
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        spin.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        gradient.add(spin, forKey: "spin")
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func setColors(_ colors: [NSColor]) {
+        let cg = colors.map(\.cgColor)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.colors = cg
+        CATransaction.commit()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let b = bounds
+        gradient.bounds = CGRect(origin: .zero, size: b.size)
+        gradient.position = CGPoint(x: b.midX, y: b.midY)
+        ring.frame = gradient.bounds
+        let inset = lineWidth / 2
+        ring.path = CGPath(ellipseIn: gradient.bounds.insetBy(dx: inset, dy: inset), transform: nil)
+        CATransaction.commit()
     }
 }
 

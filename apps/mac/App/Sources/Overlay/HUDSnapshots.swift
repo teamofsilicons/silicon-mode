@@ -3,63 +3,67 @@ import SiliconModeKit
 
 /// Snapshot-harness entries for this module (see App/SnapshotHarness.swift).
 ///
-///     "Silicon Mode" --snapshot hud.black /tmp/hud.png
+///     "Silicon Mode" --snapshot hud.gradient /tmp/hud.png
+///
+/// `hud.*` show the default furniture over a stand-in face; `furniture.*` each piece on its own
+/// (and every piece at once); `unlock.*` the unlock card over the furniture.
 @MainActor
 enum HUDSnapshots {
     static var items: [SnapshotItem] {
         [
-            SnapshotItem(id: "hud.black") { AnyView(HUDView(preview: HUDSample.source())) },
-            SnapshotItem(id: "hud.gradient") {
-                AnyView(ZStack { HUDSample.backdrop; HUDView(preview: HUDSample.source()) })
-            },
-            SnapshotItem(id: "hud.sample-agents") {
-                AnyView(ZStack { HUDSample.backdrop; HUDView(preview: HUDSource(sessions: SampleAgents.sessions)) })
-            },
-            SnapshotItem(id: "hud.collapsed") {
-                AnyView(ZStack {
-                    HUDSample.backdrop
-                    HUDView(preview: { var src = HUDSample.source(settings: { $0.tailLogCount = 6 }); src.agentsCollapsed = true; return src }())
-                })
-            },
-            SnapshotItem(id: "hud.toggles-off") {
-                AnyView(ZStack {
-                    HUDSample.backdrop
-                    HUDView(preview: HUDSample.source(settings: {
-                        $0.showAgentList = false; $0.showTailLogs = false
-                    }))
-                })
-            },
-            SnapshotItem(id: "hud.all-off") {
-                AnyView(ZStack {
-                    HUDSample.backdrop
-                    HUDView(preview: HUDSample.source(settings: {
-                        $0.showAgentCounts = false; $0.showAgentList = false; $0.showTailLogs = false; $0.showQuestions = false
-                    }))
-                })
-            },
-            SnapshotItem(id: "hud.quiet") {
-                AnyView(ZStack {
-                    HUDSample.backdrop
-                    HUDView(preview: HUDSource(sessions: HUDSample.sessions().filter { $0.pendingQuestions.isEmpty }
-                        .map { var s = $0; if s.state == .needsYou { s.state = .working }; return s }))
-                })
-            },
-            SnapshotItem(id: "hud.sparse") {
-                AnyView(ZStack {
-                    HUDSample.backdrop
-                    HUDView(preview: HUDSource(sessions: Array(HUDSample.sessions().filter { $0.state == .working }.prefix(1))
-                        .map { var x = $0; x.recentEvents = Array(x.recentEvents.suffix(2)); return x }))
-                })
-            },
-            SnapshotItem(id: "hud.empty") {
-                AnyView(ZStack { HUDSample.backdrop; HUDView(preview: HUDSource(sessions: [])) })
-            },
-            SnapshotItem(id: "hud.small-screen", size: CGSize(width: 1280, height: 800)) {
-                AnyView(ZStack { HUDSample.backdrop; HUDView(preview: HUDSample.source()) })
-            },
+            layer("hud.black", HUDSample.source(), backdrop: false),
+            layer("hud.gradient", HUDSample.source()),
+            layer("hud.sample-agents", FurnitureSource(sessions: SampleAgents.sessions)),
+            layer("hud.collapsed", { var s = HUDSample.source(); s.agentsCollapsed = true; return s }()),
+            layer("hud.logs-minimized", { var s = HUDSample.source(); s.logsMinimized = true; return s }()),
+            layer("hud.quiet", FurnitureSource(sessions: HUDSample.sessions().filter { $0.pendingQuestions.isEmpty }
+                .map { var s = $0; if s.state == .needsYou { s.state = .working }; return s })),
+            layer("hud.sparse", FurnitureSource(sessions: Array(HUDSample.sessions().filter { $0.state == .working }.prefix(1))
+                .map { var x = $0; x.recentEvents = Array(x.recentEvents.suffix(2)); return x })),
+            layer("hud.empty", FurnitureSource(sessions: [])),
+            layer("hud.small-screen", HUDSample.source(), size: CGSize(width: 1280, height: 800)),
+            layer("hud.crowded", HUDSample.source(furniture: HUDSample.everyPiece), size: CGSize(width: 1280, height: 800)),
+            // More than fits: pieces shrink, then the farthest from the corner drop out; none overlap.
+            layer("hud.overfull", HUDSample.source(furniture: [
+                FurniturePiece(id: "agents", kind: .agents, slot: .topLeading),
+                FurniturePiece(id: "clock-a", kind: .clock, slot: .topLeading, options: [FurnitureOptions.Clock.style: .string("analog")]),
+                FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+                FurniturePiece(id: "system-a", kind: .system, slot: .bottomLeading),
+                FurniturePiece(id: "clock-b", kind: .clock, slot: .topTrailing),
+                FurniturePiece(id: "questions", kind: .questions, slot: .topTrailing),
+                FurniturePiece(id: "system-b", kind: .system, slot: .bottomTrailing),
+                FurniturePiece(id: "clock-c", kind: .clock, slot: .bottomTrailing, options: [FurnitureOptions.Clock.style: .string("words")]),
+            ]), size: CGSize(width: 1280, height: 800)),
             SnapshotItem(id: "hud.questions", size: CGSize(width: 820, height: 980)) {
                 AnyView(HUDSample.questionGallery)
             },
+
+            // Furniture: every piece at once, then each on its own.
+            layer("furniture.all", HUDSample.source(furniture: HUDSample.everyPiece)),
+            piece("furniture.agents", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 760)),
+            piece("furniture.agents.silicon", .agents, .topLeading, HUDSample.siliconSessions(), size: CGSize(width: 760, height: 420)),
+            piece("furniture.agents.collapsed", .agents, .topLeading, HUDSample.sessions(), size: CGSize(width: 760, height: 260)) {
+                $0.agentsCollapsed = true
+            },
+            piece("furniture.logs", .logs, .bottomLeading, HUDSample.logSessions(), size: CGSize(width: 1400, height: 520)),
+            piece("furniture.logs.minimized", .logs, .bottomLeading, HUDSample.logSessions(), size: CGSize(width: 1400, height: 220)) {
+                $0.logsMinimized = true
+            },
+            piece("furniture.logs.top", .logs, .topLeading, HUDSample.logSessions(), size: CGSize(width: 1400, height: 520)) {
+                $0.selectedLogTab = "codex:s2"
+            },
+            piece("furniture.questions", .questions, .topTrailing, HUDSample.sessions(), size: CGSize(width: 760, height: 980)),
+            piece("furniture.clock.digital", .clock, .topTrailing, [], size: CGSize(width: 760, height: 260)),
+            piece("furniture.clock.digital-seconds", .clock, .topLeading, [], size: CGSize(width: 760, height: 260),
+                  options: [FurnitureOptions.Clock.seconds: .bool(true), FurnitureOptions.Clock.use24h: .bool(true)]),
+            piece("furniture.clock.analog", .clock, .topTrailing, [], size: CGSize(width: 760, height: 280),
+                  options: [FurnitureOptions.Clock.style: .string("analog"), FurnitureOptions.Clock.seconds: .bool(true)]),
+            piece("furniture.clock.words", .clock, .topLeading, [], size: CGSize(width: 760, height: 240),
+                  options: [FurnitureOptions.Clock.style: .string("words")]),
+            piece("furniture.system", .system, .bottomTrailing, [], size: CGSize(width: 760, height: 420)),
+            piece("furniture.system.short", .system, .bottomTrailing, [], size: CGSize(width: 760, height: 320),
+                  options: [FurnitureOptions.System.battery: .bool(false), FurnitureOptions.System.network: .bool(false)]),
+
             unlock("unlock.pin", .init(digits: 3)),
             unlock("unlock.empty", .init(digits: 0)),
             unlock("unlock.wrong", .init(digits: 6, status: .wrong(attemptsLeft: 3))),
@@ -76,26 +80,98 @@ enum HUDSnapshots {
         ]
     }
 
-    /// The unlock card over the face + HUD, as it appears in Silicon Mode.
+    /// The furniture layer over the stand-in face.
+    private static func layer(_ id: String, _ source: FurnitureSource, backdrop: Bool = true,
+                              size: CGSize = CGSize(width: 1512, height: 982)) -> SnapshotItem {
+        SnapshotItem(id: id, size: size) {
+            AnyView(ZStack {
+                if backdrop { HUDSample.backdrop }
+                FurnitureLayer(preview: source)
+            })
+        }
+    }
+
+    /// One piece alone in `slot`, on a canvas sized to it.
+    private static func piece(_ id: String, _ kind: FurnitureKind, _ slot: FurnitureSlot, _ sessions: [AgentSession],
+                              size: CGSize, options: [String: FaceOptionValue] = [:],
+                              edit: (inout FurnitureSource) -> Void = { _ in }) -> SnapshotItem {
+        var src = HUDSample.source(sessions: sessions, furniture: [FurniturePiece(id: kind.rawValue, kind: kind, slot: slot, options: options)])
+        edit(&src)
+        return layer(id, src, size: size)
+    }
+
+    /// The unlock card over the stand-in face, as it appears in Silicon Mode.
     private static func unlock(_ id: String, _ p: UnlockView.Preview) -> SnapshotItem {
         SnapshotItem(id: id) {
+            // Furniture fades out under the sheet (as live), so only the face shows behind it.
             AnyView(ZStack {
                 HUDSample.backdrop
-                HUDView(preview: HUDSample.source())
                 UnlockView(preview: p)
             })
         }
     }
 }
 
-/// Rich, plausible data for HUD design checks.
+/// Rich, plausible data for furniture design checks (no real names, ids or paths).
 @MainActor
 enum HUDSample {
-    static func source(settings edit: (inout ModeSettings) -> Void = { _ in }) -> HUDSource {
-        var s = ModeSettings()
-        edit(&s)
-        return HUDSource(sessions: sessions(), settings: s,
-                         answerErrors: [:])
+    /// The default furniture (or `furniture`) over `sessions` (default: `sessions()`), with every
+    /// remembered UI choice pinned (expanded list, expanded logs) so renders don't depend on the
+    /// machine's defaults.
+    static func source(sessions s: [AgentSession]? = nil, furniture: [FurniturePiece]? = nil) -> FurnitureSource {
+        var settings = ModeSettings()
+        if let furniture { settings.furniture = furniture }
+        return FurnitureSource(sessions: s ?? sessions(), settings: settings)
+    }
+
+    /// One of everything: agents and a words clock top-left, a clock and the questions top-right,
+    /// logs bottom-left, system activity bottom-right.
+    static let everyPiece: [FurniturePiece] = [
+        FurniturePiece(id: "agents", kind: .agents, slot: .topLeading),
+        FurniturePiece(id: "clock-words", kind: .clock, slot: .topTrailing, options: [FurnitureOptions.Clock.style: .string("words")]),
+        FurniturePiece(id: "questions", kind: .questions, slot: .topTrailing),
+        FurniturePiece(id: "logs", kind: .logs, slot: .bottomLeading),
+        FurniturePiece(id: "system", kind: .system, slot: .bottomTrailing),
+    ]
+
+    /// A Silicon (one row for its ISIs, monogram avatar with the TOS badge) among other agents.
+    static func siliconSessions(now: Date = Date()) -> [AgentSession] {
+        let all = sessions(now: now)
+        return [silicon(now: now), all[0], all[1]]
+    }
+
+    static func silicon(now: Date = Date(), state: AgentState = .working) -> AgentSession {
+        let identity = AgentIdentity(kind: AgentIdentity.siliconKind, handle: "si:demo_scout", displayName: "Scout",
+                                     members: [.init(name: "digest", state: .working), .init(name: "tidy", state: .finished)])
+        return AgentSession(provider: "silicon", nativeID: "si:demo_scout", title: "Scout", state: state,
+                            startedAt: now.addingTimeInterval(-540), updatedAt: now.addingTimeInterval(-6),
+                            recentEvents: [
+                                AgentEvent(id: "si1", at: now.addingTimeInterval(-500), kind: .user, text: "Summarise this week's support tickets"),
+                                AgentEvent(id: "si2", at: now.addingTimeInterval(-420), kind: .tool, text: "Read tickets/2026-11-*.json (212 files)"),
+                                AgentEvent(id: "si3", at: now.addingTimeInterval(-60), kind: .assistant, text: "Grouping by product area…"),
+                            ],
+                            identity: identity)
+    }
+
+    /// Three log tabs (needs you, working, finished), the working one with a long log.
+    static func logSessions(now: Date = Date()) -> [AgentSession] {
+        let all = sessions(now: now)
+        var s1 = all[0]
+        let lines: [(String, AgentEvent.Kind)] = [
+            ("Refactor the auth middleware so token refresh happens before the session check", .user),
+            ("Looking at how sessions are validated today", .thinking),
+            ("Read src/auth/session.ts", .tool), ("Read src/auth/middleware.ts", .tool),
+            ("Search: refreshToken( in src/", .tool),
+            ("The refresh runs after validate(), so an expired access token fails the request before it can be renewed. I'll move the refresh into the middleware and keep validate() pure.", .assistant),
+            ("Edited src/auth/middleware.ts (+42 −17)", .tool), ("Edited src/auth/session.ts (+6 −11)", .tool),
+            ("Ran: npm test -- auth", .tool), ("2 failing: refresh.spec.ts expects the old order", .toolResult),
+            ("Updating the two specs to the new order", .status),
+            ("Edited test/auth/refresh.spec.ts (+9 −9)", .tool), ("Ran: npm test -- auth", .tool),
+        ]
+        s1.recentEvents = lines.enumerated().map { i, l in
+            AgentEvent(id: "log\(i)", at: now.addingTimeInterval(-Double(lines.count - i) * 37), kind: l.1, text: l.0)
+        }
+        return [s1, all[1], silicon(now: now, state: .finished)]
     }
 
     static func sessions(now: Date = Date()) -> [AgentSession] {

@@ -60,7 +60,9 @@ private struct PanicCanvas: View {
     @State private var start = Date()
 
     var body: some View {
-        TimelineView(.animation) { tl in
+        // 30 fps is plenty for every style (each stays under 3 flashes a second); uncapped it ran at
+        // the panel's refresh rate.
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in
             let t = SnapshotHarness.time ?? tl.date.timeIntervalSince(start)
             switch style.id {
             case "siren": PanicSiren(t: t, running: running, reduceMotion: reduceMotion)
@@ -279,7 +281,7 @@ struct PanicGlitchEffect: ViewModifier {
     func body(content: Content) -> some View {
         if active {
             GeometryReader { geo in
-                TimelineView(.animation) { tl in
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in
                     let t = SnapshotHarness.time ?? tl.date.timeIntervalSince(start)
                     content
                         .compositingGroup()
