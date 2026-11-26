@@ -97,7 +97,7 @@ targets:
         ATSApplicationFontsPath: Fonts
         CFBundleURLTypes:
           - CFBundleURLName: ai.tos.mode
-            CFBundleURLSchemes: [siliconmode]
+            CFBundleURLSchemes: [ai.tos.mode]
   silicon-mode-hook:
     type: tool
     platform: macOS

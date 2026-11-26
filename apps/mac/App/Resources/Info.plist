@@ -27,7 +27,7 @@
 			<string>ai.tos.mode</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>siliconmode</string>
+				<string>ai.tos.mode</string>
 			</array>
 		</dict>
 	</array>

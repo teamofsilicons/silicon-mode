@@ -136,7 +136,7 @@ enum FontRegistry {
     /// ATSApplicationFontsPath registers Resources/Fonts automatically; this is a belt-and-braces
     /// registration for debug runs launched outside the bundle structure.
     static func registerBundledFonts() {
-        guard NSFont(name: "Allo-Regular", size: 12) == nil,
+        guard NSFont(name: "AlloVariable-Regular", size: 12) == nil,
               let dir = Bundle.main.resourceURL?.appendingPathComponent("Fonts"),
               let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         for f in files where ["otf", "ttf"].contains(f.pathExtension.lowercased()) {

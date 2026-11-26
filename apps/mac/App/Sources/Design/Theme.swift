@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SiliconModeKit
+import CoreText
 
 /// Silicon design tokens (shared/design/tokens.json — from Silicon Accounts + Silicon UI).
 /// Allo is bundled (Resources/Fonts, ATSApplicationFontsPath).
@@ -83,34 +84,39 @@ enum Theme {
     // MARK: Type
     enum Weight { case thin, extraLight, light, regular, medium, semibold, bold, extraBold, black }
 
-    static func allo(_ size: CGFloat, _ weight: Weight = .regular) -> Font {
-        let name: String = switch weight {
-        case .thin: "Allo-Thin"
-        case .extraLight: "Allo-ExtraLight"
-        case .light: "Allo-Light"
-        case .regular: "Allo-Regular"
-        case .medium: "Allo-Medium"
-        case .semibold: "Allo-SemiBold"
-        case .bold: "Allo-Bold"
-        case .extraBold: "Allo-ExtraBold"
-        case .black: "Allo-Black"
+    static func weightValue(_ w: Weight) -> CGFloat {
+        switch w {
+        case .thin: 100
+        case .extraLight: 200
+        case .light: 300
+        case .regular: 400
+        case .medium: 500
+        case .semibold: 600
+        case .bold: 700
+        case .extraBold: 800
+        case .black: 900
         }
-        return .custom(name, fixedSize: size)
+    }
+
+    /// Allo Variable with the Silicon Accounts configuration: ROND 20, optical size follows the
+    /// point size (14 text … 32 display), weight on the wght axis.
+    static func ctAllo(_ size: CGFloat, weight: CGFloat = 400, roundness: CGFloat = 20) -> CTFont {
+        let key = "\(size)-\(weight)-\(roundness)"
+        if let f = AlloCache.shared.get(key) { return f }
+        func tag(_ s: String) -> Int { s.utf8.reduce(0) { ($0 << 8) | Int($1) } }
+        let variations: [Int: CGFloat] = [tag("wght"): weight, tag("ROND"): roundness, tag("opsz"): min(max(size, 9), 32)]
+        let attrs: [CFString: Any] = [kCTFontNameAttribute: "AlloVariable-Regular", kCTFontVariationAttribute: variations]
+        let f = CTFontCreateWithFontDescriptor(CTFontDescriptorCreateWithAttributes(attrs as CFDictionary), size, nil)
+        AlloCache.shared.set(key, f)
+        return f
+    }
+
+    static func allo(_ size: CGFloat, _ weight: Weight = .regular) -> Font {
+        Font(ctAllo(size, weight: weightValue(weight)))
     }
 
     static func nsAllo(_ size: CGFloat, _ weight: Weight = .regular) -> NSFont {
-        let name: String = switch weight {
-        case .thin: "Allo-Thin"
-        case .extraLight: "Allo-ExtraLight"
-        case .light: "Allo-Light"
-        case .regular: "Allo-Regular"
-        case .medium: "Allo-Medium"
-        case .semibold: "Allo-SemiBold"
-        case .bold: "Allo-Bold"
-        case .extraBold: "Allo-ExtraBold"
-        case .black: "Allo-Black"
-        }
-        return NSFont(name: name, size: size) ?? .systemFont(ofSize: size)
+        ctAllo(size, weight: weightValue(weight)) as NSFont
     }
 
     // Roles (compact density, as Accounts ships)
@@ -194,4 +200,13 @@ extension View {
     func alloText(_ size: CGFloat, _ weight: Theme.Weight = .regular, display: Bool = false) -> some View {
         font(Theme.allo(size, weight)).tracking(Theme.tracking(size, display: display))
     }
+}
+
+/// CTFont creation with variations is not free; cache by (size, weight, roundness).
+final class AlloCache: @unchecked Sendable {
+    static let shared = AlloCache()
+    private let lock = NSLock()
+    private var fonts: [String: CTFont] = [:]
+    func get(_ k: String) -> CTFont? { lock.lock(); defer { lock.unlock() }; return fonts[k] }
+    func set(_ k: String, _ f: CTFont) { lock.lock(); fonts[k] = f; lock.unlock() }
 }
