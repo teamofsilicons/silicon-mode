@@ -3,12 +3,12 @@ import AppKit
 import QuartzCore
 import SiliconModeKit
 
-/// What always stays on screen in Silicon Mode (it isn't furniture): bottom right, the Unlock /
-/// Turn Off control with the hide-furniture toggle (and, while furniture is hidden and an agent
-/// needs you, an "N need you" pill); bottom left, the lid angle.
+/// What always stays on screen in Silicon Mode (it isn't furniture), in one row at the bottom right:
+/// the Unlock / Turn Off control, the hide-furniture toggle, while furniture is hidden and an agent
+/// needs you an "N need you" pill, and while the pointer moves the lid angle.
 ///
-/// It dims while the pointer is idle, further (to 0.25) when furniture is hidden, so the face reads
-/// alone. The pill dims less: someone is waiting.
+/// While the pointer is idle the chrome recedes so the face reads alone: the eye fades most, the
+/// control and the pill much less, so their labels stay legible (`ChromeDim`).
 struct SiliconModeChrome: View {
     @Environment(AppModel.self) private var model
     let stage: OverlayStage
@@ -20,41 +20,40 @@ struct SiliconModeChrome: View {
         let pending = preview.map { p in (p.furniture?.questions ?? p.sessions.flatMap(\.pendingQuestions)).count }
             ?? model.pendingQuestions.count
         let idle = stage.pointerIdle && preview == nil
-        let dim = idle ? (hidden ? 0.25 : 0.45) : 1
         let peek = preview?.questionsPeek ?? stage.questionsPeek
         // The pill opens the placed Questions piece. Without one (the user removed it) there is
         // nothing to open: it is only a count, and never shows answerable cards.
         let questionsPlaced = (preview?.furnitureSource.settings ?? model.settings).furniture.contains { $0.kind == .questions }
 
-        ZStack {
-            HStack(spacing: ChromeMetrics.spacing) {
-                if hidden && pending > 0 {
-                    Group {
-                        if questionsPlaced {
-                            NeedYouPill(count: pending, peeking: peek) { togglePeek() }
-                        } else {
-                            NeedYouCount(count: pending)
-                        }
-                    }
-                    .opacity(idle ? 0.75 : 1)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .trailing)))
-                }
-                FurnitureToggle(hidden: hidden) { setHidden(!hidden) }
-                    .opacity(dim)
-                SiliconModeControl(stage: stage, displayID: displayID, preview: preview)
-                    .opacity(dim)
+        HStack(spacing: ChromeMetrics.spacing) {
+            // Only while someone is at the Mac (the pointer moves): idle, it would be one more
+            // thing on the face, redrawn every time the sensor flickers by a degree.
+            if !idle {
+                SiliconModeAngleReadout(preview: preview)
+                    .padding(.trailing, 6)
+                    .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            .padding(.trailing, 28)
-            .padding(.bottom, 26)
-
-            SiliconModeAngleReadout(preview: preview)
-                .opacity(dim)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .padding(.leading, 30)
-                .padding(.bottom, 34)
+            if hidden && pending > 0 {
+                Group {
+                    if questionsPlaced {
+                        NeedYouPill(count: pending, peeking: peek) { togglePeek() }
+                    } else {
+                        NeedYouCount(count: pending)
+                    }
+                }
+                .opacity(ChromeDim.attention(idle: idle))
+                // Moves and fades only: a scale would redraw its glyphs at every step.
+                .transition(.opacity.combined(with: .offset(x: 14)))
+            }
+            FurnitureToggle(hidden: hidden) { setHidden(!hidden) }
+                .opacity(ChromeDim.toggle(idle: idle, hidden: hidden))
+            SiliconModeControl(stage: stage, displayID: displayID, preview: preview, idle: idle, furnitureHidden: hidden)
         }
-        .animation(.easeInOut(duration: 0.6), value: dim)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(.trailing, 28)
+        .padding(.bottom, 26)
+        .animation(.easeInOut(duration: 0.6), value: idle)
+        .animation(.easeInOut(duration: 0.6), value: hidden)
         .animation(Theme.Motion.slow, value: hidden && pending > 0)
         .onChange(of: pending) { _, n in
             // The peek ends when nobody waits any more.
@@ -77,6 +76,18 @@ struct SiliconModeChrome: View {
         guard preview == nil else { return }
         withAnimation(Theme.Motion.slow) { stage.questionsPeek.toggle() }
     }
+}
+
+/// How far each part of the chrome recedes while the pointer is idle (1 = not at all). Opacity
+/// multiplies label colours, so the parts with words never drop below 0.75: "Turn Off" must not
+/// read as disabled, and the no-PIN countdown is time-critical.
+enum ChromeDim {
+    /// The eye: a glyph on glass, the least needed while nobody is at the Mac.
+    static func toggle(idle: Bool, hidden: Bool) -> Double { idle ? (hidden ? 0.3 : 0.5) : 1 }
+    /// Turn Off / Unlock. Not dimmed at all in the grace period's final stretch.
+    static func control(idle: Bool, hidden: Bool) -> Double { idle ? (hidden ? 0.75 : 0.85) : 1 }
+    /// "N need you": someone is waiting.
+    static func attention(idle: Bool) -> Double { idle ? 0.9 : 1 }
 }
 
 enum ChromeMetrics {
@@ -112,7 +123,8 @@ private struct FurnitureToggle: View {
 }
 
 /// While furniture is hidden: "2 need you". Click to show the questions (click again to put them
-/// away); they also go away by themselves once nobody waits.
+/// away); they also go away by themselves once nobody waits. Neutral glass like the rest of the
+/// chrome: the orange is in the label only, the same treatment as the agents pill's summary.
 private struct NeedYouPill: View {
     let count: Int
     let peeking: Bool
@@ -135,7 +147,7 @@ private struct NeedYouPill: View {
         }
         .buttonStyle(ChromePressStyle())
         .focusable(false)
-        .chromeGlass(in: Capsule(), tint: HUDTint.needsYou.opacity(0.22), hovering: hovering)
+        .chromeGlass(in: Capsule(), hovering: hovering)
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .help(peeking ? "Hide the questions" : "Show the questions")
         .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
@@ -151,12 +163,13 @@ private struct NeedYouCount: View {
         NeedYouLabel(count: count)
             .padding(.horizontal, 16)
             .frame(height: ChromeMetrics.height)
-            .chromeGlass(in: Capsule(), tint: HUDTint.needsYou.opacity(0.14), hovering: false)
+            .chromeGlass(in: Capsule(), hovering: false)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(count) \(count == 1 ? "agent needs" : "agents need") you")
     }
 }
 
+/// "2 need you" in the needs-you colour, as the agents pill's summary leads with it.
 private struct NeedYouLabel: View {
     let count: Int
 
@@ -164,14 +177,15 @@ private struct NeedYouLabel: View {
         Label {
             Text("\(count) need\(count == 1 ? "s" : "") you")
                 .monospacedDigit()
-                .contentTransition(.numericText(value: Double(count)))
+                // A crossfade (not `.numericText()`, whose roll leaves cached glyph bitmaps behind).
+                .contentTransition(.opacity)
+                .animation(AgentSummaryMotion.change, value: count)
         } icon: {
             Image(systemName: "bell.badge.fill")
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(HUDTint.needsYou)
         }
         .font(.headline)
-        .foregroundStyle(.primary)
+        .foregroundStyle(HUDTint.needsYou)
     }
 }
 
@@ -202,6 +216,9 @@ struct SiliconModeControl: View {
     let stage: OverlayStage
     let displayID: CGDirectDisplayID
     var preview: SiliconModePreview?
+    /// The pointer is idle (the chrome recedes).
+    var idle = false
+    var furnitureHidden = false
     @Namespace private var ns
     @State private var hovering = false
 
@@ -214,6 +231,14 @@ struct SiliconModeControl: View {
         return a.enteredAt + model.settings.graceSeconds
     }
     private var showsUnlock: Bool { locked || grace == nil }
+    /// The last stretch of the grace period: the countdown stops receding and reads at full strength.
+    private var finalStretch: Bool {
+        guard !showsUnlock, let g = grace else { return false }
+        return g <= Self.finalStretch(total: graceTotal)
+    }
+
+    /// A quarter of the grace period, between 10 s and 2 min (15 s of the default minute).
+    static func finalStretch(total: Double) -> Double { min(120, max(10, total / 4)) }
 
     var body: some View {
         HStack(spacing: ChromeMetrics.spacing) {
@@ -222,6 +247,7 @@ struct SiliconModeControl: View {
                     Text("Press any key")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .shadow(color: .black.opacity(0.35), radius: 4)
                         .transition(.opacity)
                 }
                 Button(action: unlock) {
@@ -245,11 +271,15 @@ struct SiliconModeControl: View {
                         Text("Turn Off")
                             .font(.headline)
                             .foregroundStyle(.primary)
-                        Text("No PIN for \(Self.clock(g))")
+                        // The time is what matters: primary, the words around it secondary (all
+                        // primary in the final stretch).
+                        Text("No PIN for \(Text(Self.clock(g)).foregroundStyle(.primary))")
                             .font(.subheadline)
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .contentTransition(.numericText(countsDown: true))
+                            .foregroundStyle(finalStretch ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                            // A crossfade: it changes every second, and a numericText roll would
+                            // leave every intermediate glyph bitmap in CoreGraphics' cache.
+                            .contentTransition(.opacity)
                     }
                     .padding(.leading, 13)
                     .padding(.trailing, 18)
@@ -263,9 +293,11 @@ struct SiliconModeControl: View {
             }
         }
         .overlayGlassContainer(spacing: ChromeMetrics.spacing)
+        .opacity(finalStretch ? 1 : ChromeDim.control(idle: idle, hidden: furnitureHidden))
         .onHover { h in withAnimation(Theme.Motion.fast) { hovering = h } }
         .animation(.spring(duration: 0.5, bounce: 0.2), value: showsUnlock)
         .animation(.easeInOut(duration: 0.3), value: stage.pointerIdle)
+        .animation(.easeInOut(duration: 0.6), value: finalStretch)
     }
 
     private func unlock() {
@@ -418,22 +450,26 @@ final class GraceRingView: NSView {
 
 // MARK: - Lid angle
 
-/// Tiny lid glyph + current angle, bottom-left. Subtle on purpose.
+/// The lid glyph and the current angle, a secondary label on the chrome row (shown while the pointer
+/// moves). Hovering it tells how far the lid can close before the alarm: the angle only matters
+/// next to the panic angle, which follows from the angle Silicon Mode was entered at.
 struct SiliconModeAngleReadout: View {
     @Environment(AppModel.self) private var model
     var preview: SiliconModePreview?
 
     var body: some View {
         let angle = preview?.angle ?? model.angle
+        let degrees = angle.map { Int($0.rounded()) }
+        let alarm = alarmAngle.map { Int($0.rounded()) }
         HStack(spacing: 6) {
             LidGlyph(angle: angle ?? 90)
-                .stroke(.tertiary, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                .stroke(.secondary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                 .frame(width: 16, height: 12)
                 .animation(.spring(duration: 0.4, bounce: 0.1), value: angle)
-            Text(angle.map { "\(Int($0.rounded()))°" } ?? "—")
-                .font(.caption)
+            Text(degrees.map { "\($0)°" } ?? "—")
+                .font(.subheadline)
                 .monospacedDigit()
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 // A crossfade, not `.numericText()`. This readout changes every couple of seconds for
                 // as long as Silicon Mode is up (the sensor flickers by a degree), and every animated
                 // numericText change redraws its digits on the CPU at each intermediate scale and blur
@@ -441,10 +477,21 @@ struct SiliconModeAngleReadout: View {
                 // never lets them go: about 0.5 MB per change, i.e. steady growth of ~0.3 MB/s for the
                 // whole session (measured). A crossfade draws the glyphs at one size: nothing new to cache.
                 .contentTransition(.opacity)
-                .animation(.spring(duration: 0.3), value: angle)
+                .animation(.easeInOut(duration: 0.2), value: degrees)
         }
+        // Legible over a bright face without a glass plate of its own.
+        .shadow(color: .black.opacity(0.35), radius: 4)
+        .help(alarm.map { "Lid angle. Closing the lid below \($0)° while agents run sounds the alarm." } ?? "Lid angle")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(angle.map { "Lid angle \(Int($0)) degrees" } ?? "Lid angle unavailable")
+        .accessibilityLabel(degrees.map { d in
+            "Lid angle \(d) degrees" + (alarm.map { ", alarm below \($0) degrees" } ?? "")
+        } ?? "Lid angle unavailable")
+    }
+
+    /// Below this a closing lid sounds the alarm (nil: no alarm armed, or a preview).
+    private var alarmAngle: Double? {
+        guard preview == nil, model.settings.panicEnabled, let base = model.phase.active?.baselineAngle else { return nil }
+        return ModeEngine.panicAngle(baseline: base, settings: model.settings)
     }
 }
 

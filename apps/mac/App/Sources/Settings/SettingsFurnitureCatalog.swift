@@ -93,7 +93,6 @@ enum SettingsFurnitureCatalog {
     /// Where a slot sits relative to the chrome that always stays.
     static func note(_ s: FurnitureSlot) -> String? {
         switch s {
-        case .bottomLeading: "above the lid angle"
         case .bottomTrailing: "above the Unlock button"
         default: nil
         }

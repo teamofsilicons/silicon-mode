@@ -129,8 +129,8 @@ enum FurnitureMetrics {
     static let spacing: CGFloat = 14
     /// Between a column's top and bottom slots.
     static let slotGap: CGFloat = 18
-    /// Bottom-left: above the lid-angle readout (chrome).
-    static let bottomLeadingInset: CGFloat = 58
+    /// Bottom-left: level with the bottom of the chrome row (Turn Off / Unlock).
+    static let bottomLeadingInset: CGFloat = 26
     /// Bottom-right: above the Unlock / Turn off capsule (chrome).
     static let bottomTrailingInset: CGFloat = 84
     /// The top slot of a column gets what it needs up to this share of the height while the
