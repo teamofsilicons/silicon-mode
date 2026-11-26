@@ -1,0 +1,102 @@
+# Silicon Mode for iPhone — generate with `xcodegen generate` (SiliconModeIOS.xcodeproj is git-ignored).
+#
+#   SiliconMode/App/        entry point, AppStore (the @Observable single source of truth), demo data
+#   SiliconMode/Cell/       Silicon Cell client: session + refresh (actor), Keychain, REST, realtime socket
+#   SiliconMode/Design/     Silicon tokens, Allo variable font (ROND 20), aurora + hinge animations
+#   SiliconMode/Screens/    Sign in, Now, Stats, Settings
+#   SiliconMode/Resources/  Info.plist, assets, privacy manifest (Allo comes from shared/design/fonts)
+#
+# Build: see docs/IOS.md.
+name: SiliconModeIOS
+options:
+  bundleIdPrefix: ai.tos
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+  groupSortPosition: top
+settings:
+  base:
+    DEVELOPMENT_TEAM: LTBSK59BJ2
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+targets:
+  SiliconMode:
+    type: application
+    platform: iOS
+    sources:
+      - path: SiliconMode
+        excludes:
+          - Resources/Info.plist
+      - path: ../../shared/design/fonts/variable/AlloVariable.ttf
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Fonts
+    settings:
+      base:
+        PRODUCT_NAME: Silicon Mode
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tos.mode.ios
+        PRODUCT_MODULE_NAME: SiliconMode
+        INFOPLIST_FILE: SiliconMode/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS: NO
+        ENABLE_PREVIEWS: YES
+        LM_FILTER_WARNINGS: YES
+  SiliconModeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: SiliconMode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tos.mode.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Silicon Mode.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Silicon Mode"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  # Live end-to-end checks (deep-link sign-in, answering). They need TEST_RUNNER_SM_DEEPLINK; see docs/IOS.md.
+  SiliconModeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: SiliconMode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tos.mode.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: SiliconMode
+schemes:
+  SiliconMode:
+    build:
+      targets:
+        SiliconMode: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SiliconModeTests
+        - name: SiliconModeUITests
+          skipped: false
+    archive:
+      config: Release
