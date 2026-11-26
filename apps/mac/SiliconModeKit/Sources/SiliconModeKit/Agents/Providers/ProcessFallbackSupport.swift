@@ -91,6 +91,25 @@ extension ProcessEntry {
         }
         return nil
     }
+
+    /// A shell a person types into (a terminal tab, an editor's integrated terminal) or a terminal
+    /// multiplexer. `sh -c '…'` / `bash script.sh`, which programs use to spawn helpers, don't count.
+    var isInteractiveShell: Bool {
+        var base = exeBase
+        if base.hasPrefix("-") { base.removeFirst() }   // login shells: argv[0] is "-zsh"
+        if AgentProcessCatalog.terminalSessions.contains(base) { return true }
+        guard AgentProcessCatalog.shells.contains(base) else { return false }
+        let rest = args.dropFirst()
+        // A script operand first (`bash wrapper.sh`) → runs that script and exits.
+        if let first = rest.first, !first.hasPrefix("-") { return false }
+        if rest.contains(where: { $0.lowercased() == "-noexit" }) { return true }   // pwsh -NoExit -Command …
+        // `-c` alone or in a cluster (`-lc`, `-ic`), `--command` (fish, nu), `-Command` (pwsh).
+        return !rest.contains { a in
+            if a.hasPrefix("--") { return a.hasPrefix("--command") }
+            guard a.hasPrefix("-"), a.count > 1 else { return false }
+            return a.lowercased() == "-command" || a.dropFirst().allSatisfy(\.isLetter) && a.contains("c")
+        }
+    }
 }
 
 public enum AgentProcessCatalog {
@@ -104,6 +123,11 @@ public enum AgentProcessCatalog {
     }
 
     static let interpreters = ["node", "bun", "deno", "python", "python3", "Python", "ruby", "uv", "uvx", "npx", "pnpm", "bunx"]
+
+    /// Shells (see `ProcessEntry.isInteractiveShell`).
+    static let shells: Set<String> = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish", "pwsh"]
+    /// Processes that only exist to host a person's terminal session.
+    static let terminalSessions: Set<String> = ["login", "tmux", "screen", "zellij"]
 
     /// Classify one process (nil = unrelated). Order matters: orchestrators and IDEs first.
     public static func classify(_ p: ProcessEntry) -> AgentProcessRole? {
@@ -227,6 +251,43 @@ public final class ProcessIndexCache: @unchecked Sendable {
     }
 }
 
+extension ProcessIndexCache.Index {
+    /// The nearest ancestor that accounts for `pid`, or nil when `pid` is a top-level agent.
+    ///
+    /// Agents and orchestrators report their children themselves. An editor (`.ide`) owns only
+    /// what it spawns directly (an extension's `copilot-runtime --stdio`), not what a person runs
+    /// in its integrated terminal (ptyHost → zsh → gemini): an interactive shell in between makes
+    /// the editor a mere terminal host. The shell's own role is ignored too — VS Code's bash
+    /// integration passes `--init-file …/Visual Studio Code.app/…`, which classifies as `.ide`.
+    /// - ignoringIDE: editors never own anything (their agent children are reported as agents).
+    func owner(of pid: Int32, ignoringIDE: Bool = false) -> AgentProcessRole? {
+        var viaShell = false
+        for a in tree.ancestors(of: pid) {
+            if a.isInteractiveShell { viaShell = true; continue }
+            switch roles[a.pid] {
+            case let role? where role.isAgentOrOrchestrator: return role
+            case let role?: if !ignoringIDE, !viaShell { return role }
+            case nil: break
+            }
+        }
+        return nil
+    }
+
+    /// `pid` runs as an editor feature (see `owner(of:)`), not as an agent CLI a person started.
+    func isEditorHosted(_ pid: Int32) -> Bool {
+        if case .ide? = owner(of: pid) { true } else { false }
+    }
+}
+
+extension AgentProcessRole {
+    var isAgentOrOrchestrator: Bool {
+        switch self {
+        case .agent, .orchestrator: true
+        case .ide: false
+        }
+    }
+}
+
 // MARK: - Live agent processes
 
 /// One top-level agent process attributed to a provider.
@@ -240,20 +301,14 @@ public struct LiveAgentProcess: Sendable, Hashable {
 enum LiveAgents {
     /// Top-level processes classified as `.agent(providerID)`: ancestors that are agents,
     /// orchestrators or (unless `allowIDE`) editors make a process a child and it is skipped.
+    /// An agent run in an editor's integrated terminal is top-level (see `Index.owner(of:)`).
     static func find(_ providerIDs: Set<String>, ctx: ScanContext, env: MoreEnvironment,
                      allowIDE: Bool = false) -> [LiveAgentProcess] {
         let idx = env.processCache.index(for: ctx)
         var out: [LiveAgentProcess] = []
         for (pid, role) in idx.roles {
             guard case .agent(let id) = role, providerIDs.contains(id), let p = idx.tree.byPID[pid] else { continue }
-            let attributedElsewhere = idx.tree.ancestors(of: pid).contains { a in
-                switch idx.roles[a.pid] {
-                case .agent?, .orchestrator?: true
-                case .ide?: !allowIDE
-                case nil: false
-                }
-            }
-            if attributedElsewhere { continue }
+            if idx.owner(of: pid, ignoringIDE: allowIDE) != nil { continue }
             out.append(LiveAgentProcess(process: p, cwd: env.cwdOf(p)))
         }
         return out.sorted { $0.pid < $1.pid }

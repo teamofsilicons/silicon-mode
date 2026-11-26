@@ -2,7 +2,8 @@ import Foundation
 
 /// GitHub Copilot CLI: `~/.copilot/session-state/<uuid>/events.jsonl` + `workspace.yaml`, with
 /// `inuse.<pid>.lock` naming the owning process. Sessions held by an editor-hosted runtime
-/// (VS Code's `copilot-runtime`) are IDE features, not CLI agents, and are skipped.
+/// (VS Code's `copilot-runtime`, spawned by the extension host) are IDE features, not CLI agents,
+/// and are skipped; `copilot` started in an editor's integrated terminal is a CLI session.
 public final class CopilotProvider: AgentProvider, @unchecked Sendable {
     public let info = ProviderCatalog.info(for: "copilot")
     let env: MoreEnvironment
@@ -18,11 +19,9 @@ public final class CopilotProvider: AgentProvider, @unchecked Sendable {
         for dir in scanner.subdirs(stateRoot) {
             let names = MoreFiles.list(dir)
             let pids = names.compactMap(Self.lockPID)
-            // Owned by an editor-hosted runtime → IDE feature, skip.
-            let ideHosted = pids.contains { pid in
-                idx.tree.ancestors(of: pid).contains { if case .ide? = idx.roles[$0.pid] { true } else { false } }
-            }
-            if ideHosted { continue }
+            // Owned by an editor-hosted runtime → IDE feature, skip. A `copilot` run in the
+            // editor's integrated terminal (a shell in between) is a CLI session and stays.
+            if pids.contains(where: idx.isEditorHosted) { continue }
             if names.contains("events.jsonl") { files.append((dir as NSString).appendingPathComponent("events.jsonl")) }
         }
         return scanner.scan(files: files, processIDs: ["copilot"], ctx: ctx, env: env) { path in

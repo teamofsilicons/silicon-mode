@@ -195,6 +195,16 @@ public struct FileStamp: Hashable, Sendable {
         return FileStamp(mtime: max(main.mtime, wal.mtime), size: main.size &+ wal.size &* 31)
     }
 
+    /// Stamp for a session store: SQLite files (`.db`, `.sqlite`, `.sqlite3`) include their `-wal`,
+    /// because in WAL mode commits land there and the main file only changes on a checkpoint.
+    public static func store(_ path: String) -> FileStamp? {
+        isSQLite(path) ? sqlite(path) : of(path)
+    }
+
+    static func isSQLite(_ path: String) -> Bool {
+        ["db", "sqlite", "sqlite3"].contains((path as NSString).pathExtension.lowercased())
+    }
+
     public var date: Date { Date(timeIntervalSince1970: mtime) }
 }
 
@@ -697,16 +707,20 @@ final class FileSessionScanner: @unchecked Sendable {
     /// - files: candidate session files (also the cache keys).
     /// - processIDs: provider ids whose live top-level processes belong to this provider.
     /// - processOnly: emit sessions for live processes not matched to any file.
+    /// - stamp: change detector for a file, also used for the age check. The default covers a
+    ///   SQLite store's `-wal` (`FileStamp.store`), so a WAL-mode db is re-read on every commit
+    ///   rather than only when it is checkpointed.
     func scan(files: [String], processIDs: Set<String>, ctx: ScanContext, env: MoreEnvironment,
               recentFallback: TimeInterval = 6 * 3600, processOnly: Bool = true,
               allowIDE: Bool = false, includeProcess: (LiveAgentProcess) -> Bool = { _ in true },
+              stamp: (String) -> FileStamp? = FileStamp.store,
               parse: (String) -> ParsedSession?) -> [AgentSession] {
         let procs = LiveAgents.find(processIDs, ctx: ctx, env: env, allowIDE: allowIDE).filter(includeProcess)
         let horizon = procs.isEmpty ? ctx.activeWindow : max(ctx.activeWindow, recentFallback)
         var sessions: [ParsedSession] = []
         var seen = Set<String>()
         for f in files {
-            guard let st = FileStamp.of(f) else { continue }
+            guard let st = stamp(f) else { continue }
             seen.insert(f)
             if ctx.now.timeIntervalSince(st.date) > horizon { continue }
             if let c = parsed.current[f], c.0 == st {

@@ -19,8 +19,11 @@ final class OpenCodeProvider: AgentProvider, @unchecked Sendable {
     let storageRoot: String
     private let http: URLSession
     private let cache = CoreLock(Cache())
+    /// Working directory of a process (injectable for tests).
+    private let cwdOf: @Sendable (ProcessEntry) -> String?
 
-    init(home: String = NSHomeDirectory()) {
+    init(home: String = NSHomeDirectory(), cwdOf: @escaping @Sendable (ProcessEntry) -> String? = { $0.cwd }) {
+        self.cwdOf = cwdOf
         let env = home == NSHomeDirectory() ? ProcessInfo.processInfo.environment : [:]
         let state = env["XDG_STATE_HOME"] ?? home + "/.local/state"
         let data = env["XDG_DATA_HOME"] ?? home + "/.local/share"
@@ -50,7 +53,7 @@ final class OpenCodeProvider: AgentProvider, @unchecked Sendable {
         var forms: [String: (sid: String, fields: [OCFormField])] = [:]
         /// form id → field key → value (partial answers)
         var partial: [String: [String: OCValue]] = [:]
-        var legacy: [String: (mtime: Date, session: AgentSession?)] = [:]
+        var legacy: [String: (stamp: OCLegacyStamp, facts: OCLegacyFacts?)] = [:]
         var lastList = Date.distantPast
         var lastActive = Set<String>()
         var listed: [OCInfo] = []
@@ -245,54 +248,120 @@ final class OpenCodeProvider: AgentProvider, @unchecked Sendable {
 
     // MARK: Legacy storage (v1 JSON files)
 
+    /// Only file facts are cached (keyed by `OCLegacyStamp`); liveness, state and the idle decay
+    /// are derived on every scan, so a session stops "working" when its process exits even though
+    /// none of its files change again.
     private func legacyScan(_ ctx: ScanContext) -> [AgentSession] {
         let base = storageRoot + "/session"
-        guard CoreFS.isDirectory(base) else { return [] }
+        guard CoreFS.isDirectory(base) else {
+            cache.run { $0.legacy = [:] }
+            return []
+        }
         let since = ctx.now.addingTimeInterval(-ctx.activeWindow)
-        let liveCwds = Set(ctx.processes.filter { CoreProcess.command($0) == "opencode" && !$0.args.contains("serve") }.compactMap(\.cwd))
+        let liveCwds = Set(ctx.processes.filter { CoreProcess.command($0) == "opencode" && !$0.args.contains("serve") }.compactMap(cwdOf))
         return cache.run { c in
             var out: [AgentSession] = []
+            var visited = Set<String>()
             for project in CoreFS.list(base) {
                 let dir = base + "/" + project
                 for f in CoreFS.list(dir) where f.hasSuffix(".json") {
                     let p = dir + "/" + f
                     guard let st = CoreFS.stat(p), st.mtime >= since else { continue }
-                    if let cached = c.legacy[p], cached.mtime == st.mtime {
-                        if let s = cached.session { out.append(s) }
-                        continue
+                    visited.insert(p)
+                    let facts: OCLegacyFacts?
+                    if let cached = c.legacy[p], cached.stamp == legacyStamp(session: st.mtime, facts: cached.facts) {
+                        facts = cached.facts
+                    } else {
+                        let read = readLegacy(path: p, mtime: st.mtime)
+                        c.legacy[p] = read
+                        facts = read.facts
                     }
-                    let s = legacySession(path: p, liveCwds: liveCwds, ctx: ctx)
-                    c.legacy[p] = (st.mtime, s)
-                    if let s { out.append(s) }
+                    if let facts { out.append(facts.session(fileMtime: st.mtime, liveCwds: liveCwds, ctx: ctx)) }
                 }
             }
+            // Sessions that were deleted or left the active window.
+            c.legacy = c.legacy.filter { visited.contains($0.key) }
             return out
         }
     }
 
-    private func legacySession(path: String, liveCwds: Set<String>, ctx: ScanContext) -> AgentSession? {
-        guard let o = CoreFS.read(path).flatMap(CoreJSON.object), let id = o.nonEmpty("id"), o["parentID"] == nil else { return nil }
-        let cwd = o.nonEmpty("directory")
-        let updated = CoreTime.date(o.obj("time")?["updated"]) ?? ctx.now
-        // Newest message decides the coarse state.
-        let mdir = storageRoot + "/message/" + id
-        var newest: (Date, JSONObject)?
-        for f in CoreFS.list(mdir) where f.hasSuffix(".json") {
-            let p = mdir + "/" + f
-            guard let st = CoreFS.stat(p), newest == nil || st.mtime > newest!.0, let m = CoreFS.read(p).flatMap(CoreJSON.object) else { continue }
-            newest = (st.mtime, m)
+    /// What the cached facts of a session depend on: the session file, its message folder (a new
+    /// message adds a file) and the newest message file (rewritten while the reply streams).
+    private func legacyStamp(session: Date, facts: OCLegacyFacts?) -> OCLegacyStamp {
+        guard let facts else { return OCLegacyStamp(session: session) }
+        return OCLegacyStamp(session: session, messages: CoreFS.stat(messageDir(facts.id))?.mtime,
+                             newest: facts.newestPath.flatMap { CoreFS.stat($0)?.mtime })
+    }
+
+    private func messageDir(_ id: String) -> String { storageRoot + "/message/" + id }
+
+    /// Reads a session file and its newest message. Every mtime is taken before the read it covers,
+    /// so a write racing the read changes the stamp and is picked up on the next scan.
+    private func readLegacy(path: String, mtime: Date) -> (stamp: OCLegacyStamp, facts: OCLegacyFacts?) {
+        guard let o = CoreFS.read(path).flatMap(CoreJSON.object), let id = o.nonEmpty("id"), o["parentID"] == nil else {
+            return (OCLegacyStamp(session: mtime), nil)
         }
+        let time = o.obj("time")
+        var facts = OCLegacyFacts(id: id, cwd: o.nonEmpty("directory"), title: o.nonEmpty("title"),
+                                  created: CoreTime.date(time?["created"]), updated: CoreTime.date(time?["updated"]))
+        // Newest message (by mtime) decides the coarse state; a file caught mid-write falls back to the next.
+        let mdir = messageDir(id)
+        let dirMtime = CoreFS.stat(mdir)?.mtime
+        let files = CoreFS.list(mdir).filter { $0.hasSuffix(".json") }
+            .compactMap { f -> (path: String, mtime: Date)? in
+                let p = mdir + "/" + f
+                return CoreFS.stat(p).map { (p, $0.mtime) }
+            }
+            .sorted { $0.mtime > $1.mtime }
+        facts.newestPath = files.first?.path
+        for file in files {
+            guard let m = CoreFS.read(file.path).flatMap(CoreJSON.object) else { continue }
+            facts.newest = OCLegacyFacts.Message(role: m.str("role"), completed: m.obj("time")?["completed"] != nil,
+                                                 errored: m.obj("error") != nil)
+            break
+        }
+        return (OCLegacyStamp(session: mtime, messages: dirMtime, newest: files.first?.mtime), facts)
+    }
+
+    /// Cached legacy entries (tests).
+    var legacyCacheCount: Int { cache.run { $0.legacy.count } }
+}
+
+/// Change detector for one legacy session's cached facts.
+struct OCLegacyStamp: Equatable {
+    var session: Date
+    var messages: Date?
+    var newest: Date?
+}
+
+/// What a legacy (v1 JSON storage) session's files say. Time-dependent state is derived per scan.
+struct OCLegacyFacts: Equatable {
+    struct Message: Equatable {
+        var role: String?
+        var completed: Bool
+        var errored: Bool
+    }
+
+    var id: String
+    var cwd: String?
+    var title: String?
+    var created: Date?
+    var updated: Date?
+    var newest: Message?
+    var newestPath: String?
+
+    func session(fileMtime: Date, liveCwds: Set<String>, ctx: ScanContext) -> AgentSession {
+        let updated = self.updated ?? fileMtime
         let live = cwd.map { liveCwds.contains($0) } ?? false
         var state: AgentState = .idle
-        if let m = newest?.1 {
-            let completed = m.obj("time")?["completed"] != nil
-            if m.str("role") == "user" || !completed { state = live ? .working : .idle }
-            else { state = m.obj("error") != nil ? .error : .finished }
+        if let m = newest {
+            if m.role == "user" || !m.completed { state = live ? .working : .idle }
+            else { state = m.errored ? .error : .finished }
         }
         if state == .finished, ctx.now.timeIntervalSince(updated) > ctx.idleAfter { state = .idle }
         return AgentSession(provider: OpenCodeProvider.id, nativeID: id,
-                            title: EventText.clip(o.nonEmpty("title") ?? cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "opencode", max: 60),
-                            cwd: cwd, state: state, startedAt: CoreTime.date(o.obj("time")?["created"]), updatedAt: updated)
+                            title: EventText.clip(title ?? cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "opencode", max: 60),
+                            cwd: cwd, state: state, startedAt: created, updatedAt: updated)
     }
 }
 

@@ -45,15 +45,22 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
         var history: [String: [AgentEvent]] = [:]
         var historyAt: [String: Date] = [:]
         var lastFetch: Date = .distantPast
+        /// When `sessions` was last refreshed by a successful `sessions.list`.
+        var lastSuccess: Date = .distantPast
         var fetchStamp: FileStamp?
         var inFlight = false
-        var cliMissing = false
+        /// When `openclaw` was last not found on PATH (e.g. mid `npm i -g` upgrade); retried later.
+        var cliMissingAt: Date?
     }
 
     private let state = Locked(State())
     /// Minimum seconds between `sessions.list` calls while busy / when idle.
     var busyInterval: TimeInterval = 15
     var idleInterval: TimeInterval = 120
+    /// Seconds before looking for a missing `openclaw` CLI again.
+    var cliRetryInterval: TimeInterval = 60
+    /// Cached sessions older than this (two missed busy refreshes) no longer prove a run is active.
+    var staleAfter: TimeInterval { 2 * busyInterval + 15 }
 
     public init(env: MoreEnvironment = .live) { self.env = env }
 
@@ -77,13 +84,18 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
         if !gateways.isEmpty { scheduleFetchIfNeeded(now: ctx.now, stamp: stamp, pendingApprovals: !approvals.isEmpty) }
         let snapshot = state.current
 
+        // `running` is only as fresh as the last successful `sessions.list`. While refreshes keep
+        // failing (gateway auth error, timeouts, CLI gone) stop claiming those runs are active.
+        let stale = ctx.now.timeIntervalSince(snapshot.lastSuccess) > staleAfter
+
         var out: [AgentSession] = []
         var usedApprovals = Set<String>()
         for s in snapshot.sessions {
             let mine = approvals.filter { $0.sessionKey == s.key || ($0.sessionKey == nil && $0.agentID != nil && s.key.hasPrefix("agent:\($0.agentID!):")) }
             let quiet = ctx.now.timeIntervalSince(s.updatedAt)
-            if !s.running, mine.isEmpty, quiet > ctx.activeWindow { continue }
-            var st: AgentState = s.running ? .working : (quiet <= ctx.idleAfter ? .finished : .idle)
+            let running = s.running && !stale
+            if !running, mine.isEmpty, quiet > ctx.activeWindow { continue }
+            var st: AgentState = running ? .working : (quiet <= ctx.idleAfter ? .finished : .idle)
             let questions = mine.map { question(for: $0, sessionKey: s.key) }
             if !questions.isEmpty { st = .needsYou }
             usedApprovals.formUnion(mine.map(\.id))
@@ -192,7 +204,8 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
 
     private func scheduleFetchIfNeeded(now: Date, stamp: FileStamp?, pendingApprovals: Bool) {
         let go: Bool = state.withLock { s in
-            guard !s.inFlight, !s.cliMissing else { return false }
+            guard !s.inFlight else { return false }
+            if let missing = s.cliMissingAt, now.timeIntervalSince(missing) < cliRetryInterval { return false }
             let since = now.timeIntervalSince(s.lastFetch)
             let busy = s.sessions.contains(where: \.running) || pendingApprovals
             let changed = stamp != s.fetchStamp
@@ -211,14 +224,15 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
     func fetchSessions(now: Date) async {
         defer { state.withLock { $0.inFlight = false } }
         guard let exe = env.which("openclaw") else {
-            state.withLock { $0.cliMissing = true }
+            state.withLock { $0.cliMissingAt = now }
             return
         }
+        state.withLock { $0.cliMissingAt = nil }
         let params = #"{"limit":30,"sortBy":"activity"}"#
         guard let out = await env.run(exe, ["gateway", "call", "sessions.list", "--params", params, "--json"], 15),
               out.status == 0, let j = Self.parseJSON(out.stdout) else { return }
         let sessions = Self.parseSessions(j)
-        state.withLock { $0.sessions = sessions }
+        state.withLock { $0.sessions = sessions; $0.lastSuccess = max($0.lastSuccess, now) }
 
         // Recent history for running sessions (bounded, rate-limited per session).
         let wants = sessions.filter { s in
