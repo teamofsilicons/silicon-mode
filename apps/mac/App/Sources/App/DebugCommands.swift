@@ -91,6 +91,11 @@ enum DebugCommands {
                 m.answer(q, optionIDs: parts.first.map { [$0] } ?? [], text: parts.count > 1 ? parts[1] : nil, source: .menuBar)
             }
         case "signin": m.account.signIn()
+        case "signin-headless":
+            // Start a real sign-in (loopback listener) without opening a browser tab; a test
+            // client then completes it through the loopback page, exactly like the browser does.
+            m.account.openURL = { _ in }
+            m.account.signIn()
         case "signout": m.account.signOut()
         default: break
         }
