@@ -15,10 +15,13 @@ struct FurnitureLayer: View {
     var stage: OverlayStage?
 
     private var ui: FurnitureUIState { .shared }
+    /// Live: the questions the layout is planned for, one update behind the model (see `body`).
+    @State private var plannedQuestions: [AgentQuestion]?
 
     var body: some View {
         let settings = preview?.settings ?? model.settings
-        let questions = preview?.questions ?? model.pendingQuestions
+        let liveQuestions = preview?.questions ?? model.pendingQuestions
+        let questions = preview == nil ? plannedQuestions ?? liveQuestions : liveQuestions
         let pieces = Self.shownPieces(settings: settings, peek: preview?.questionsPeek ?? stage?.questionsPeek ?? false,
                                       hasQuestions: !questions.isEmpty)
         let agentCount = preview?.sessions.count ?? model.modeAgents.count
@@ -37,6 +40,19 @@ struct FurnitureLayer: View {
         }
         .animation(Theme.Motion.slow, value: pieces.map(\.id))
         .environment(\.colorScheme, .dark)
+        .environment(\.plannedQuestions, preview == nil ? questions : nil)
+        // A question arriving or leaving re-plans the furniture: the Questions piece mounts,
+        // grows, shrinks or unmounts with its slot transition, and its neighbours glide. That runs
+        // in a transaction of its own, an update after the model's, so the rest of the model's
+        // update (the agents' counts, a new log tab) is never animated along with it.
+        .onChange(of: liveQuestions, initial: true) { _, qs in
+            guard preview == nil else { return }
+            if plannedQuestions == nil {
+                plannedQuestions = qs
+            } else if plannedQuestions != qs {
+                withAnimation(Theme.Motion.slow) { plannedQuestions = qs }
+            }
+        }
     }
 
     /// What is drawn: the layout, nothing while hidden, or just the placed Questions piece while
