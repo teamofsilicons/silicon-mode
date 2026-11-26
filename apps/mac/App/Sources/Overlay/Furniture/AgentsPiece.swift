@@ -27,8 +27,11 @@ struct AgentsPiece: View {
                 AgentsEmptyPill()
                     .transition(.opacity)
             } else {
+                // Expanded but not even one row fits (other pieces in this corner take the room):
+                // the pill stays, and says so instead of offering a list it can't open.
                 AgentsPieceList(sessions: sessions, collapsed: collapsed || fits == 0, maxRows: fits,
-                                width: width, preview: preview != nil) { toggle() }
+                                width: width, roomless: !collapsed && fits == 0,
+                                preview: preview != nil) { toggle() }
             }
         }
         .frame(width: width, alignment: leading ? .leading : .trailing)
@@ -60,6 +63,10 @@ enum AgentSummary {
         return out
     }
 
+    /// The summary as styled text. Where it can change while shown, give it
+    /// `.contentTransition(.opacity)` and an animation on the counts: a crossfade draws the glyphs
+    /// at one size. `.numericText()` would draw every intermediate scale and blur of its roll on the
+    /// CPU, and CoreGraphics keeps every one of those glyph bitmaps cached for good.
     static func text(_ c: AgentCounts) -> Text {
         let ps = parts(c)
         guard let first = ps.first else { return Text("No agents running").foregroundStyle(.secondary) }
@@ -81,6 +88,11 @@ enum AgentSummary {
     }
 }
 
+/// The summary's crossfade when a count changes.
+enum AgentSummaryMotion {
+    static let change = Animation.easeInOut(duration: 0.3)
+}
+
 /// No agent to show: a quiet pill (nothing to expand).
 private struct AgentsEmptyPill: View {
     var body: some View {
@@ -94,7 +106,7 @@ private struct AgentsEmptyPill: View {
         .font(.subheadline.weight(.medium))
         .padding(.horizontal, 14)
         .frame(height: AgentsPiece.pillHeight)
-        .hudChip()
+        .hudChip(tint: HUDTint.panelDim)
         .accessibilityElement(children: .combine)
     }
 }
@@ -109,6 +121,8 @@ struct AgentsPieceList: View {
     /// Rows that fit (only used expanded).
     let maxRows: Int
     let width: CGFloat
+    /// The list was asked for but no row fits: the pill is shown and can't open it.
+    var roomless = false
     var preview = false
     var onToggle: () -> Void
     @Namespace private var ns
@@ -185,7 +199,8 @@ struct AgentsPieceList: View {
                 .monospacedDigit()
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .contentTransition(.numericText())
+                .contentTransition(.opacity)
+                .animation(AgentSummaryMotion.change, value: AgentCounts(sessions))
             Spacer(minLength: 0)
             HUDCircleButton(symbol: "chevron.up", size: 28, action: onToggle)
                 .help("Collapse the agent list")
@@ -196,45 +211,48 @@ struct AgentsPieceList: View {
         .frame(height: Self.headerHeight)
     }
 
+    /// Avatars and the summary on the same glass as the panel, so the two morph into each other.
+    /// Someone waiting shows only in the summary's lead colour: the glass stays neutral.
+    @ViewBuilder
     private var collapsedPill: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 8) {
-                HStack(spacing: -6) {
-                    ForEach(Array(sessions.prefix(5).enumerated()), id: \.element.id) { i, s in
-                        let silicon = s.identity?.isSilicon == true
-                        AgentAvatarView(session: s, size: 22, showsState: false)
-                            .background {
-                                // A thin dark rim separates overlapping avatars (shaped like the avatar).
-                                if silicon {
-                                    RoundedRectangle(cornerRadius: 22 * 0.28 + 1.5, style: .continuous)
-                                        .fill(Color.black.opacity(0.55)).padding(-1.5)
-                                } else {
-                                    Circle().fill(Color.black.opacity(0.55)).padding(-1.5)
-                                }
-                            }
-                            .zIndex(Double(10 - i))
-                    }
-                }
-                AgentSummary.text(AgentCounts(sessions))
-                    .font(.subheadline.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .contentTransition(.numericText())
+        let counts = AgentCounts(sessions)
+        let content = HStack(spacing: 8) {
+            AgentsAvatarStack(sessions: sessions)
+            AgentSummary.text(counts)
+                .font(.subheadline.weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .contentTransition(.opacity)
+            if !roomless {
                 Image(systemName: "chevron.down")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.leading, 8)
-            .padding(.trailing, 14)
-            .frame(height: AgentsPiece.pillHeight)
-            .contentShape(Capsule())
         }
-        .buttonStyle(HUDPressStyle())
-        .focusable(false)
-        .hudChip(tint: AgentCounts(sessions).needsYou > 0 ? HUDTint.needsYou.opacity(0.18) : nil)
-        .transition(.opacity)
-        .help("Show the agent list")
-        .accessibilityLabel("Show agent list: \(AgentSummary.plain(AgentCounts(sessions)))")
+        // Concentric: the 22 pt avatars sit 7 pt inside the 36 pt capsule.
+        .padding(.leading, (AgentsPiece.pillHeight - AgentsAvatarStack.pillSize) / 2)
+        .padding(.trailing, roomless ? 16 : 14)
+        .frame(height: AgentsPiece.pillHeight)
+        .contentShape(Capsule())
+        .animation(AgentSummaryMotion.change, value: counts)
+        .animation(AgentSummaryMotion.change, value: sessions.prefix(AgentsAvatarStack.maxShown).map(\.id))
+
+        if roomless {
+            content
+                .hudChip(tint: HUDTint.panelDim)
+                .transition(.opacity)
+                .help("No room for the agent list in this corner. It opens once there is space.")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Agents: \(AgentSummary.plain(counts))")
+        } else {
+            Button(action: onToggle) { content }
+                .buttonStyle(HUDPressStyle())
+                .focusable(false)
+                .hudChip(tint: HUDTint.panelDim)
+                .transition(.opacity)
+                .help("Show the agent list")
+                .accessibilityLabel("Show agent list: \(AgentSummary.plain(counts))")
+        }
     }
 
     private func moreRow(_ n: Int) -> some View {
@@ -243,6 +261,114 @@ struct AgentsPieceList: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             .frame(height: Self.moreHeight)
+    }
+}
+
+// MARK: - Avatar stack
+
+/// The pill's avatars: at most three, overlapping by 30%, then "+N". No rims: each one is cut out
+/// of the one beneath it with a thin gap, so the pill's own glass shows between them, and no
+/// per-avatar badges or state dots (the summary says what state they are in).
+struct AgentsAvatarStack: View {
+    struct Item: Identifiable {
+        let id: String
+        let provider: String
+        let identity: AgentIdentity?
+    }
+
+    let items: [Item]
+    /// Agents beyond the shown ones ("+N").
+    let extra: Int
+    var size: CGFloat = Self.pillSize
+
+    /// The avatar size in the agents pill.
+    static let pillSize: CGFloat = 22
+    static let maxShown = 3
+    /// The share of an avatar the next one hides.
+    static let overlap: CGFloat = 0.3
+
+    init(sessions: [AgentSession], size: CGFloat = Self.pillSize) {
+        items = sessions.prefix(Self.maxShown).map { Item(id: $0.id, provider: $0.provider, identity: $0.identity) }
+        extra = max(0, sessions.count - Self.maxShown)
+        self.size = size
+    }
+
+    init(items: [Item], extra: Int = 0, size: CGFloat) {
+        self.items = Array(items.prefix(Self.maxShown))
+        self.extra = extra + max(0, items.count - Self.maxShown)
+        self.size = size
+    }
+
+    /// Leading edge to leading edge.
+    private var step: CGFloat { size * (1 - Self.overlap) }
+    /// The cut-out gap around an avatar, over the one beneath it.
+    private var gap: CGFloat { max(1.25, size * 0.07) }
+
+    var body: some View {
+        HStack(spacing: size * 0.22) {
+            HStack(spacing: step - size) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
+                    AgentsStackAvatar(item: item, size: size)
+                        .mask { cutout(under: i > 0 ? items[i - 1] : nil) }
+                        // The most urgent agent (first) sits on top.
+                        .zIndex(Double(Self.maxShown - i))
+                        .transition(.opacity)
+                }
+            }
+            if extra > 0 {
+                Text("+\(extra)")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
+                    .transition(.opacity)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// A mask that keeps the whole avatar except where the neighbour on top (`above`, one step to
+    /// the leading side) covers it, grown by `gap`.
+    @ViewBuilder
+    private func cutout(under above: Item?) -> some View {
+        if let above {
+            Rectangle()
+                .overlay(alignment: .leading) {
+                    outline(above)
+                        .frame(width: size + 2 * gap, height: size + 2 * gap)
+                        .offset(x: -step - gap)
+                        .blendMode(.destinationOut)
+                }
+                .compositingGroup()
+        } else {
+            Rectangle()
+        }
+    }
+
+    /// An avatar's outline grown by `gap`: a Silicon's rounded square, any other agent's circle.
+    private func outline(_ item: Item) -> AnyShape {
+        item.identity?.isSilicon == true
+            ? AnyShape(RoundedRectangle(cornerRadius: size * 0.28 + gap, style: .continuous))
+            : AnyShape(Circle())
+    }
+}
+
+/// An avatar without the TOS badge or state dot that `AgentAvatarView` adds: a Silicon's photo or
+/// monogram, else its provider mark.
+private struct AgentsStackAvatar: View {
+    @Environment(AppModel.self) private var model
+    let item: AgentsAvatarStack.Item
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let id = item.identity, id.isSilicon {
+                SiliconAvatar(identity: id, image: SnapshotHarness.isRendering ? nil : model.avatars.image(for: id), size: size)
+            } else {
+                ProviderMark(provider: item.provider, size: size)
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 
