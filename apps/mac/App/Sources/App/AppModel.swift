@@ -53,11 +53,42 @@ final class AppModel {
         }
     }
     private(set) var snapshot: AgentHub.Snapshot = .empty
+    /// Every session the providers report (menu bar, phone/web sync, auto-entry).
     var sessions: [AgentSession] { snapshot.sessions }
     var counts: AgentCounts { snapshot.counts }
     var pendingQuestions: [AgentQuestion] { snapshot.pendingQuestions }
     /// Last error shown after a failed answer, keyed by question id.
     var answerErrors: [String: String] = [:]
+
+    /// The agents Silicon Mode shows (agents piece, log tabs): while active, the ones running plus
+    /// the ones that finished since entry (`ModeAgentLedger`); otherwise every session.
+    private(set) var modeAgents: [AgentSession] = []
+    /// What the face draws: `modeAgents` (stored on its own so the face can observe just this).
+    private(set) var faceSessions: [AgentSession] = []
+    /// Every log line of each agent since entry (log tabs). Read it after reading `logRevision`,
+    /// which is what views observe; the book itself is not observable (it changes every refresh).
+    @ObservationIgnored private(set) var logBook = ModeLogBook()
+    /// Changes whenever `logBook` gained or changed a line (or was reset).
+    private(set) var logRevision = 0
+    @ObservationIgnored private var ledger: ModeAgentLedger?
+    /// `takenAt` of the newest snapshot applied (equal snapshots aren't stored, but still count).
+    @ObservationIgnored private var latestTakenAt: Date = .distantPast
+
+    /// Agent profile photos (Silicons), cached on disk; the overlay only ever reads the cache.
+    let avatars = AvatarStore()
+
+    // MARK: System activity (face furniture)
+
+    /// The latest CPU / memory / battery / network reading, while sampling runs (else nil).
+    private(set) var systemActivity: SystemActivity?
+    /// How many Settings previews currently show system activity; sampling runs while > 0.
+    /// Prefer `beginSystemSampling()` / `endSystemSampling()`.
+    @ObservationIgnored var systemSamplerDemand = 0 {
+        didSet { if systemSamplerDemand < 0 { systemSamplerDemand = 0 }; updateSystemSampler() }
+    }
+    @ObservationIgnored private let systemSampler = SystemActivitySampler(interval: 2) { reading in
+        AppModel.shared.systemSampleArrived(reading)
+    }
 
     // MARK: Services
     let settingsStore = SettingsStore()
@@ -75,12 +106,10 @@ final class AppModel {
     /// Local hourly usage history (the Stats window's heatmap; source for cloud usage rows).
     let usage = UsageTracker(url: HookWire.supportDirectory.appendingPathComponent("usage.json"))
 
-    private var engine: ModeEngine
-    private var sensorTimer: Timer?
-    private var agentTask: Task<Void, Never>?
-    private var started = false
-    private var readFailures = 0
-    private var probeCountdown = 90
+    @ObservationIgnored private var engine: ModeEngine
+    @ObservationIgnored private var lidLoop: LidSamplingLoop?
+    @ObservationIgnored private var agentTask: Task<Void, Never>?
+    @ObservationIgnored private var started = false
 
     var needsOnboarding: Bool { !pinVault.isSet }
 
@@ -99,11 +128,11 @@ final class AppModel {
         FontRegistry.registerBundledFonts()
         sensorAvailability = sensor.availability
 
-        // Lid loop @ 30 Hz on the main run loop (IOHIDDeviceGetReport is ~µs).
-        sensorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
-            MainActor.assumeIsolated { AppModel.shared.tick() }
-        }
-        RunLoop.main.add(sensorTimer!, forMode: .common)
+        // Lid loop @ 30 Hz: the HID read (and any re-probe) runs on a background queue; each reading
+        // is handed to the main actor, where the engine ticks.
+        let loop = LidSamplingLoop(sensor: sensor)
+        lidLoop = loop
+        loop.start { reading in AppModel.shared.tick(reading) }
 
         // Hook server (Claude Code / Codex hooks → real-time state + answerable prompts).
         let policy = holdPolicySnapshot
@@ -171,29 +200,10 @@ final class AppModel {
 
     // MARK: Ticks
 
-    private func tick() {
+    private func tick(_ lid: LidSamplingLoop.Reading) {
         let now = MonotonicClock.now()
-        var reading: Double?
-        if let sim = simulatedAngle {
-            reading = sim
-        } else if sensorAvailability != .available {
-            // Keep looking for the sensor (one failed probe must not disable lid features).
-            probeCountdown -= 1
-            if probeCountdown <= 0 {
-                probeCountdown = 90
-                sensor.probe()
-                sensorAvailability = sensor.availability
-                readFailures = 0
-            }
-        } else if sensorAvailability == .available {
-            reading = sensor.readAngle()
-            if reading == nil {
-                readFailures += 1
-                if readFailures % 90 == 0 { sensor.probe(); sensorAvailability = sensor.availability }
-            } else {
-                readFailures = 0
-            }
-        }
+        if lid.availability != sensorAvailability { sensorAvailability = lid.availability }
+        let reading = simulatedAngle ?? lid.angle
         publishAngle(reading, now: now)
 
         let events = engine.update(now: now, angle: reading, agentsRunning: counts.running)
@@ -205,7 +215,7 @@ final class AppModel {
     /// The engine gets every raw sample; the UI gets a steadied, whole-degree angle. The sensor
     /// flickers ±1° at 30 Hz, and every published change re-renders (and re-animates) views that
     /// show the angle — on a full-screen glass overlay that's a constant redraw for hours.
-    private var lastAnglePublish: Double = 0
+    @ObservationIgnored private var lastAnglePublish: Double = 0
     private func publishAngle(_ reading: Double?, now: Double) {
         guard let reading else {
             if angle != nil { angle = nil }
@@ -225,7 +235,9 @@ final class AppModel {
         if engine.armed != armed { armed = engine.armed }
         let cd = engine.countdownRemaining(now: now)
         if cd != countdownRemaining { countdownRemaining = cd }
-        let gr = engine.graceRemaining(now: now).map { ($0 * 10).rounded() / 10 }
+        // Whole seconds (rounded up, as the "0:42" label shows them): the ring animates between
+        // values itself, so publishing more often only re-renders the control.
+        let gr = engine.graceRemaining(now: now).map { $0.rounded(.up) }
         if gr != graceRemaining { graceRemaining = gr }
         let rr = engine.rearmRemaining(now: now).map { $0.rounded() }
         if rr != rearmRemaining { rearmRemaining = rr }
@@ -279,9 +291,39 @@ final class AppModel {
 
     private func systemDidWake() {
         handle(.systemDidWake)
-        sensor.probe()
-        sensorAvailability = sensor.availability
+        lidLoop?.requestProbe()
         refreshAgentsSoon()
+    }
+
+    // MARK: Face furniture
+
+    /// Hide (or show) all face furniture. Persisted in settings (a rare click).
+    func setFurnitureHidden(_ hidden: Bool) {
+        guard settings.furnitureHidden != hidden else { return }
+        settings.furnitureHidden = hidden
+    }
+
+    /// A view that shows live system activity outside the overlay (a Settings preview) calls this
+    /// when it appears, and `endSystemSampling()` when it goes away.
+    func beginSystemSampling() { systemSamplerDemand += 1 }
+    func endSystemSampling() { systemSamplerDemand -= 1 }
+
+    /// Samples while the overlay is up with a visible system piece, or while a preview asks for it.
+    private func updateSystemSampler() {
+        guard !SnapshotHarness.isRendering else { return }
+        let placed = settings.furniture.contains { $0.kind == .system }
+        let want = (isActive && placed && !settings.furnitureHidden) || systemSamplerDemand > 0
+        if want, !systemSampler.isRunning {
+            systemSampler.start()
+        } else if !want, systemSampler.isRunning {
+            systemSampler.stop()
+            systemActivity = nil
+        }
+    }
+
+    private func systemSampleArrived(_ reading: SystemActivity) {
+        guard systemSampler.isRunning else { return }
+        systemActivity = reading
     }
 
     private func handle(_ c: ModeEngine.Command) {
@@ -305,6 +347,11 @@ final class AppModel {
                 if settings.uiSoundsEnabled { sounds.play(.dismiss) }
             case .entered:
                 enteredAt = Date()
+                // The ledger starts from what runs right now (those count as seen running).
+                ledger = ModeAgentLedger(enteredAt: enteredAt ?? Date())
+                logBook = ModeLogBook()
+                logRevision &+= 1
+                republishAgents()
                 pinRequiredForSession = pinVault.mayBeSet
                 unlockPresented = false
                 overlay.hideCountdown()
@@ -320,6 +367,10 @@ final class AppModel {
                 LockGuard.stop()
                 pinRequiredForSession = false
                 enteredAt = nil
+                ledger = nil
+                logBook = ModeLogBook()
+                logRevision &+= 1
+                republishAgents()
                 unlockPresented = false
                 sounds.stopPanic()
                 overlay.exit()
@@ -337,6 +388,7 @@ final class AppModel {
             }
         }
         updateHoldPolicy()
+        updateSystemSampler()
         cloud.modeChanged()
     }
 
@@ -362,6 +414,7 @@ final class AppModel {
             let n = max(settings.tailLogCount, 30)
             Task { await hub.setMaxEvents(n) }
         }
+        if settings.furniture != old.furniture || settings.furnitureHidden != old.furnitureHidden { updateSystemSampler() }
         updateHoldPolicy()
     }
 
@@ -378,7 +431,7 @@ final class AppModel {
         holdPolicySnapshot.value = hold
     }
 
-    private var refreshScheduled = false
+    @ObservationIgnored private var refreshScheduled = false
     func refreshAgentsSoon() {
         guard !refreshScheduled else { return }
         refreshScheduled = true
@@ -391,8 +444,11 @@ final class AppModel {
 
     func refreshAgents() async {
         let snap = await hub.refresh()
-        // A caller resuming late must not apply an older snapshot over a newer one.
-        guard snap.takenAt >= snapshot.takenAt else { return }
+        // A caller resuming late must not apply an older snapshot over a newer one. Snapshot
+        // equality ignores `takenAt`, so an unchanged scan isn't stored: track the newest applied
+        // time separately, or a late older scan could replace content a newer equal scan confirmed.
+        guard snap.takenAt >= latestTakenAt else { return }
+        latestTakenAt = snap.takenAt
         usage.sample(running: snap.sessions.filter { $0.state.isRunning }.map { (id: $0.id, provider: $0.provider) },
                      siliconModeActive: isActive)
         if snap != snapshot {
@@ -400,8 +456,27 @@ final class AppModel {
             snapshot = snap
             let newQuestions = snap.pendingQuestions.filter { !hadQuestions.contains($0.id) }
             if !newQuestions.isEmpty, settings.uiSoundsEnabled, !isPanicking { sounds.play(.question) }
+            republishAgents()
+            avatars.prefetch(snap.sessions.compactMap(\.identity))
             cloud.agentsChanged()
         }
+    }
+
+    /// Recomputes `modeAgents` / `faceSessions` (and feeds the log book) from the snapshot.
+    private func republishAgents() {
+        let shown: [AgentSession]
+        if isActive, var l = ledger {
+            l.ingest(snapshot.sessions)
+            ledger = l
+            shown = l.visible
+            let before = logBook.revision
+            logBook.ingest(shown)
+            if logBook.revision != before { logRevision &+= 1 }
+        } else {
+            shown = snapshot.sessions
+        }
+        if modeAgents != shown { modeAgents = shown }
+        if faceSessions != shown { faceSessions = shown }
     }
 
     func answer(_ q: AgentQuestion, optionIDs: [String] = [], text: String? = nil, source: AgentAnswer.Source) {
@@ -424,6 +499,85 @@ final class AppModel {
     }
 }
 
+/// Reads the lid sensor at 30 Hz on a background queue (the HID request is ~0.3 ms of CPU, which
+/// shouldn't land on the main thread 30 times a second) and hands each reading to the main actor.
+/// Readings coalesce: if the main thread is busy, only the newest one is delivered.
+final class LidSamplingLoop: @unchecked Sendable {
+    struct Reading: Sendable, Equatable {
+        var angle: Double?
+        var availability: LidSensor.Availability
+    }
+
+    private let sensor: LidSensor
+    private let queue = DispatchQueue(label: "ai.tos.mode.lid-sensor", qos: .userInitiated)
+    // Queue-confined.
+    private var timer: DispatchSourceTimer?
+    private var readFailures = 0
+    private var probeCountdown = 90
+    private var availability: LidSensor.Availability
+    /// The newest reading not yet taken by the main actor (nil when none is pending).
+    private let pending = LockedValue<Reading?>(nil)
+
+    init(sensor: LidSensor) {
+        self.sensor = sensor
+        availability = sensor.availability
+    }
+
+    func start(onReading: @escaping @MainActor @Sendable (Reading) -> Void) {
+        queue.async { [self] in
+            guard timer == nil else { return }
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(deadline: .now(), repeating: 1.0 / 30.0, leeway: .milliseconds(3))
+            t.setEventHandler { [weak self] in self?.sample(onReading) }
+            timer = t
+            t.resume()
+        }
+    }
+
+    /// Look for the sensor again (after wake).
+    func requestProbe() {
+        queue.async { [self] in
+            sensor.probe()
+            availability = sensor.availability
+            readFailures = 0
+        }
+    }
+
+    private func sample(_ onReading: @escaping @MainActor @Sendable (Reading) -> Void) {
+        var angle: Double?
+        if availability != .available {
+            // Keep looking for the sensor (one failed probe must not disable lid features).
+            probeCountdown -= 1
+            if probeCountdown <= 0 {
+                probeCountdown = 90
+                sensor.probe()
+                availability = sensor.availability
+                readFailures = 0
+            }
+        } else {
+            angle = sensor.readAngle()
+            if angle == nil {
+                readFailures += 1
+                if readFailures % 90 == 0 { sensor.probe(); availability = sensor.availability }
+            } else {
+                readFailures = 0
+            }
+        }
+        let reading = Reading(angle: angle, availability: availability)
+        let pending = self.pending
+        let wasPending: Bool = pending.update { p in
+            let was = p != nil
+            p = reading
+            return was
+        }
+        guard !wasPending else { return }
+        DispatchQueue.main.async {
+            guard let r = pending.update({ p -> Reading? in defer { p = nil }; return p }) else { return }
+            MainActor.assumeIsolated { onReading(r) }
+        }
+    }
+}
+
 /// Tiny lock-protected box for values read off the main actor.
 final class LockedValue<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
@@ -432,6 +586,11 @@ final class LockedValue<T: Sendable>: @unchecked Sendable {
     var value: T {
         get { lock.lock(); defer { lock.unlock() }; return _value }
         set { lock.lock(); _value = newValue; lock.unlock() }
+    }
+    /// Reads and modifies the value atomically.
+    func update<R>(_ body: (inout T) -> R) -> R {
+        lock.lock(); defer { lock.unlock() }
+        return body(&_value)
     }
 }
 

@@ -5,6 +5,10 @@ import IOKit.hid
 /// Reads the MacBook lid-angle sensor (Apple HID device VID 0x05AC / PID 0x8104,
 /// Sensor page 0x20, Orientation usage 0x8A, feature report 1 → little-endian degrees).
 /// Works on 2019 16" MBP and Apple-silicon MacBook Pro/Air models (verified on MacBookPro18,1).
+///
+/// Thread-safe: every member may be used from any thread (the app reads it on a background queue
+/// so the 30 Hz HID reads stay off the main thread). The device is never scheduled on a run loop;
+/// reads are synchronous feature-report requests serialized by an internal lock.
 public final class LidSensor: @unchecked Sendable {
     public enum Availability: Equatable, Sendable {
         case available
@@ -15,7 +19,12 @@ public final class LidSensor: @unchecked Sendable {
     private let lock = NSLock()
     private var device: IOHIDDevice?
     private var isOpen = false
-    public private(set) var availability: Availability = .notFound
+    private var _availability: Availability = .notFound
+    /// Whether the sensor was found by the last `probe()`.
+    public var availability: Availability {
+        lock.lock(); defer { lock.unlock() }
+        return _availability
+    }
     public let modelIdentifier: String
 
     private static let opts = IOOptionBits(kIOHIDOptionsTypeNone)
@@ -23,6 +32,12 @@ public final class LidSensor: @unchecked Sendable {
     public init() {
         modelIdentifier = Self.readModel()
         probe()
+    }
+
+    /// No hardware access until `probe()` (tests).
+    init(probing: Bool) {
+        modelIdentifier = Self.readModel()
+        if probing { probe() }
     }
 
     deinit { close() }
@@ -38,7 +53,7 @@ public final class LidSensor: @unchecked Sendable {
             kIOHIDProductIDKey: 0x8104,
         ] as CFDictionary)
         guard IOHIDManagerOpen(manager, Self.opts) == kIOReturnSuccess else {
-            availability = .notFound
+            _availability = .notFound
             return
         }
         defer { IOHIDManagerClose(manager, Self.opts) }
@@ -50,14 +65,14 @@ public final class LidSensor: @unchecked Sendable {
             if page == 0x20 && usage == 0x8A {
                 if Self.read(d, openFirst: true) != nil {
                     device = d
-                    availability = .available
+                    _availability = .available
                     return
                 }
             } else {
                 sawVendor = true
             }
         }
-        availability = sawVendor ? .vendorInterfaceOnly : .notFound
+        _availability = sawVendor ? .vendorInterfaceOnly : .notFound
     }
 
     /// Current lid angle in degrees, or nil if unavailable.

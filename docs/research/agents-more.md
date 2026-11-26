@@ -283,6 +283,12 @@ Actions: `ping`, `list`, `sessions {silicon, isi, archived?}`, `show {silicon, i
   - Last event `error` with a `kind` other than `stderr`: **error**.
 - Pending questions: providers run with skip-permissions, so there are none to approve. Treat an ISI's last `text` before `end`, ending in `?`, as a "question" that can be answered with `send`.
 
+### How Silicon Mode shows a Silicon (one row per Silicon)
+- `SiliconProvider` groups all of a Silicon's ISI sessions into one `AgentSession`: `nativeID` is the Silicon id (`si:<handle>`), the state is the most urgent ISI state, `updatedAt` the latest ISI activity, `startedAt` the start of the current turn (latest `start` event), events are merged by time, and questions keep their ids (answers still route to the ISI) with `sessionID` pointing at the group. `cwd` is nil.
+- `AgentSession.identity` (`AgentIdentity`) carries the handle, the ISIs and their states, and the account uuid and display name read from `<home>/.accounts/session.json`. Only the `account` object (`uuid`, `id`, `display_name`) is decoded; that file also holds the Silicon's access and refresh tokens, which are never decoded, kept or logged. `silicon.yaml` is never read (it holds the Silicon's secret token).
+- Profile photo: the Iris default, `https://iris.teamofsilicons.com/pfp/silicon?id=<uuid>` (public, no auth). The app fetches it in normal use (`AvatarStore`: https only, Iris and Accounts hosts only, 2 MB cap, 256 px, disk cache in `~/Library/Caches/ai.tos.mode/avatars/`) and the overlay only reads the cache. Without a uuid or a cached photo the avatar is a monogram on the silicon gradient. Every Silicon avatar carries the TOS badge.
+- **Not covered:** custom uploaded photos (`accounts.teamofsilicons.com/v1/photos/<id>`). Finding a Silicon's uploaded photo needs an authenticated Accounts lookup, which Silicon Mode doesn't have, so a Silicon with an upload shows its Iris default.
+
 ---
 
 ## 6. silicon-omni (`~/.omni`)

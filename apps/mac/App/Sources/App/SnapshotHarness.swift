@@ -32,8 +32,13 @@ enum SnapshotHarness {
             SnapshotItem(id: "stats-dark", size: CGSize(width: 860, height: 760), dark: true) {
                 AnyView(StatsView(preview: StatsView.sampleBuckets()))
             },
+            SnapshotItem(id: "agent-avatars", size: CGSize(width: 2300, height: 640), dark: true) { AnyView(AgentAvatarSheet()) },
+            SnapshotItem(id: "agent-avatars-light", size: CGSize(width: 2300, height: 640), dark: false) { AnyView(AgentAvatarSheet()) },
         ]
     }
+
+    /// True for the whole `--snapshot` process: no network, no sampling, no hardware loops.
+    nonisolated static let isRendering = CommandLine.arguments.contains("--snapshot")
 
     /// Seconds offset for time-based animations (faces read `SnapshotHarness.time` if set).
     static var time: Double?

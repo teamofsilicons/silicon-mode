@@ -26,9 +26,11 @@ enum UISound: String, CaseIterable, Sendable {
 /// * **Panic alarm**: a dedicated real-time loop voice (`PanicVoice`) plays the selected `panic-<id>.wav`
 ///   seamlessly, with a 150 ms fade-in and a 250 ms fade-out, at the user's panic volume.
 ///
-/// The engine only runs while something is sounding (it stops after 10 s of silence, so a Mac sitting in
-/// Silicon Mode for hours doesn't keep the audio hardware awake) and is rebuilt when the output device or its
-/// format changes (`AVAudioEngineConfigurationChange`), resuming an alarm that was playing.
+/// The engine only runs while something is sounding (it stops after a few seconds of silence, so a Mac sitting
+/// in Silicon Mode for hours doesn't keep the audio hardware and its IO thread awake) and is rebuilt when the
+/// output device or its format changes (`AVAudioEngineConfigurationChange`), resuming an alarm that was playing.
+/// Stopping the engine blocks for ~20 ms while the hardware winds down, so it happens on a background queue;
+/// the next sound waits for an in-flight stop (rare) before restarting the engine.
 ///
 /// Volume & mute: everything plays through the current default output device and respects the system volume
 /// and mute. We deliberately never change system volume or unmute: a muted Mac, or one routed to headphones,
@@ -65,13 +67,13 @@ final class SoundPlayer {
 
     /// Master level for UI one-shots (0...1). The panic alarm has its own volume.
     var uiVolume: Float = 1 {
-        didSet { graph?.uiMixer.outputVolume = uiVolume }
+        didSet { settleStop(); graph?.uiMixer.outputVolume = uiVolume }
     }
 
     /// True while the panic alarm (not a settings preview) is sounding or fading in.
     var isPanicPlaying: Bool { panicMode == .alarm }
     /// Whether the audio engine (and so the output device) is currently running. Diagnostics.
-    var isEngineRunning: Bool { graph?.engine.isRunning ?? false }
+    var isEngineRunning: Bool { stopIssued ? false : (graph?.engine.isRunning ?? false) }
     /// Whether the panic voice is producing sound right now (as last reported by the audio thread).
     var isPanicAudible: Bool { graph.map { !$0.voice.isSilent } ?? false }
     /// When the sounding alarm's loop last started from its first sample (for syncing panic visuals to `beat`);
@@ -81,7 +83,7 @@ final class SoundPlayer {
     private static let log = Logger(subsystem: "ai.tos.mode", category: "sound")
     nonisolated private static let keypressVariants = ["keypress", "keypress-2", "keypress-3"]
     private static let poolSize = 6
-    private static let idleTimeout: Double = 10
+    private static let idleTimeout: Double = 4
 
     private let directory: URL?
     private let offline: Bool
@@ -98,6 +100,11 @@ final class SoundPlayer {
     private var loopStartedAt: Date?
     private var idleTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    /// Engine stops run here (they block while the audio hardware winds down).
+    private let engineControl = DispatchQueue(label: "ai.tos.mode.sound.engine", qos: .utility)
+    /// A background stop was issued and hasn't been waited for: drain `engineControl` before touching
+    /// the engine or its players again.
+    private var stopIssued = false
 
     /// - Parameters:
     ///   - soundsDirectory: where the WAVs live; defaults to the app bundle's Resources/Sounds.
@@ -229,8 +236,16 @@ final class SoundPlayer {
         }
     }
 
+    /// Waits for a background engine stop to finish (usually long done; at most ~20 ms).
+    private func settleStop() {
+        guard stopIssued else { return }
+        engineControl.sync {}
+        stopIssued = false
+    }
+
     /// Builds the graph if needed and makes sure the engine runs. Returns nil if audio output is unavailable.
     private func ensureRunning() -> Graph? {
+        settleStop()
         // A stopped engine may still point at an output device that is no longer the default: rebuild.
         if let g = graph, !offline, !g.engine.isRunning, g.device != Self.defaultOutputDevice() {
             teardown()
@@ -267,6 +282,7 @@ final class SoundPlayer {
     }
 
     private func teardown() {
+        settleStop()
         guard let g = graph else { return }
         if let o = g.observer { NotificationCenter.default.removeObserver(o) }
         g.engine.stop()
@@ -291,20 +307,33 @@ final class SoundPlayer {
         idleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self else { return }
-            if !self.suspendIfIdle(), self.graph?.engine.isRunning == true { self.scheduleIdleCheck(after: 2) }
+            if !self.suspendIfIdle(), self.isEngineRunning { self.scheduleIdleCheck(after: 2) }
         }
     }
 
-    /// Stops the engine (letting the audio hardware idle) if nothing is sounding. The next sound restarts it,
-    /// which costs ~20 ms once. Returns true if it stopped.
+    /// Stops the engine (letting the audio hardware idle) if nothing is sounding. The stop itself runs on a
+    /// background queue, off the main thread. The next sound restarts the engine, which costs a few ms once.
+    /// Returns true if a stop was started.
     @discardableResult
     func suspendIfIdle() -> Bool {
-        guard let g = graph, g.engine.isRunning else { return false }
+        guard !stopIssued, let g = graph, g.engine.isRunning else { return false }
         let now = ProcessInfo.processInfo.systemUptime
         guard panicMode == .off, g.voice.isSilent, !g.busyUntil.contains(where: { $0 > now }) else { return false }
-        for p in g.players { p.stop() }
-        g.engine.stop()
+        let handle = EngineHandle(engine: g.engine, players: g.players)
+        stopIssued = true
+        engineControl.async {
+            for p in handle.players { p.stop() }
+            handle.engine.stop()
+        }
         return true
+    }
+
+    /// The engine and its players, handed to the stop queue. Nothing else touches them until that stop is
+    /// settled (`settleStop()` runs first in every path that uses the engine).
+    private final class EngineHandle: @unchecked Sendable {
+        let engine: AVAudioEngine
+        let players: [AVAudioPlayerNode]
+        init(engine: AVAudioEngine, players: [AVAudioPlayerNode]) { self.engine = engine; self.players = players }
     }
 
     private func playOneShot(_ name: String) {

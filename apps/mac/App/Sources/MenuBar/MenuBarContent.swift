@@ -163,6 +163,12 @@ enum MenuBarSamples {
         s.append(AgentSession(provider: "claude-code", nativeID: "demo-5", title: "Port the settings screen to SwiftUI", cwd: "/Users/you/code/mac-app",
                               state: .working, startedAt: now.addingTimeInterval(-300), updatedAt: now,
                               recentEvents: [ev("Edited Settings/GeneralPane.swift", .tool, 9)]))
+        // A Silicon: one row for all of its ISIs, with its avatar and the TOS badge.
+        s.append(AgentSession(provider: "silicon", nativeID: "si:demo_scout", title: "Scout", state: .working,
+                              startedAt: now.addingTimeInterval(-420), updatedAt: now.addingTimeInterval(-4),
+                              recentEvents: [ev("Heartbeat: check the inbox", .user, 420), ev("Drafted the weekly digest", .assistant, 4)],
+                              identity: AgentIdentity(kind: AgentIdentity.siliconKind, handle: "si:demo_scout", displayName: "Scout",
+                                                      members: [.init(name: "digest", state: .working), .init(name: "inbox", state: .finished)])))
         return s
     }()
 

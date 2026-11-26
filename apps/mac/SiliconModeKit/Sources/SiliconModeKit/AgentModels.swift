@@ -141,20 +141,131 @@ public struct AgentSession: Codable, Hashable, Sendable, Identifiable {
     /// Newest last.
     public var recentEvents: [AgentEvent]
     public var pendingQuestions: [AgentQuestion]
+    /// Who this agent is, when it has an identity of its own (a Silicon). Optional and absent from
+    /// older encodings.
+    public var identity: AgentIdentity?
 
     public init(provider: String, nativeID: String, title: String, cwd: String? = nil, state: AgentState,
                 startedAt: Date? = nil, updatedAt: Date, pid: Int32? = nil, model: String? = nil,
-                recentEvents: [AgentEvent] = [], pendingQuestions: [AgentQuestion] = []) {
+                recentEvents: [AgentEvent] = [], pendingQuestions: [AgentQuestion] = [], identity: AgentIdentity? = nil) {
         self.id = "\(provider):\(nativeID)"
         self.provider = provider; self.nativeID = nativeID; self.title = title; self.cwd = cwd
         self.state = state; self.startedAt = startedAt; self.updatedAt = updatedAt; self.pid = pid
         self.model = model; self.recentEvents = recentEvents; self.pendingQuestions = pendingQuestions
+        self.identity = identity
     }
 
     /// Project folder name for display.
     public var projectName: String? {
         guard let cwd, !cwd.isEmpty else { return nil }
         return URL(fileURLWithPath: cwd).lastPathComponent
+    }
+}
+
+/// The identity of an agent that is someone (today: a Silicon), shown as one row with a profile
+/// photo instead of one row per session.
+public struct AgentIdentity: Codable, Hashable, Sendable {
+    /// One of the member sessions (a Silicon's ISI) and its state.
+    public struct Member: Codable, Hashable, Sendable {
+        public var name: String
+        public var state: AgentState
+        public init(name: String, state: AgentState) { self.name = name; self.state = state }
+    }
+
+    public static let siliconKind = "silicon"
+    /// Hosts profile photos may be fetched from (https only).
+    public static let avatarHosts: Set<String> = ["iris.teamofsilicons.com", "accounts.teamofsilicons.com"]
+
+    /// "silicon".
+    public var kind: String
+    /// "si:<handle>" (can change; `uuid` never does).
+    public var handle: String
+    public var uuid: String?
+    public var displayName: String?
+    /// Profile photo. For a Silicon with a known uuid, its Iris default photo.
+    public var avatarURL: URL?
+    /// Member sessions (ISIs), most urgent first.
+    public var members: [Member]
+
+    public init(kind: String, handle: String, uuid: String? = nil, displayName: String? = nil,
+                avatarURL: URL? = nil, members: [Member] = []) {
+        self.kind = kind; self.handle = handle; self.uuid = uuid; self.displayName = displayName
+        self.avatarURL = avatarURL; self.members = members
+    }
+
+    public var isSilicon: Bool { kind == Self.siliconKind }
+
+    /// Display name, else the prettified handle ("si:night_owl.acme" → "Night owl").
+    public var name: String {
+        if let d = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !d.isEmpty { return d }
+        return Self.prettyHandle(handle)
+    }
+
+    /// One or two letters for a monogram avatar: initials of a real display name ("Ada Lovelace" →
+    /// "AL"), else the first letter of the name (a handle's words aren't a first and last name).
+    public var monogram: String {
+        if let d = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !d.isEmpty {
+            let words = d.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" }).filter { !$0.isEmpty }
+            if words.count >= 2, let a = words[0].first, let b = words[1].first { return String([a, b]).uppercased() }
+        }
+        return String(name.prefix(1)).uppercased()
+    }
+
+    /// "scout working · tidy finished" (members in urgency order).
+    public var membersSummary: String {
+        members.map { "\($0.name) \($0.state.label.lowercased())" }.joined(separator: " · ")
+    }
+
+    /// Avatar URL when it is https on an allowed host (anything else must not be fetched).
+    public var allowedAvatarURL: URL? {
+        guard let u = avatarURL, u.scheme?.lowercased() == "https", let h = u.host?.lowercased(),
+              Self.avatarHosts.contains(h) else { return nil }
+        return u
+    }
+
+    /// "si:night_owl.acme" → "Night owl": drops the "si:" prefix and any ".org" suffix,
+    /// turns "_" and "-" into spaces and capitalizes the first letter.
+    public static func prettyHandle(_ handle: String) -> String {
+        var h = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let colon = h.firstIndex(of: ":") { h = String(h[h.index(after: colon)...]) }
+        if let dot = h.firstIndex(of: ".") { h = String(h[..<dot]) }
+        h = h.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ").joined(separator: " ")
+        guard let f = h.first else { return handle }
+        return f.uppercased() + h.dropFirst()
+    }
+
+    /// The Silicon's default profile photo (public, deterministic per account uuid).
+    public static func irisAvatarURL(uuid: String) -> URL? {
+        guard let u = UUID(uuidString: uuid.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        return URL(string: "https://iris.teamofsilicons.com/pfp/silicon?id=\(u.uuidString.lowercased())")
+    }
+
+    // Tolerant decoding: members with an unknown state are dropped, not fatal.
+    private enum Keys: String, CodingKey { case kind, handle, uuid, displayName, avatarURL, members }
+    private struct LossyMember: Decodable {
+        let value: Member?
+        init(from decoder: Decoder) throws { value = try? Member(from: decoder) }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        kind = try c.decode(String.self, forKey: .kind)
+        handle = try c.decode(String.self, forKey: .handle)
+        uuid = try? c.decodeIfPresent(String.self, forKey: .uuid)
+        displayName = try? c.decodeIfPresent(String.self, forKey: .displayName)
+        avatarURL = try? c.decodeIfPresent(URL.self, forKey: .avatarURL)
+        members = ((try? c.decodeIfPresent([LossyMember].self, forKey: .members)) ?? nil)?.compactMap(\.value) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(handle, forKey: .handle)
+        try c.encodeIfPresent(uuid, forKey: .uuid)
+        try c.encodeIfPresent(displayName, forKey: .displayName)
+        try c.encodeIfPresent(avatarURL, forKey: .avatarURL)
+        try c.encode(members, forKey: .members)
     }
 }
 

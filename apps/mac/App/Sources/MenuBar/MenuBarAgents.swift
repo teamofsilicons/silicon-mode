@@ -45,6 +45,8 @@ struct AgentRowModel: Equatable {
 
     let id: String
     let provider: String
+    /// A Silicon's identity (photo + TOS badge in the avatar).
+    let identity: AgentIdentity?
     let title: String
     let subtitle: String
     let elapsed: String
@@ -55,9 +57,12 @@ struct AgentRowModel: Equatable {
     init(_ s: AgentSession, now: Date, withEvents: Bool) {
         id = s.id
         provider = s.provider
+        identity = s.identity
         let providerName = ProviderCatalog.info(for: s.provider).name
         title = s.title.isEmpty ? (s.projectName ?? providerName) : s.title
-        subtitle = [s.projectName ?? providerName, s.recentEvents.last?.text].compactMap { $0 }.joined(separator: " · ")
+        // A Silicon's subtitle says what its ISIs are doing; others say which project.
+        let context = s.identity.flatMap { $0.members.isEmpty ? nil : $0.membersSummary } ?? s.projectName ?? providerName
+        subtitle = [context, s.recentEvents.last?.text].compactMap { $0 }.joined(separator: " · ")
         switch s.state {
         case .working, .needsYou:
             elapsed = MBFormat.elapsed(now.timeIntervalSince(s.startedAt ?? s.updatedAt))
@@ -131,7 +136,7 @@ struct AgentRow: View, Equatable {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
                 HStack(spacing: 10) {
-                    AgentAvatar(provider: row.provider, state: row.state)
+                    AgentAvatar(provider: row.provider, identity: row.identity, state: row.state)
                     VStack(alignment: .leading, spacing: 1.5) {
                         Text(row.title)
                             .font(Theme.allo(13, .medium))
@@ -184,9 +189,11 @@ struct AgentRow: View, Equatable {
     }
 }
 
-/// Provider mark with a knocked-out state dot; working agents get a slow sonar ring.
+/// The agent's avatar (a Silicon's photo + TOS badge, else its provider mark) with a knocked-out
+/// state dot; working agents get a slow sonar ring.
 struct AgentAvatar: View {
     let provider: String
+    var identity: AgentIdentity? = nil
     let state: AgentState
     var size: CGFloat = 28
 
@@ -195,7 +202,7 @@ struct AgentAvatar: View {
 
     var body: some View {
         let ring = dot + gap * 2
-        ProviderMark(provider: provider, size: size)
+        AgentAvatarView(provider: provider, identity: identity, state: state, size: size, showsState: false)
             .mask {
                 Rectangle()
                     .overlay(alignment: .bottomTrailing) {

@@ -8,6 +8,10 @@ import Foundation
 ///   (`<home>/.silicon/sessions/active/<isi>/<id>.json`, `…/events/<id>.jsonl`) — cheaper than `show`.
 /// - ISIs run with skip-permissions, so there are no approvals. An ISI whose turn ended on a line
 ///   ending in "?" is shown as a question and answered with `{"action":"send"}` (delivered immediately).
+/// - One row per Silicon: all of a Silicon's ISI sessions are grouped into one `AgentSession`
+///   (`nativeID` = "si:<handle>") carrying an `AgentIdentity` (uuid + display name from
+///   `<home>/.accounts/session.json`, only the `account` object; tokens are never decoded or kept).
+///   `silicon.yaml` is never read: it holds the Silicon's secret token.
 public final class SiliconProvider: AgentProvider, @unchecked Sendable {
     public let info = ProviderCatalog.info(for: "silicon")
     let env: MoreEnvironment
@@ -32,6 +36,26 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
         var question: (seq: Int, text: String, at: Date?)?
         var natives: Set<String>
         var model: String?
+        /// Time of the last `start` event (the current / latest turn).
+        var turnStartedAt: Date? = nil
+    }
+
+    /// The Silicon's own account, from `<home>/.accounts/session.json` → `account`.
+    struct Account: Sendable, Equatable {
+        var uuid: String?
+        var id: String?
+        var displayName: String?
+    }
+
+    /// One ISI session, before grouping.
+    struct Part: Sendable {
+        var isi: String
+        var state: AgentState
+        var updatedAt: Date
+        var turnStartedAt: Date?
+        var model: String?
+        var events: [AgentEvent]
+        var questions: [AgentQuestion]
     }
 
     private struct State {
@@ -41,6 +65,7 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
         var listAt: Date = .distantPast
         var records: [String: (FileStamp, Record?)] = [:]
         var tails: [String: (FileStamp, Tail)] = [:]
+        var accounts: [String: (FileStamp?, Account?)] = [:]
     }
 
     private let state = Locked(State())
@@ -65,19 +90,29 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
         }
         var out: [AgentSession] = []
         var natives = Set<String>()
-        for s in state.current.silicons {
-            guard let home = s.home else { continue }
-            let sessions = scanSilicon(s, home: home, ctx: ctx, pid: d.pid, natives: &natives)
-            out += sessions
+        var seen = Set<String>()
+        for s in state.current.silicons where seen.insert(s.id).inserted {
+            guard let home = s.home.map({ expandHome($0) }) else { continue }
+            let parts = scanSilicon(s, home: home, ctx: ctx, pid: d.pid, natives: &natives)
+            if let grouped = group(s, parts: parts, account: account(home: home), pid: d.pid, maxEvents: ctx.maxEvents) {
+                out.append(grouped)
+            }
         }
         env.index.setClaims(natives, owner: info.id)
         return out
     }
 
-    func scanSilicon(_ s: Connected, home: String, ctx: ScanContext, pid: Int32, natives: inout Set<String>) -> [AgentSession] {
+    private func expandHome(_ home: String) -> String {
+        if home == "~" { return env.home.path }
+        if home.hasPrefix("~/") { return env.home.appendingPathComponent(String(home.dropFirst(2))).path }
+        return home
+    }
+
+    /// One `Part` per ISI session that is alive or recently active.
+    func scanSilicon(_ s: Connected, home: String, ctx: ScanContext, pid: Int32, natives: inout Set<String>) -> [Part] {
         let base = (home as NSString).appendingPathComponent(".silicon/sessions")
         let active = (base as NSString).appendingPathComponent("active")
-        var out: [AgentSession] = []
+        var out: [Part] = []
         for isiDir in listings.subdirs(active) {
             for file in listings.files(isiDir, { $0.hasSuffix(".json") }) {
                 guard let st = FileStamp.of(file) else { continue }
@@ -102,7 +137,6 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
                 let running = r.status == "running"
                 if !running, r.status != "paused", ctx.now.timeIntervalSince(lastAt) > ctx.activeWindow { continue }
                 natives.formUnion(tail?.natives ?? [])
-                let nativeID = "\(s.id)/\(r.isi)/\(r.id)"
                 var stateValue: AgentState
                 var questions: [AgentQuestion] = []
                 if running {
@@ -116,19 +150,97 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
                                                   lastActivity: lastAt, ctx: ctx) ?? .idle
                     if let q = tail?.question, activity == .ended {
                         questions.append(AgentQuestion(
-                            id: "silicon|\(s.id)|\(r.isi)|\(r.id)|\(q.seq)", sessionID: "\(info.id):\(nativeID)", provider: info.id,
+                            id: "silicon|\(s.id)|\(r.isi)|\(r.id)|\(q.seq)", sessionID: "\(info.id):\(s.id)", provider: info.id,
                             kind: .input, title: "\(r.isi) asks", detail: EventText.clip(q.text, max: 400), options: [],
                             allowsFreeText: true, createdAt: q.at ?? lastAt, answerable: true))
                         stateValue = .needsYou
                     }
                 }
-                out.append(AgentSession(provider: info.id, nativeID: nativeID,
-                                        title: MoreText.title(r.title, fallback: "\(r.isi) · \(s.id)"), cwd: home,
-                                        state: stateValue, startedAt: r.first, updatedAt: lastAt, pid: pid, model: tail?.model,
-                                        recentEvents: Array((tail?.events ?? []).suffix(ctx.maxEvents)), pendingQuestions: questions))
+                out.append(Part(isi: r.isi, state: stateValue, updatedAt: lastAt, turnStartedAt: tail?.turnStartedAt,
+                                model: tail?.model, events: Array((tail?.events ?? []).suffix(ctx.maxEvents)),
+                                questions: questions))
             }
         }
         return out
+    }
+
+    /// One row for the whole Silicon:
+    /// - state: the most urgent ISI state; `updatedAt`: the latest ISI activity
+    /// - `startedAt`: start of the current turn (latest `start` among the ISIs in that most urgent
+    ///   state, else the latest anywhere), so elapsed time means "this turn", not "since created"
+    /// - events: every ISI's, merged by time (ids are unique per ISI session)
+    /// - questions: every ISI's, `sessionID` pointing at the group; question ids are unchanged, so
+    ///   answers still route to the right ISI
+    func group(_ s: Connected, parts: [Part], account: Account?, pid: Int32, maxEvents: Int) -> AgentSession? {
+        guard let top = parts.min(by: { $0.state.rank < $1.state.rank }) else { return nil }
+        let state = top.state
+        let updatedAt = parts.map(\.updatedAt).max() ?? top.updatedAt
+        let startedAt = parts.filter { $0.state == state }.compactMap(\.turnStartedAt).max()
+            ?? parts.compactMap(\.turnStartedAt).max()
+        let model = parts.sorted { $0.updatedAt > $1.updatedAt }.lazy.compactMap(\.model).first
+        let events = parts.flatMap(\.events).enumerated()
+            .sorted { $0.element.at != $1.element.at ? $0.element.at < $1.element.at : $0.offset < $1.offset }
+            .map(\.element)
+        let groupID = "\(info.id):\(s.id)"
+        let questions = parts.flatMap(\.questions).map { q -> AgentQuestion in
+            var q = q
+            q.sessionID = groupID
+            return q
+        }.sorted { $0.createdAt < $1.createdAt }
+        var members: [String: AgentState] = [:]
+        for p in parts {
+            if let m = members[p.isi], m.rank <= p.state.rank { continue }
+            members[p.isi] = p.state
+        }
+        let identity = AgentIdentity(
+            kind: AgentIdentity.siliconKind, handle: s.id, uuid: account?.uuid, displayName: account?.displayName,
+            avatarURL: account?.uuid.flatMap(AgentIdentity.irisAvatarURL(uuid:)),
+            members: members.map { AgentIdentity.Member(name: $0.key, state: $0.value) }
+                .sorted { $0.state.rank != $1.state.rank ? $0.state.rank < $1.state.rank : $0.name < $1.name })
+        return AgentSession(provider: info.id, nativeID: s.id, title: identity.name, cwd: nil, state: state,
+                            startedAt: startedAt, updatedAt: updatedAt, pid: pid, model: model,
+                            recentEvents: Array(events.suffix(max(0, maxEvents))), pendingQuestions: questions,
+                            identity: identity)
+    }
+
+    // MARK: Identity
+
+    /// The Silicon's account (uuid, id, display name), cached by the session file's stamp.
+    func account(home: String) -> Account? {
+        let path = (home as NSString).appendingPathComponent(".accounts/session.json")
+        let st = FileStamp.of(path)
+        if let c = state.current.accounts[home], c.0 == st { return c.1 }
+        let acct = st == nil ? nil : MoreFiles.read(path, max: 256 << 10).flatMap(Self.account(fromSessionFile:))
+        state.withLock { $0.accounts[home] = (st, acct) }
+        return acct
+    }
+
+    /// Decodes only `account{uuid,id,display_name}`. The file also holds access and refresh tokens:
+    /// they are never decoded into values, kept or logged.
+    static func account(fromSessionFile data: Data) -> Account? {
+        struct File: Decodable {
+            struct Acct: Decodable {
+                var uuid: String?
+                var id: String?
+                var displayName: String?
+                enum CodingKeys: String, CodingKey { case uuid, id, displayName = "display_name" }
+                init(from decoder: Decoder) throws {
+                    let c = try decoder.container(keyedBy: CodingKeys.self)
+                    uuid = try? c.decodeIfPresent(String.self, forKey: .uuid)
+                    id = try? c.decodeIfPresent(String.self, forKey: .id)
+                    displayName = try? c.decodeIfPresent(String.self, forKey: .displayName)
+                }
+            }
+            var account: Acct?
+        }
+        guard let a = (try? JSONDecoder().decode(File.self, from: data))?.account else { return nil }
+        func clean(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            return t
+        }
+        let uuid = clean(a.uuid).flatMap { UUID(uuidString: $0) != nil ? $0.lowercased() : nil }
+        let acct = Account(uuid: uuid, id: clean(a.id), displayName: clean(a.displayName).map { EventText.clip($0, max: 60) })
+        return acct.uuid == nil && acct.id == nil && acct.displayName == nil ? nil : acct
     }
 
     public func answer(_ question: AgentQuestion, with answer: AgentAnswer) async throws {
@@ -189,6 +301,7 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
         var lastText: (seq: Int, text: String, at: Date?)?
         var question: (seq: Int, text: String, at: Date?)?
         var model: String?
+        var turnStartedAt: Date?
         for line in lines {
             guard let e = J.parse(line) else { continue }
             let type = e["type"].string ?? ""
@@ -203,6 +316,7 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
                 events.add(id, at: at, .user, e["text"].string)
                 activity = .running
                 lastText = nil; question = nil
+                if type == "start", let at { turnStartedAt = at }
             case "text":
                 events.add(id, at: at, .assistant, e["text"].string)
                 if let t = e["text"].text { lastText = (seq, t, at) }
@@ -236,7 +350,7 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
             if let at, type != "config" { lastAt = at }
         }
         return Tail(events: events.tail(maxEvents), activity: activity, pendingTool: openTools.values.first, lastAt: lastAt,
-                    question: question, natives: natives, model: model)
+                    question: question, natives: natives, model: model, turnStartedAt: turnStartedAt)
     }
 }
 

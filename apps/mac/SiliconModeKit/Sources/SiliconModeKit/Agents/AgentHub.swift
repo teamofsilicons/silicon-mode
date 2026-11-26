@@ -5,11 +5,22 @@ public actor AgentHub {
     public struct Snapshot: Sendable, Equatable {
         public var sessions: [AgentSession]
         public var counts: AgentCounts
+        /// When the scan ran. Kept for ordering (callers drop snapshots older than one they applied)
+        /// but not part of equality: an unchanged scan compares equal, so nothing republishes.
         public var takenAt: Date
         public static let empty = Snapshot(sessions: [], counts: AgentCounts(), takenAt: .distantPast)
 
+        public init(sessions: [AgentSession], counts: AgentCounts, takenAt: Date) {
+            self.sessions = sessions; self.counts = counts; self.takenAt = takenAt
+        }
+
         public var pendingQuestions: [AgentQuestion] {
             sessions.flatMap(\.pendingQuestions).sorted { $0.createdAt < $1.createdAt }
+        }
+
+        /// Same content (sessions and counts); `takenAt` is ignored.
+        public static func == (a: Snapshot, b: Snapshot) -> Bool {
+            a.counts == b.counts && a.sessions == b.sessions
         }
     }
 

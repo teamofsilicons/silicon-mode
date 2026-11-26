@@ -271,8 +271,8 @@ struct HUDAgentList: View {
             HStack(spacing: 10) {
                 HStack(spacing: -5) {
                     ForEach(Array(sessions.prefix(5).enumerated()), id: \.element.id) { i, s in
-                        HUDAgentMark(provider: s.provider, size: 22)
-                            .overlay(Circle().strokeBorder(Theme.Night.background.opacity(0.9), lineWidth: 1.5))
+                        AgentAvatarView(session: s, size: 22, showsState: false)
+                            .background(Circle().fill(Theme.Night.background.opacity(0.9)).padding(-1.5))
                             .zIndex(Double(10 - i))
                     }
                 }
@@ -317,7 +317,7 @@ struct HUDAgentRow: View {
     var body: some View {
         let needs = session.state == .needsYou
         HStack(alignment: .top, spacing: 11) {
-            HUDAgentMark(provider: session.provider, state: session.state, size: 26)
+            AgentAvatarView(session: session, size: 26)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {

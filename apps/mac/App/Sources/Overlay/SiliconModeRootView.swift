@@ -169,7 +169,7 @@ private struct SiliconModeFaceLayer: View {
         let s = model.settings
         let id = preview?.faceID ?? s.faceID
         let descriptor = FaceRegistry.face(id)
-        let sessions = preview?.sessions ?? model.sessions
+        let sessions = preview?.sessions ?? model.faceSessions
         descriptor.make(FaceContext(
             sessions: sessions,
             counts: AgentCounts(sessions),

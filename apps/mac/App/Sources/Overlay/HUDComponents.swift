@@ -15,9 +15,11 @@ struct HUDSource {
     /// Preview-only: force the agent list open/closed (nil = the user's remembered choice).
     var agentsCollapsed: Bool? = nil
 
+    /// While Silicon Mode is on, the agents it shows (running + finished since entry); questions
+    /// are every pending one.
     @MainActor
     init(model: AppModel) {
-        sessions = model.sessions
+        sessions = model.modeAgents
         questions = model.pendingQuestions
         settings = model.settings
         answerErrors = model.answerErrors

@@ -29,7 +29,13 @@ public struct ModeSettings: Codable, Equatable, Sendable {
     /// Face animation frame rate (30 saves energy on a laptop running for hours; 60 is smoother).
     public var faceFrameRate: Double = 30
 
-    // MARK: HUD
+    // MARK: Face furniture
+    /// What sits on top of the face, corner by corner (see `FurniturePiece`).
+    public var furniture: [FurniturePiece] = FurniturePiece.defaults
+    /// Hide all face furniture and enjoy just the face (chrome stays).
+    public var furnitureHidden = false
+
+    // MARK: HUD (pre-furniture toggles: still decoded for migration, no longer used by the UI)
     public var showAgentCounts = true
     public var showAgentList = true
     public var showTailLogs = true
@@ -92,6 +98,17 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         v("showTailLogs", \.showTailLogs)
         v("showQuestions", \.showQuestions)
         v("tailLogCount", \.tailLogCount)
+        // Face furniture. No `furniture` key (settings from before furniture): carry the old HUD
+        // toggles over, so the overlay keeps its look.
+        if c.contains(AnyKey("furniture")) {
+            if let list = try? c.decode(LossyFurnitureList.self, forKey: AnyKey("furniture")) {
+                s.furniture = FurniturePiece.sanitized(list.pieces)
+            }
+        } else {
+            s.furniture = FurniturePiece.migrated(showAgentCounts: s.showAgentCounts, showAgentList: s.showAgentList,
+                                                  showTailLogs: s.showTailLogs, showQuestions: s.showQuestions)
+        }
+        v("furnitureHidden", \.furnitureHidden)
         v("panicEnabled", \.panicEnabled)
         v("panicSoundEnabled", \.panicSoundEnabled)
         v("panicRatio", \.panicRatio)
@@ -121,6 +138,7 @@ public struct ModeSettings: Codable, Equatable, Sendable {
         s.faceFrameRate = s.faceFrameRate >= 45 ? 60 : 30
         s.panicVolume = min(max(s.panicVolume, 0), 1)
         s.menuBarHoldSeconds = min(max(s.menuBarHoldSeconds, 0), 600)
+        s.furniture = FurniturePiece.sanitized(s.furniture)
         return s
     }
 }
