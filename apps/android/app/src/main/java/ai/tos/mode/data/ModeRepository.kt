@@ -37,6 +37,24 @@ sealed interface AnswerState {
     data class Failed(val message: String) : AnswerState
 }
 
+/** What a question card says about an answer row. Pure, so it is unit tested. */
+object AnswerStates {
+    /** Whether this phone sent [answer] (`answered_by` is its `devices.id`). */
+    fun isMine(answer: Answer, phoneDeviceId: String?): Boolean {
+        val by = answer.answeredBy ?: return false
+        return phoneDeviceId != null && by.equals(phoneDeviceId, ignoreCase = true)
+    }
+
+    /** The chosen option's label, else the typed text. */
+    fun label(question: Question?, optionId: String?, text: String?): String =
+        optionId?.let { id -> question?.options?.firstOrNull { it.id == id }?.label ?: id } ?: text?.trim().orEmpty()
+
+    /** A question with an answer in: [AnswerState.Sent] when it is this phone's, else who did answer. */
+    fun settled(answer: Answer, question: Question?, phoneDeviceId: String?): AnswerState =
+        if (isMine(answer, phoneDeviceId)) AnswerState.Sent(label(question, answer.optionId, answer.text))
+        else AnswerState.Elsewhere(answer.answeredFrom)
+}
+
 data class StatsState(
     val loading: Boolean = false,
     val error: String? = null,
@@ -83,6 +101,9 @@ class ModeRepository(
     /** Questions whose outcome was shown and that stay hidden until the Mac resolves them. */
     private val retired = mutableSetOf<String>()
     private val retiring = mutableSetOf<String>()
+
+    /** The answer row behind a question id, as seen on refresh or live (who answered, and with what). */
+    private val answerRows = mutableMapOf<String, Answer>()
 
     private var refreshJob: Job? = null
     private var statsJob: Job? = null
@@ -146,9 +167,19 @@ class ModeRepository(
         val open = async { api.openAnswers(deviceId) }
         val pendingOnServer = questions.await()
         val pending = pendingOnServer.map { it.id }.toSet()
+        val openAnswers = open.await()
+        answerRows.values.removeAll { it.deviceId == deviceId && it.questionId !in pending }
+        openAnswers.forEach { answerRows[it.questionId] = it }
         // A question stays pending until its Mac applies the answer. One that already has an
         // answer (from here, the web, another phone) is settled for us: don't offer it again.
-        val answered = open.await().map { it.questionId }.toSet()
+        val answered = openAnswers.map { it.questionId }.toSet()
+        // An answer from this phone whose response was lost (the card says it failed) went through.
+        val phone = prefs.phoneDeviceId
+        openAnswers.filter { AnswerStates.isMine(it, phone) && _answers.value[it.questionId] is AnswerState.Failed }.forEach { a ->
+            val settled = AnswerStates.settled(a, pendingOnServer.firstOrNull { it.id == a.questionId }, phone)
+            _answers.update { it + (a.questionId to settled) }
+            retireQuestion(deviceId, a.questionId)
+        }
         // Cards that already showed their outcome stay hidden; forget ids the server dropped.
         retired.retainAll(pending + retiring)
         val visible = pendingOnServer.filterNot { it.id in retired || (it.id in answered && it.id !in retiring && _answers.value[it.id] == null) }
@@ -198,7 +229,7 @@ class ModeRepository(
     fun answer(question: Question, optionId: String?, text: String?, phoneDeviceId: String?) {
         val current = _answers.value[question.id]
         if (current is AnswerState.Sending || current is AnswerState.Sent) return
-        val label = optionId?.let { id -> question.options.firstOrNull { it.id == id }?.label } ?: text?.trim().orEmpty()
+        val label = AnswerStates.label(question, optionId, text)
         _answers.update { it + (question.id to AnswerState.Sending(optionId)) }
         scope.launch {
             val next = try {
@@ -207,15 +238,34 @@ class ModeRepository(
                     result.ok -> AnswerState.Sent(label)
                     result.reason == "expired" -> AnswerState.Expired
                     result.reason == "invalid_option" -> AnswerState.Failed("That option is no longer offered.")
+                    // An answer is in, possibly this phone's own from an attempt whose response was lost.
+                    result.reason == "already_answered" || result.reason == "answered" ->
+                        settleFromServer(question) ?: AnswerState.Elsewhere(null)
                     result.reason == "not_found" -> AnswerState.Elsewhere(null)
                     else -> AnswerState.Elsewhere(if (result.reason == "resolved_on_mac") "mac" else null)
                 }
             } catch (e: CellException) {
+                // Possibly committed with only the response lost; the realtime row settles that.
                 AnswerState.Failed(e.userMessage)
             }
-            _answers.update { it + (question.id to next) }
-            if (next !is AnswerState.Failed) retireQuestion(question.deviceId, question.id)
+            // A failure only replaces "Sending…": the realtime row may already have said how it went.
+            _answers.update { states ->
+                if (next is AnswerState.Failed && states[question.id] !is AnswerState.Sending) states
+                else states + (question.id to next)
+            }
+            if (_answers.value[question.id] !is AnswerState.Failed) retireQuestion(question.deviceId, question.id)
         }
+    }
+
+    /** Asks the cell who answered [question]: this phone, or someone else. Null when it can't tell. */
+    private suspend fun settleFromServer(question: Question): AnswerState? {
+        val row = try {
+            api.answerFor(question.id)
+        } catch (e: CellException) {
+            null
+        } ?: return null
+        answerRows[question.id] = row
+        return AnswerStates.settled(row, question, prefs.phoneDeviceId)
     }
 
     fun dismissFailure(questionId: String) {
@@ -297,15 +347,28 @@ class ModeRepository(
                     val question = decode(row, Question.serializer()) ?: return
                     if (change.operation == "DELETE" || question.state != "pending") {
                         // Resolved somewhere. Keep this phone's own outcome; otherwise say who did.
-                        if (_answers.value[question.id] !is AnswerState.Sent) {
-                            val outcome = if (question.state == "expired") AnswerState.Expired
-                            else AnswerState.Elsewhere(if (question.state == "resolved_on_mac") "mac" else null)
-                            val known = _feeds.value[question.deviceId]?.questions?.any { it.id == question.id } == true
-                            if (known) {
-                                _answers.update { if (it[question.id] is AnswerState.Elsewhere) it else it + (question.id to outcome) }
+                        val current = _answers.value[question.id]
+                        if (current is AnswerState.Sent) return
+                        val shown = _feeds.value[question.deviceId]?.questions?.firstOrNull { it.id == question.id } ?: return
+                        val answerRow = answerRows[question.id]
+                        if (question.state == "answered" && answerRow == null && current is AnswerState.Failed) {
+                            // This phone tried and lost the response: find out whose answer won first.
+                            scope.launch {
+                                val settled = settleFromServer(shown) ?: AnswerState.Elsewhere(null)
+                                _answers.update { it + (question.id to settled) }
                                 retireQuestion(question.deviceId, question.id)
                             }
+                            return
                         }
+                        val outcome = when {
+                            question.state == "answered" && answerRow != null -> AnswerStates.settled(answerRow, shown, prefs.phoneDeviceId)
+                            current is AnswerState.Elsewhere -> current
+                            question.state == "expired" -> AnswerState.Expired
+                            question.state == "resolved_on_mac" -> AnswerState.Elsewhere("mac")
+                            else -> AnswerState.Elsewhere(null)
+                        }
+                        _answers.update { it + (question.id to outcome) }
+                        retireQuestion(question.deviceId, question.id)
                         return
                     }
                     if (question.id in retired) return
@@ -316,11 +379,19 @@ class ModeRepository(
                 }
                 "answers" -> {
                     val answer = decode(row, Answer.serializer()) ?: return
-                    val mine = answer.answeredBy != null && answer.answeredBy == prefs.phoneDeviceId
+                    answerRows[answer.questionId] = answer
+                    val question = _feeds.value[answer.deviceId]?.questions?.firstOrNull { it.id == answer.questionId } ?: return
                     val state = _answers.value[answer.questionId]
-                    if (mine || state is AnswerState.Sending || state is AnswerState.Sent) return
-                    val known = _feeds.value[answer.deviceId]?.questions?.any { it.id == answer.questionId } == true
-                    if (!known) return
+                    if (AnswerStates.isMine(answer, prefs.phoneDeviceId)) {
+                        // This phone's answer is in, even when the RPC's response never arrived (the
+                        // card said it failed) or hasn't yet.
+                        if (state == null || state is AnswerState.Failed || state is AnswerState.Sending) {
+                            _answers.update { it + (answer.questionId to AnswerStates.settled(answer, question, prefs.phoneDeviceId)) }
+                            retireQuestion(answer.deviceId, answer.questionId)
+                        }
+                        return
+                    }
+                    if (state is AnswerState.Sending || state is AnswerState.Sent) return
                     _answers.update { it + (answer.questionId to AnswerState.Elsewhere(answer.answeredFrom)) }
                     retireQuestion(answer.deviceId, answer.questionId)
                 }
@@ -346,6 +417,7 @@ class ModeRepository(
         _macs.value = emptyList()
         _feeds.value = emptyMap()
         _answers.value = emptyMap()
+        answerRows.clear()
         retired.clear()
         retiring.clear()
         _stats.value = StatsState()

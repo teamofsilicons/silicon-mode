@@ -76,6 +76,14 @@ actor CellClient {
         Keychain.save(s, Self.sessionAccount)
     }
 
+    /// Stores `s` only when there is no session yet: a sign-in callback never replaces the
+    /// account this phone is already signed in to. Returns whether it was stored.
+    func adoptIfSignedOut(_ s: CellSession) -> Bool {
+        guard session == nil else { return false }
+        adopt(s)
+        return true
+    }
+
     func clear() {
         inflight?.cancel()
         inflight = nil
@@ -166,8 +174,27 @@ actor CellClient {
     }
 
     func user() async throws -> CellUser {
-        struct Envelope: Decodable { var user: CellUser }
         let data = try await send(method: "GET", path: "auth/user", query: [], body: nil)
+        return try Self.decodeUser(data)
+    }
+
+    /// `GET /auth/user` with a session that is not stored yet (a sign-in callback): proves the cell
+    /// issued these tokens before they replace anything. No refresh, no signed-out handler.
+    func validate(_ s: CellSession) async throws -> CellUser {
+        var r = URLRequest(url: CellConfig.base.appending(path: "auth/user"))
+        r.httpMethod = "GET"
+        r.setValue(CellConfig.publishableKey, forHTTPHeaderField: "apikey")
+        r.setValue("Bearer \(s.accessToken)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await http.data(for: r) } catch { throw CellError.transport(error.localizedDescription) }
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else { throw CellError.http(code, Self.message(data)) }
+        return try Self.decodeUser(data)
+    }
+
+    private static func decodeUser(_ data: Data) throws -> CellUser {
+        struct Envelope: Decodable { var user: CellUser }
         do { return try CellJSON.decoder.decode(Envelope.self, from: data).user } catch { throw CellError.decoding("user") }
     }
 

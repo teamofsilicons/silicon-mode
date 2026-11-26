@@ -3,6 +3,7 @@ package ai.tos.mode.data
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineScope
@@ -115,9 +116,29 @@ sealed interface RealtimeFrame {
 }
 
 /**
+ * When the socket last heard from the server. A half-open connection (a failover without FIN/RST,
+ * a middlebox that dropped its state) accepts our pings into the send buffer and never errors, so
+ * silence is the only sign: the server answers every ping, so 70 s of it (two missed pongs) is dead.
+ */
+class Liveness(private val staleAfterMs: Long = STALE_AFTER_MS) {
+    @Volatile private var lastHeardAt = 0L
+
+    fun heard(nowMs: Long) {
+        lastHeardAt = nowMs
+    }
+
+    fun isStale(nowMs: Long): Boolean = nowMs - lastHeardAt > staleAfterMs
+
+    companion object {
+        const val STALE_AFTER_MS = 70_000L
+    }
+}
+
+/**
  * The cell's realtime socket: authenticate within 5 s, table-change subscriptions filtered by
  * device_id (RLS applied server side), saved cursors so a reconnect resumes where it left off,
- * pings every 25 s, and reconnects with jittered backoff from 0.5 s to 30 s — immediately when
+ * pings every 25 s (app `ping` frames and WebSocket protocol pings), a reconnect after 70 s
+ * without any frame, and reconnects with jittered backoff from 0.5 s to 30 s — immediately when
  * the network comes back. Close codes per §5: 4401 refresh once then reconnect, 4404/1008 stop,
  * 4429 back off.
  */
@@ -133,6 +154,8 @@ class Realtime(
 
     private val client = http.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        // Protocol pings: OkHttp fails the socket when a pong doesn't come back before the next ping.
+        .pingInterval(PING_MS, TimeUnit.MILLISECONDS)
         .build()
     private val url = cell.baseUrl.trimEnd('/').replaceFirst(Regex("^http"), "ws") + "/realtime/v1/websocket"
 
@@ -158,6 +181,7 @@ class Realtime(
     private var attempt = 0
     private var wake: CompletableJob = Job()
     private var nonce = 0L
+    private val liveness = Liveness()
 
     init {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -233,9 +257,19 @@ class Realtime(
                     Listener(token, closed) { code -> closeCode = code },
                 )
                 socket = ws
+                liveness.heard(SystemClock.elapsedRealtime())
                 val pinger = launch {
                     while (isActive) {
                         delay(PING_MS)
+                        if (liveness.isStale(SystemClock.elapsedRealtime())) {
+                            // Nothing back for too long (not even a pong): the connection is dead
+                            // even if TCP hasn't noticed. Drop it; the loop reconnects and the
+                            // Live transition re-reads the REST snapshot.
+                            Log.i(TAG, "Realtime went quiet; reconnecting")
+                            ws.cancel()
+                            closed.complete()
+                            break
+                        }
                         ws.send(buildJsonObject { put("type", "ping"); put("nonce", ++nonce) }.toString())
                     }
                 }
@@ -292,6 +326,7 @@ class Realtime(
 
     private fun onFrame(ws: WebSocket, frame: RealtimeFrame) {
         if (ws !== socket) return
+        liveness.heard(SystemClock.elapsedRealtime())   // any frame, pongs included
         if (ai.tos.mode.BuildConfig.DEBUG) {
             when (frame) {
                 is RealtimeFrame.Subscribed -> Log.d(TAG, "subscribed ${frame.id.substringBefore(':')} @${frame.cursor}")

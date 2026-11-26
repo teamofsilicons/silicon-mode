@@ -52,13 +52,15 @@ class MainActivity : ComponentActivity() {
         val g = graph
         val signIn = g.signIn
         if (!signIn.isCallback(data)) return
+        // Browsers add BROWSABLE to every intent a web page opens (adb's `am start` doesn't).
+        val viaBrowser = intent.hasCategory(Intent.CATEGORY_BROWSABLE)
         signIn.busy.value = true
         signIn.message.value = null
         // The app scope, not the activity's: storing the session must finish even if this
         // activity is recreated meanwhile.
         g.scope.launch {
             try {
-                when (val result = signIn.complete(data)) {
+                when (val result = signIn.complete(data, viaBrowser)) {
                     SignIn.Result.Success -> g.completeSignIn()
                     is SignIn.Result.Failure -> signIn.message.value = result.message
                     SignIn.Result.Cancelled -> Unit

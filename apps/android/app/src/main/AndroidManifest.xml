@@ -16,6 +16,12 @@
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
         </intent>
+        <!-- Other apps claiming the sign-in callback scheme (SignIn.start refuses to sign in while one does). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="ai.tos.mode" />
+        </intent>
     </queries>
 
     <application
@@ -41,7 +47,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- The sign-in bounce page forwards the cell session here:
-                 ai.tos.mode://auth/callback#access_token=…&refresh_token=…&expires_at=… -->
+                 ai.tos.mode://auth/callback#access_token=…&refresh_token=…&expires_at=…
+                 (or ?access_token=… from an intent:// URL that names this package). Only accepted
+                 while a sign-in started here is pending (SignIn.complete). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

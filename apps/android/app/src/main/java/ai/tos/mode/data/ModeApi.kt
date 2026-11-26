@@ -48,6 +48,13 @@ class ModeApi(private val cell: CellClient) {
         ListSerializer(Answer.serializer()),
     )
 
+    /** The answer to [questionId], if any (one per question: first answer wins). */
+    suspend fun answerFor(questionId: String): Answer? = cell.get(
+        "answers?select=id,question_id,device_id,option_id,text,answered_from,answered_by,created_at" +
+            "&question_id=eq.$questionId&limit=1",
+        ListSerializer(Answer.serializer()),
+    ).firstOrNull()
+
     /** `rpc/usage_heatmap`: rows = (local_date, local_hour); missing hours are zero. */
     suspend fun heatmap(days: Int, deviceId: String?): List<HeatCell> = cell.get(
         "rpc/usage_heatmap?p_days=$days" + (deviceId?.let { "&p_device=$it" } ?: ""),

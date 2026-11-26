@@ -113,20 +113,18 @@ struct SignInView: View {
     }
 
     private func signIn() {
-        store.signInError = nil
-        store.isSigningIn = true
+        store.beginSignIn()
         Task {
             do {
                 let url = try await webAuth.authenticate(using: SignIn.url,
                                                          callback: .customScheme(SignIn.callbackScheme),
                                                          preferredBrowserSession: .shared,
                                                          additionalHeaderFields: [:])
-                await store.completeSignIn(SignIn.parse(url))
+                await store.finishSignIn(SignIn.parse(url))
             } catch let e as ASWebAuthenticationSessionError where e.code == .canceledLogin {
-                store.isSigningIn = false
+                store.endSignIn(error: nil)
             } catch {
-                store.signInError = error.localizedDescription
-                store.isSigningIn = false
+                store.endSignIn(error: error.localizedDescription)
             }
         }
     }
