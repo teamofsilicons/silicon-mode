@@ -105,39 +105,57 @@ struct UnlockTouchIDWell: NSViewRepresentable {
     /// Frame for the well (matches `.regular`).
     static let side: CGFloat = 64
 
-    func makeNSView(context ctx: Context) -> UnlockTouchIDHost {
-        let host = UnlockTouchIDHost(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
+    func makeNSView(context ctx: Context) -> EmbeddedTouchIDHost {
         // The view pins its own (required) square size per control size: .small 32, .regular 64,
         // .large 128 (probed on macOS 27). Use .regular and only center it, so nothing conflicts.
-        let la = LAAuthenticationView(context: context, controlSize: .regular)
-        la.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(la)
-        NSLayoutConstraint.activate([
-            la.centerXAnchor.constraint(equalTo: host.centerXAnchor),
-            la.centerYAnchor.constraint(equalTo: host.centerYAnchor),
-        ])
+        let host = EmbeddedTouchIDHost(context: context, controlSize: .regular, side: Self.side)
         host.generation = generation
         host.onAttach = onAttach
         return host
     }
 
-    func updateNSView(_ host: UnlockTouchIDHost, context: Context) {
+    func updateNSView(_ host: EmbeddedTouchIDHost, context: Context) {
         host.onAttach = onAttach
     }
 
-    static func dismantleNSView(_ host: UnlockTouchIDHost, coordinator: ()) {
+    static func dismantleNSView(_ host: EmbeddedTouchIDHost, coordinator: ()) {
         host.onAttach = nil
+        host.detach()
     }
 }
 
-final class UnlockTouchIDHost: NSView {
+/// Owns one `LAAuthenticationView` and makes sure a window never holds two.
+///
+/// AppKit allows a single `NSOcclusionDetectionView` per window, and every `LAAuthenticationView`
+/// adds one (as its own subview) as soon as it shows a glyph. Two wells in one window — the old one
+/// still fading out in a SwiftUI transition while a retry's new well appears, a PIN ↔ Touch ID
+/// switch, or the unlock card re-shown mid-dismiss — crash the app on the next Touch ID event
+/// (EXC_BREAKPOINT "There may only be 1 NSOcclusionDetectionView per window", 2026-11-26).
+/// So the authentication view is only added once this host is in a window and has *claimed* it;
+/// claiming detaches the previous owner's view (and with it its occlusion detector) first.
+@MainActor
+final class EmbeddedTouchIDHost: NSView {
+    private static let owners = NSMapTable<NSWindow, EmbeddedTouchIDHost>.weakToWeakObjects()
+
+    let auth: LAAuthenticationView
     var generation = 0
     var onAttach: ((Int) -> Void)?
     private var fired = false
+    private var constrained = false
+
+    init(context: LAContext, controlSize: NSControl.ControlSize, side: CGFloat) {
+        auth = LAAuthenticationView(context: context, controlSize: controlSize)
+        auth.translatesAutoresizingMaskIntoConstraints = false
+        super.init(frame: NSRect(x: 0, y: 0, width: side, height: side))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard let window else { detach(); return }
+        claim(window)
         // Let layout give the view its real size first (a 0×0 view fails with -14).
         Task { @MainActor [weak self] in self?.fireIfReady() }
     }
@@ -147,8 +165,30 @@ final class UnlockTouchIDHost: NSView {
         if window != nil { Task { @MainActor [weak self] in self?.fireIfReady() } }
     }
 
+    private func claim(_ window: NSWindow) {
+        if let previous = Self.owners.object(forKey: window), previous !== self { previous.detach() }
+        Self.owners.setObject(self, forKey: window)
+        guard auth.superview !== self else { return }
+        addSubview(auth)
+        if !constrained {
+            constrained = true
+            NSLayoutConstraint.activate([
+                auth.centerXAnchor.constraint(equalTo: centerXAnchor),
+                auth.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        }
+    }
+
+    /// Takes the authentication view (and its occlusion detector) out of the window for good:
+    /// a detached well never starts an evaluation.
+    func detach() {
+        fired = true
+        if auth.superview != nil { auth.removeFromSuperview(); constrained = false }
+        if let w = window, Self.owners.object(forKey: w) === self { Self.owners.removeObject(forKey: w) }
+    }
+
     private func fireIfReady() {
-        guard !fired, window != nil, bounds.width >= 32, bounds.height >= 32 else { return }
+        guard !fired, window != nil, auth.superview === self, bounds.width >= 32, bounds.height >= 32 else { return }
         fired = true
         onAttach?(generation)
     }

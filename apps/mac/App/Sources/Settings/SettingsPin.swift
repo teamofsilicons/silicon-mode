@@ -293,12 +293,15 @@ enum SettingsBiometrics {
 
 /// The embedded Touch ID well (LocalAuthenticationEmbeddedUI): authentication happens in this view,
 /// with no system pop-up. One view per LAContext.
+/// Goes through `EmbeddedTouchIDHost`, which keeps one authentication view per window (two crash AppKit).
 struct SettingsTouchIDWell: NSViewRepresentable {
     let context: LAContext
-    func makeNSView(context ctx: Context) -> LAAuthenticationView {
-        LAAuthenticationView(context: context, controlSize: .large)
+    func makeNSView(context ctx: Context) -> EmbeddedTouchIDHost {
+        // .small is 32 pt, the largest size that fits the 40 pt slot.
+        EmbeddedTouchIDHost(context: context, controlSize: .small, side: 40)
     }
-    func updateNSView(_ nsView: LAAuthenticationView, context: Context) {}
+    func updateNSView(_ nsView: EmbeddedTouchIDHost, context: Context) {}
+    static func dismantleNSView(_ host: EmbeddedTouchIDHost, coordinator: ()) { host.detach() }
 }
 
 /// "Try Touch ID": shows the embedded well and evaluates once.
