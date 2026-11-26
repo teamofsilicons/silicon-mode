@@ -17,7 +17,8 @@ let package = Package(
         ),
         .testTarget(
             name: "SiliconModeKitTests",
-            dependencies: ["SiliconModeKit"]
+            dependencies: ["SiliconModeKit"],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

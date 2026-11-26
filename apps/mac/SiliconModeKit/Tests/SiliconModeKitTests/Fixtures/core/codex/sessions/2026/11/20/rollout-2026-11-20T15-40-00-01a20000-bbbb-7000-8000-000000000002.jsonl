@@ -1,0 +1,6 @@
+{"timestamp":"2026-11-20T10:10:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"01a20000-bbbb-7000-8000-000000000002","timestamp":"2026-11-20T10:10:00.000Z","cwd":"/Users/dev/code/api","originator":"Codex Desktop","cli_version":"0.166.0","source":"vscode","thread_source":"user"}}
+{"timestamp":"2026-11-20T10:10:00.010Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"t9","started_at":1795169400}}
+{"timestamp":"2026-11-20T10:10:00.020Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"t9","cwd":"/Users/dev/code/api","approval_policy":"never","model":"gpt-6.1-terra"}}
+{"timestamp":"2026-11-20T10:10:00.050Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"um9","content":[{"type":"text","text":"Add rate limiting to the login endpoint"}]}}}
+{"timestamp":"2026-11-20T10:10:05.000Z","ordinal":4,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"mc1","server":"github","tool":"search_code","status":"completed"}}}
+{"timestamp":"2026-11-20T10:10:09.000Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"c9","command":["/bin/zsh","-lc","go test ./..."],"exit_code":0,"status":"completed"}}}

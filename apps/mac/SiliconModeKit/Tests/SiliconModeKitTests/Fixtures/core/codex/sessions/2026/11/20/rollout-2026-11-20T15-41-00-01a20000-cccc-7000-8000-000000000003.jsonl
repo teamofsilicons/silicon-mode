@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-20T10:11:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"01a20000-cccc-7000-8000-000000000003","timestamp":"2026-11-20T10:11:00.000Z","cwd":"/Users/dev/code/api","originator":"Codex Desktop","source":"vscode","thread_source":"subagent","parent_thread_id":"01a20000-bbbb-7000-8000-000000000002","agent_nickname":"explorer"}}
+{"timestamp":"2026-11-20T10:11:00.010Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"s1"}}
