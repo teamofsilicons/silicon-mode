@@ -55,4 +55,42 @@ import Foundation
             try await Task.sleep(for: .seconds(3))
         }
     }
+
+    /// The read-only control paths the providers depend on, exercised from Swift (redacted).
+    @Test(.enabled(if: MoreLiveSanityTests.enabled))
+    func liveControlPaths() async throws {
+        let env = MoreEnvironment(home: FileManager.default.homeDirectoryForCurrentUser,
+                                  vars: ProcessInfo.processInfo.environment, index: OrchestratorIndex())
+        // OpenClaw CLI (paired device + token stay inside the CLI).
+        if let exe = env.which("openclaw") {
+            let clock = ContinuousClock()
+            var out: CommandOutput?
+            let took = await clock.measure { out = await env.run(exe, ["gateway", "call", "sessions.list", "--params", #"{"limit":5}"#, "--json"], 15) }
+            let parsed = out.flatMap { OpenClawProvider.parseJSON($0.stdout) }.map(OpenClawProvider.parseSessions)
+            print("openclaw sessions.list: exit=\(out?.status ?? -99) parsed=\(parsed != nil) rows=\(parsed?.count ?? -1) in \(took)")
+            let approvals = await env.run(exe, ["gateway", "call", "exec.approval.list", "--json"], 15)
+            print("openclaw exec.approval.list: exit=\(approvals?.status ?? -99) items=\(approvals.flatMap { OpenClawProvider.parseJSON($0.stdout) }?.array.count ?? -1)")
+            let db = OpenClawProvider.readApprovals(db: env.home.appendingPathComponent(".openclaw/state/openclaw.sqlite").path)
+            print("openclaw pending approvals in state DB: \(db.count)")
+        } else {
+            print("openclaw CLI not found")
+        }
+        // Silicon interpreter control API.
+        let si = SiliconProvider(env: env)
+        if let d = si.daemon() {
+            let ping = await si.control(d, "ping", [:])
+            let list = await si.control(d, "list", [:])
+            print("silicon control: ping keys=\(ping?.dict.keys.sorted() ?? []) connected=\(list?.array.count ?? -1)")
+        } else {
+            print("silicon interpreter not running")
+        }
+        // Antigravity language server.
+        let ag = AntigravityProvider(flavor: .app, env: env)
+        if let d = ag.liveDaemon() {
+            let j = await ag.rpc(d, "GetAllCascadeTrajectories", [:])
+            print("antigravity language server: conversations=\(j?["trajectorySummaries"].dict.count ?? -1)")
+        } else {
+            print("antigravity language server not running")
+        }
+    }
 }

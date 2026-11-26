@@ -153,8 +153,9 @@ public final class SiliconProvider: AgentProvider, @unchecked Sendable {
         if cached.daemonStamp == st, let d = cached.daemon { return env.isAlive(d.pid) ? d : nil }
         var d: Daemon?
         if let data = MoreFiles.read(daemonFile, max: 64 << 10), let j = J.parse(data),
-           let pid = j["pid"].int, let port = j["port"].int, let token = j["token"].string {
-            d = Daemon(pid: Int32(pid), port: port, token: token)
+           let pid = j["pid"].int.flatMap({ Int32(exactly: $0) }), let port = j["port"].int, (1...65535).contains(port),
+           let token = j["token"].string {
+            d = Daemon(pid: pid, port: port, token: token)
         }
         state.withLock { $0.daemonStamp = st; $0.daemon = d }
         guard let d, env.isAlive(d.pid) else { return nil }

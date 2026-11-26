@@ -167,6 +167,10 @@ import SQLite3
         #expect(AgentProcessCatalog.classify(p(["/System/Library/PrivateFrameworks/AMPDevices.framework/Versions/A/Support/AMPDeviceDiscoveryAgent"],
                                                path: "/System/Library/PrivateFrameworks/AMPDevices.framework/Versions/A/Support/AMPDeviceDiscoveryAgent")) == nil)
         #expect(AgentProcessCatalog.classify(p(["/usr/bin/agent"], path: "/usr/bin/agent")) == nil)
+        #expect(AgentProcessCatalog.classify(p(["/opt/homebrew/bin/goose", "postgres", "up"], path: "/opt/homebrew/bin/goose")) == nil)
+        #expect(AgentProcessCatalog.classify(p(["/opt/homebrew/bin/goose", "session"], path: "/opt/homebrew/bin/goose")) == .agent("goose"))
+        #expect(AgentProcessCatalog.classify(p(["/usr/local/bin/hermes", "bundle.js"], path: "/usr/local/bin/hermes")) == nil)
+        #expect(AgentProcessCatalog.classify(p(["/usr/local/bin/letta", "server"], path: "/usr/local/bin/letta")) == nil)
         #expect(AgentProcessCatalog.classify(p(["/bin/zsh"], path: "/bin/zsh", name: "zsh")) == nil)
     }
 
@@ -200,6 +204,29 @@ import SQLite3
         #expect(!t.isActive(root: 1, descendants: [], now: t0.addingTimeInterval(60))) // quiet > 45 s
         cpu.withLock { $0[2] = 5 }                                                     // a new child (tool) appears
         #expect(t.isActive(root: 1, descendants: [2], now: t0.addingTimeInterval(70)))
+    }
+
+    // MARK: Subprocess / HTTP
+
+    @Test func commandRunnerNeverHangsOnInheritedPipes() async {
+        let clock = ContinuousClock()
+        let start = clock.now
+        // A grandchild keeps stdout open after the shell exits.
+        let out = await LocalCommand.run("/bin/sh", ["-c", "echo hello; (sleep 4 &); exit 3"], 10)
+        #expect(out?.status == 3)
+        let text = String(decoding: out?.stdout ?? Data(), as: UTF8.self)
+        #expect(text.hasPrefix("hello"))
+        #expect(clock.now - start < .seconds(3))
+        // Hard timeout.
+        let t0 = clock.now
+        let slow = await LocalCommand.run("/bin/sleep", ["10"], 0.5)
+        #expect(slow != nil && slow?.status != 0)
+        #expect(clock.now - t0 < .seconds(4))
+        #expect(await LocalCommand.run("/nonexistent/tool", [], 1) == nil)
+    }
+
+    @Test func httpRefusesNonLoopback() async {
+        #expect(await LocalHTTP.post(URL(string: "https://example.com/x")!, [:], Data(), 1) == nil)
     }
 
     // MARK: Catalog

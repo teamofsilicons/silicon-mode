@@ -152,6 +152,36 @@ import Foundation
         #expect(perm["scope"] as? String == "PERMISSION_SCOPE_ONCE")
     }
 
+    @Test func antigravityAskQuestionAnswerPayload() async throws {
+        let home = TempHome(), world = FakeWorld()
+        home.write(".gemini/antigravity/daemon/hub_1.json", text: #"{"pid":5001,"httpPort":4322,"csrfToken":"t2"}"#)
+        world.alive.withLock { $0.insert(5001) }
+        let summaries = #"{"trajectorySummaries":{"conv-ask":{"summary":"Pick a plan","stepCount":2,"lastModifiedTime":"2026-11-20T10:04:00Z","trajectoryId":"traj-ask","status":"CASCADE_RUN_STATUS_RUNNING"}}}"#
+        let steps = #"{"steps":[{"type":"CORTEX_STEP_TYPE_USER_INPUT","status":"CORTEX_STEP_STATUS_DONE","userInput":{"items":[{"text":"Plan the demo"}]}},{"type":"CORTEX_STEP_TYPE_ASK_QUESTION","status":"CORTEX_STEP_STATUS_WAITING","metadata":{"createdAt":"2026-11-20T10:04:00Z"},"requestedInteraction":{"askQuestion":{"questions":[{"question":"Which plan?","options":[{"id":"opt-a","text":"Small"},{"id":"opt-b","text":"Big"}],"isMultiSelect":false}]}}}]}"#
+        world.http.withLock { $0 = { url, _ in
+            switch url.lastPathComponent {
+            case "GetAllCascadeTrajectories": LocalHTTPResponse(status: 200, body: Data(summaries.utf8))
+            case "GetCascadeTrajectorySteps": LocalHTTPResponse(status: 200, body: Data(steps.utf8))
+            case "HandleCascadeUserInteraction": LocalHTTPResponse(status: 200, body: Data("{}".utf8))
+            default: nil
+            }
+        } }
+        let p = AntigravityProvider(flavor: .app, env: world.env(home))
+        let s = try #require(await p.scan(scanContext([])).first)
+        let q = try #require(s.pendingQuestions.first)
+        #expect(s.state == .needsYou)
+        #expect(q.kind == .question && q.title == "Which plan?")
+        #expect(q.options.map(\.label) == ["Small", "Big"])
+        try await p.answer(q, with: AgentAnswer(questionID: q.id, optionIDs: ["opt-b"], text: "with tests", source: .menuBar))
+        let body = json(try #require(world.httpLog.current.last).body)
+        let interaction = try #require(body["interaction"] as? [String: Any])
+        #expect(interaction["stepIndex"] as? Int == 1)
+        let entry = try #require(((interaction["askQuestion"] as? [String: Any])?["responses"] as? [[String: Any]])?.first)
+        #expect(entry["question"] as? String == "Which plan?")
+        #expect(entry["selectedOptionIds"] as? [String] == ["opt-b"])
+        #expect(entry["writeInResponse"] as? String == "with tests")
+    }
+
     @Test func antigravityCLIOfflineFromSummariesDB() async throws {
         let home = TempHome(), world = FakeWorld()
         home.database(".gemini/antigravity-cli/conversation_summaries.db", sqlFixture: "antigravity_cli_summaries.sql")

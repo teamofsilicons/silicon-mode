@@ -61,6 +61,10 @@ public final class AntigravityProvider: AgentProvider, @unchecked Sendable {
         var tails: [String: Tail] = [:]
         var dbStamp: FileStamp?
         var dbRows: [Summary] = []
+        /// Last time the live API failed (back off to the offline DB for a while).
+        var liveFailedAt: Date = .distantPast
+        /// Something running / waiting → poll faster.
+        var busy = false
     }
 
     private let state = Locked(State())
@@ -77,7 +81,10 @@ public final class AntigravityProvider: AgentProvider, @unchecked Sendable {
 
     public func scan(_ ctx: ScanContext) async -> [AgentSession] {
         guard MoreFiles.isDir(root) else { return [] }
-        if let daemon = liveDaemon(), let sessions = await scanLive(daemon, ctx: ctx) { return sessions }
+        if let daemon = liveDaemon(), ctx.now.timeIntervalSince(state.current.liveFailedAt) > 15 {
+            if let sessions = await scanLive(daemon, ctx: ctx) { return sessions }
+            state.withLock { $0.liveFailedAt = ctx.now }
+        }
         return scanOffline(ctx)
     }
 
@@ -95,9 +102,9 @@ public final class AntigravityProvider: AgentProvider, @unchecked Sendable {
         var found: Daemon?
         for f in files {
             guard let data = MoreFiles.read((dir as NSString).appendingPathComponent(f), max: 64 << 10),
-                  let j = J.parse(data), let pid = j["pid"].int, let port = j["httpPort"].int, let token = j["csrfToken"].string,
-                  env.isAlive(Int32(pid)) else { continue }
-            found = Daemon(pid: Int32(pid), port: port, token: token)
+                  let j = J.parse(data), let pid = j["pid"].int.flatMap({ Int32(exactly: $0) }), let port = j["httpPort"].int,
+                  (1...65535).contains(port), let token = j["csrfToken"].string, env.isAlive(pid) else { continue }
+            found = Daemon(pid: pid, port: port, token: token)
         }
         state.withLock { $0.daemonStamp = stamps; $0.daemon = found }
         return found
@@ -113,8 +120,9 @@ public final class AntigravityProvider: AgentProvider, @unchecked Sendable {
 
     func scanLive(_ d: Daemon, ctx: ScanContext) async -> [AgentSession]? {
         var summaries = state.current.summaries
-        if ctx.now.timeIntervalSince(state.current.summariesAt) >= 2.5 || summaries.isEmpty {
-            guard let j = await rpc(d, "GetAllCascadeTrajectories", [:]) else { return nil }
+        let interval: TimeInterval = state.current.busy ? 2.5 : 6
+        if ctx.now.timeIntervalSince(state.current.summariesAt) >= interval {
+            guard let j = await rpc(d, "GetAllCascadeTrajectories", [:], timeout: 3) else { return nil }
             summaries = Self.parseSummaries(j["trajectorySummaries"])
             state.withLock { $0.summaries = summaries; $0.summariesAt = ctx.now }
         }
@@ -142,7 +150,11 @@ public final class AntigravityProvider: AgentProvider, @unchecked Sendable {
                                     startedAt: s.created, updatedAt: s.lastModified, pid: d.pid,
                                     recentEvents: Array((tail?.events ?? []).suffix(ctx.maxEvents)), pendingQuestions: questions))
         }
-        state.withLock { st in st.tails = st.tails.filter { keep.contains($0.key) } }
+        let busy = out.contains { $0.state == .working || $0.state == .needsYou }
+        state.withLock { st in
+            st.tails = st.tails.filter { keep.contains($0.key) }
+            st.busy = busy
+        }
         return out
     }
 

@@ -616,13 +616,29 @@ public enum LocalCommand {
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         p.standardInput = FileHandle.nullDevice
+        // Collect output asynchronously and wait on *termination*, not EOF: a CLI that leaves a
+        // background child holding the pipe open must never hang us.
+        let collected = Locked(Data())
+        let reader = out.fileHandleForReading
+        let done = DispatchSemaphore(value: 0)
+        let eof = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
         do { try p.run() } catch { return nil }
-        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        killer.cancel()
-        return CommandOutput(status: p.terminationStatus, stdout: data)
+        // Single reader → ordered output; it may outlive us only if a grandchild keeps the pipe open.
+        DispatchQueue.global(qos: .utility).async {
+            while true {
+                let d = reader.availableData
+                if d.isEmpty { break }
+                collected.withLock { $0.append(d) }
+            }
+            eof.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            p.terminate()
+            if done.wait(timeout: .now() + 2) == .timedOut { kill(p.processIdentifier, SIGKILL); _ = done.wait(timeout: .now() + 1) }
+        }
+        _ = eof.wait(timeout: .now() + 1)
+        return CommandOutput(status: p.isRunning ? -1 : p.terminationStatus, stdout: collected.current)
     }
 }
 

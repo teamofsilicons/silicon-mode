@@ -94,7 +94,7 @@ public final class QwenProvider: AgentProvider, @unchecked Sendable {
             default: break
             }
         }
-        let pid = runtime["pid"].int.map { Int32($0) }
+        let pid = runtime["pid"].int.flatMap { Int32(exactly: $0) }
         let procStart = runtime.first("proc_start", "procStart").double.flatMap { $0 > 1e9 ? MoreDates.epoch($0) : nil }
         return ParsedSession(nativeID: runtime["session_id"].text ?? id,
                              title: titleJ.first("displayName", "title").text ?? firstPrompt, cwd: cwd, model: model,

@@ -136,7 +136,8 @@ public enum AgentProcessCatalog {
         if has("/Xcode.app/Contents/MacOS/") { return .ide("xcode") }
 
         // Hermes: CLI/TUI (comm is python3/node). The OpenClaw gateway runs on ~/.hermes/node — not Hermes.
-        if has("/hermes-agent/") || has("tui_gateway") || named("hermes") {
+        // (A bare `hermes` elsewhere is usually the React Native JS engine — require Hermes Agent's paths.)
+        if has("/hermes-agent/") || has("tui_gateway") || (named("hermes") && (has("/.hermes/") || has("/.local/bin/hermes"))) {
             if p.args.contains("gateway") && p.args.contains("run") { return .orchestrator("hermes") }
             return .agent("hermes")
         }
@@ -159,7 +160,12 @@ public enum AgentProcessCatalog {
         if named("aider") || (p.args.contains("-m") && p.args.contains("aider")) { return .agent("aider") }
         if named("qwen") || has("@qwen-code/qwen-code") { return .agent("qwen-code") }
         if named("crush") { return .agent("crush") }
-        if named("goose") { return .agent("goose") }
+        // pressly/goose (DB migrations) shares the name: only agent subcommands count.
+        if named("goose") {
+            let sub = p.args.dropFirst().first { !$0.hasPrefix("-") }
+            if sub == nil || ["session", "s", "run", "r", "web", "project", "projects", "recipe"].contains(sub!) { return .agent("goose") }
+            return nil
+        }
         if named("goosed") { return .orchestrator("goose") }
         if named("copilot") || has("@github/copilot/") { return .agent("copilot") }
         if named("copilot-runtime") { return .agent("copilot") }
@@ -167,9 +173,9 @@ public enum AgentProcessCatalog {
         if named("cline") { return .agent("cline") }
         if named("auggie") { return .agent("augment") }
         if named("cn"), has("@continuedev") { return .agent("continue") }
-        if named("letta") { return .agent("letta") }
+        if named("letta"), !p.args.contains("server") { return .agent("letta") }
         if named("kilocode") { return .agent("kilocode") }
-        if named("openhands") { return .agent("openhands") }
+        if named("openhands"), !p.args.contains("serve") { return .agent("openhands") }
         if named("codebuff") { return .agent("codebuff") }
         if named("plandex") { return .agent("plandex") }
         if named("roo-cli") { return .agent("roo") }
