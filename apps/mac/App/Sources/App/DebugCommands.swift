@@ -6,8 +6,8 @@ import SiliconModeKit
 ///
 /// Launch arguments:  --simulate-angle 60   --enter   --face orbit   --onboarding
 /// At runtime (any shell):
-///   ~/Library/Application\ Support/Silicon\ Mode/bin/silicon-mode-hook is the agent hook; for
-///   debugging use distributed notifications:
+///   (agent hooks call ~/.silicon-mode/bin/silicon-mode-hook); for debugging use scripts/smctl or
+///   distributed notifications:
 ///   swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("ai.tos.mode.debug"), object: "angle=60", deliverImmediately: true)'
 /// Commands (object string): angle=<deg> | angle=off | enter | cancel | turnoff | unlock=<pin> | face=<id> |
 /// unlockui | setpin=<pin> | stats | menubar | onboarding | settings | setting=<key>:<json> | refresh | dump
@@ -64,6 +64,8 @@ enum DebugCommands {
                    let s = try? JSONDecoder().decode(ModeSettings.self, from: d) { m.settings = s }
             }
         case "refresh": Task { await m.refreshAgents() }
+        case "signin": m.account.signIn()
+        case "signout": m.account.signOut()
         default: break
         }
         dump()
@@ -86,6 +88,10 @@ enum DebugCommands {
             "face": m.settings.faceID,
             "pinSet": m.pinVault.isSet,
             "signedIn": m.account.isSignedIn,
+            "sync": ["status": String(describing: m.cloud.status), "device": m.cloud.deviceID as Any,
+                     "live": m.cloud.realtimeLive, "lastSynced": m.cloud.lastSyncedAt.map { $0.timeIntervalSince1970 } as Any,
+                     "account": m.account.account?.id as Any, "state": String(describing: m.account.state)],
+            "pendingQuestions": m.pendingQuestions.map { ["id": $0.id, "provider": $0.provider, "title": $0.title, "answerable": $0.answerable] },
         ]
         let url = HookWire.supportDirectory.appendingPathComponent("debug-state.json")
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {

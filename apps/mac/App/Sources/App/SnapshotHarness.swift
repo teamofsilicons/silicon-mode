@@ -20,7 +20,7 @@ struct SnapshotItem {
 enum SnapshotHarness {
     static var all: [SnapshotItem] {
         OverlaySnapshots.items + HUDSnapshots.items + FaceSnapshots.items + FaceSnapshotsB.items
-            + MenuBarSnapshots.items + SettingsSnapshots.items + coreItems
+            + MenuBarSnapshots.items + SettingsSnapshots.items + SyncSnapshots.items + coreItems
     }
 
     /// Views owned by the app shell (Stats window).

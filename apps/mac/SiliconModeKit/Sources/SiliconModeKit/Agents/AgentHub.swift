@@ -46,7 +46,13 @@ public actor AgentHub {
             return acc
         }
         var seen = Set<String>()
+        // Sessions an orchestrator (Omni, a Silicon ISI…) runs on a native agent are reported by
+        // the orchestrator provider; drop the native duplicate unless it holds an answerable
+        // question (only the native side can answer those).
+        let claimed = OrchestratorIndex.shared.allClaimed
         let merged = all
+            .filter { !(claimed.contains($0.nativeID) && $0.pendingQuestions.isEmpty
+                        && ["claude-code", "codex", "opencode", "pi"].contains($0.provider)) }
             .filter { seen.insert($0.id).inserted }
             .map { s -> AgentSession in
                 var s = s

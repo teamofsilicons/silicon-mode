@@ -14,14 +14,6 @@ struct SiliconModeApp: App {
             SettingsView()
                 .environment(model)
         }
-
-        Window("Welcome to Silicon Mode", id: WindowID.onboarding) {
-            OnboardingView()
-                .environment(model)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
     }
 }
 
@@ -46,6 +38,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {
             for url in urls { AppModel.shared.account.handleCallback(url) }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            AppModel.shared.hookServer.stop()
+            AppModel.shared.usage.flush()
         }
     }
 

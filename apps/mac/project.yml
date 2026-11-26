@@ -42,6 +42,7 @@ targets:
           - SiliconMode.entitlements
           - "Fonts/**"
           - "Sounds/**"
+          - "Logos/**"
       - path: App/Resources/Fonts
         type: folder
         buildPhase: resources

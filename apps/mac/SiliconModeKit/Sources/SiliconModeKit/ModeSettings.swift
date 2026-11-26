@@ -39,7 +39,7 @@ public struct ModeSettings: Codable, Equatable, Sendable {
     public var panicSoundEnabled = true
     /// Panic fires when the angle drops below `panicRatio * siliconModeAngle` while agents run.
     public var panicRatio: Double = 0.9
-    public var panicSoundID = "klaxon"
+    public var panicSoundID = "mistake"
     public var panicStyleID = "strobe"
     public var panicVolume: Double = 0.9
 

@@ -2,39 +2,33 @@ import SwiftUI
 import AppKit
 import SiliconModeKit
 
-// MARK: - Per-provider enable (persisted here until ModeSettings grows a field for it)
+// MARK: - Per-provider enable (backed by ModeSettings.disabledProviders; AppModel applies it)
 
 @MainActor @Observable
 final class SettingsProviderToggles {
     static let shared = SettingsProviderToggles()
-    private nonisolated static let key = "ai.tos.mode.disabledProviders"
-
-    private(set) var disabled: Set<String>
+    private nonisolated static let legacyKey = "ai.tos.mode.disabledProviders"
 
     private init() {
-        disabled = Set(UserDefaults.standard.stringArray(forKey: Self.key) ?? [])
+        // One-time migration from the earlier UserDefaults storage.
+        if let legacy = UserDefaults.standard.stringArray(forKey: Self.legacyKey), !legacy.isEmpty {
+            let m = AppModel.shared
+            m.settings.disabledProviders = Array(Set(m.settings.disabledProviders).union(legacy)).sorted()
+            UserDefaults.standard.removeObject(forKey: Self.legacyKey)
+        }
     }
 
-    /// Thread-safe read for launch-time wiring: `await hub.setDisabled(SettingsProviderToggles.storedDisabled)`.
-    nonisolated static var storedDisabled: Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
-    }
+    var disabled: Set<String> { Set(AppModel.shared.settings.disabledProviders) }
 
     func isEnabled(_ id: String) -> Bool { !disabled.contains(id) }
 
     func set(_ id: String, enabled: Bool, model: AppModel) {
-        if enabled { disabled.remove(id) } else { disabled.insert(id) }
-        UserDefaults.standard.set(Array(disabled).sorted(), forKey: Self.key)
-        apply(to: model)
+        var d = Set(model.settings.disabledProviders)
+        if enabled { d.remove(id) } else { d.insert(id) }
+        model.settings.disabledProviders = d.sorted()   // AppModel pushes it to the hub
     }
 
-    func apply(to model: AppModel) {
-        let d = disabled
-        Task {
-            await model.hub.setDisabled(d)
-            await model.refreshAgents()
-        }
-    }
+    func apply(to model: AppModel) {}
 }
 
 // MARK: - Hook connections

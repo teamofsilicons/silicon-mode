@@ -117,7 +117,10 @@ final class AppModel {
         }
         do { try hookServer.start() } catch { NSLog("SiliconMode: hook server failed: \(error)") }
         let disabled = Set(settings.disabledProviders)
-        Task { await hub.setHooks(hookServer); await hub.setDisabled(disabled) }
+        // The hub keeps ≥ 30 events per session for the phone/web tail; the HUD shows its own count.
+        let maxEvents = max(settings.tailLogCount, 30)
+        Task { await hub.setHooks(hookServer); await hub.setDisabled(disabled); await hub.setMaxEvents(maxEvents) }
+        sounds.preload()
         updateHoldPolicy()
         installHookHelper()
 
@@ -292,8 +295,12 @@ final class AppModel {
             let d = Set(settings.disabledProviders)
             Task { await hub.setDisabled(d); await refreshAgents() }
         }
+        if settings.panicVolume != old.panicVolume { sounds.setPanicVolume(settings.panicVolume) }
+        if settings.panicSoundID != old.panicSoundID, isPanicking, settings.panicSoundEnabled {
+            sounds.startPanic(soundID: settings.panicSoundID, volume: settings.panicVolume)
+        }
         if settings.tailLogCount != old.tailLogCount {
-            let n = settings.tailLogCount
+            let n = max(settings.tailLogCount, 30)
             Task { await hub.setMaxEvents(n) }
         }
         updateHoldPolicy()
