@@ -7,6 +7,8 @@ import SiliconModeKit
 /// like Notification Center's under the same summary. The pill and the panel morph into each other.
 struct AgentsPiece: View {
     @Environment(AppModel.self) private var model
+    /// Whether the list, opened, would fit a row here (`FurnitureLayer` plans the corner both ways).
+    @Environment(\.agentsCanExpand) private var canExpand
     let budget: CGFloat
     let width: CGFloat
     /// Leading slots align left; trailing ones align right.
@@ -22,15 +24,17 @@ struct AgentsPiece: View {
         let sessions = preview?.sortedSessions ?? model.modeAgents
         let collapsed = preview?.agentsCollapsed ?? ui.agentsCollapsed
         let fits = AgentsPieceList.maxRows(for: budget, count: sessions.count)
+        // Not even one row of the list fits (other pieces in this corner take the room): the pill
+        // stays, and is not a button, rather than offering a list that can't open. Collapsed, the
+        // layer has planned the corner with the list open; expanded, the budget says.
+        let roomless = collapsed ? !canExpand : fits == 0
         Group {
             if sessions.isEmpty {
                 AgentsEmptyPill()
                     .transition(.opacity)
             } else {
-                // Expanded but not even one row fits (other pieces in this corner take the room):
-                // the pill stays, and says so instead of offering a list it can't open.
-                AgentsPieceList(sessions: sessions, collapsed: collapsed || fits == 0, maxRows: fits,
-                                width: width, roomless: !collapsed && fits == 0,
+                AgentsPieceList(sessions: sessions, collapsed: collapsed || roomless, maxRows: fits,
+                                width: width, roomless: roomless, opensWhenRoom: !collapsed,
                                 preview: preview != nil) { toggle() }
             }
         }
@@ -47,6 +51,20 @@ struct AgentsPiece: View {
         guard count > 0, !collapsed else { return .fixed(pillHeight) }
         return FurnitureDemand(min: pillHeight, ideal: AgentsPieceList.height(rows: min(count, maxRows), more: count > maxRows))
     }
+
+    /// Whether the list of `count` agents shows at least one row in `openPlan`, the furniture
+    /// planned with the list open. The open list asks for the same minimum as the pill, so opening
+    /// it never pushes another piece out: it either gets a row or stays a pill.
+    static func canExpand(count: Int, in openPlan: FurniturePlan) -> Bool {
+        let placed = FurnitureSlot.allCases.lazy.flatMap { openPlan.placements($0) }.first { $0.piece.kind == .agents }
+        guard count > 0, let placed else { return false }
+        return AgentsPieceList.maxRows(for: placed.height, count: count) > 0
+    }
+}
+
+extension EnvironmentValues {
+    /// False when the collapsed agents pill has no room to open its list (`AgentsPiece.canExpand`).
+    @Entry var agentsCanExpand = true
 }
 
 // MARK: - Summary
@@ -121,8 +139,10 @@ struct AgentsPieceList: View {
     /// Rows that fit (only used expanded).
     let maxRows: Int
     let width: CGFloat
-    /// The list was asked for but no row fits: the pill is shown and can't open it.
+    /// Not even one row fits: the pill is shown, and is not a button.
     var roomless = false
+    /// Roomless while the user has the list open: it opens by itself once a row fits.
+    var opensWhenRoom = false
     var preview = false
     var onToggle: () -> Void
     @Namespace private var ns
@@ -243,7 +263,8 @@ struct AgentsPieceList: View {
                 .animation(AgentSummaryMotion.change, value: counts)
                 .animation(AgentSummaryMotion.change, value: avatars)
                 .transition(.opacity)
-                .help("No room for the agent list in this corner. It opens once there is space.")
+                .help(opensWhenRoom ? "No room for the agent list in this corner. It opens once there is space."
+                                    : "No room to open the agent list in this corner.")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Agents: \(AgentSummary.plain(counts))")
         } else {
