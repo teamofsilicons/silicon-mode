@@ -13,6 +13,7 @@ struct FaceContext {
     var isPanicking: Bool
     /// Seconds between animation frames for full-screen faces (settings.faceFrameRate).
     var frameInterval: Double = 1.0 / 30
+    var paused: Bool = false
 
     func bool(_ key: String, _ fallback: Bool = false) -> Bool { options[key]?.bool ?? fallback }
     func number(_ key: String, _ fallback: Double = 0) -> Double { options[key]?.number ?? fallback }

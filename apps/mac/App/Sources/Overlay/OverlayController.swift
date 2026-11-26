@@ -28,6 +28,9 @@ final class OverlayStage {
     var focusedDisplay: CGDirectDisplayID = 0
     /// The pointer hasn't moved for a while (cursor hidden, chrome dimmed).
     var pointerIdle = false
+    /// Furniture is hidden but the user clicked "N need you": the Questions piece shows until
+    /// nobody waits or they put it away.
+    var questionsPeek = false
 }
 
 /// Owns the overlay windows: the countdown strip (top of the built-in display) and the
@@ -166,6 +169,7 @@ final class OverlayController {
         stage.exitStartedAt = nil
         stage.enterStartedAt = Date()
         stage.pointerIdle = false
+        stage.questionsPeek = false
         stage.focusedDisplay = NSScreen.overlayPrimary?.displayID ?? 0
         rebuildModePanels()
 
@@ -199,6 +203,7 @@ final class OverlayController {
         setModePanelsOpaque(false)
         stage.exitStartedAt = Date()
         stage.pointerIdle = false
+        stage.questionsPeek = false
 
         modeTeardown?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.tearDownMode() }
@@ -234,6 +239,9 @@ final class OverlayController {
         if stage.focusedDisplay != id { stage.focusedDisplay = id }
         for (did, p) in modePanels { p.acceptsKey = did == id }
         target.makeKeyAndOrderFront(nil)
+        // The furniture/chrome layer takes keyboard input (PIN pad, reply fields), not the
+        // container or the face beneath it.
+        target.focusInputView()
     }
 
     private func rebuildModePanels() {
@@ -255,7 +263,10 @@ final class OverlayController {
             // (a click must be able to bring Silicon Mode forward so its lock applies).
             p.styleMask.remove(.nonactivatingPanel)
             p.acceptsKey = id == (stage.focusedDisplay == 0 ? primary : stage.focusedDisplay)
-            p.host(SiliconModeRootView(stage: stage, displayID: id).environment(model))
+            // Face underneath, furniture + chrome on top: separate hosting views, so a face frame
+            // re-renders only the face (see OverlayPanel.hostLayered).
+            p.hostLayered(face: SiliconModeFaceStage(stage: stage, displayID: id).environment(model),
+                          top: SiliconModeTopStage(stage: stage, displayID: id).environment(model))
             if opaqueWork == nil || opaqueWork?.isCancelled == false, stage.enterStartedAt.map({ Date().timeIntervalSince($0) > Self.enterDuration + 0.6 }) == true {
                 p.isOpaque = true
                 p.backgroundColor = NSColor(Theme.Night.background)

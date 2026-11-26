@@ -2,71 +2,8 @@ import SwiftUI
 import AppKit
 import SiliconModeKit
 
-// Building blocks shared by the in-mode HUD (counts, agent list, tail log) and question cards.
-
-// MARK: - Data
-
-/// Everything the HUD draws. Built from the live `AppModel`, or handed in by snapshots/previews.
-struct HUDSource {
-    var sessions: [AgentSession]
-    var questions: [AgentQuestion]
-    var settings: ModeSettings
-    var answerErrors: [String: String] = [:]
-    /// Preview-only: force the agent list open/closed (nil = the user's remembered choice).
-    var agentsCollapsed: Bool? = nil
-
-    /// While Silicon Mode is on, the agents it shows (running + finished since entry); questions
-    /// are every pending one.
-    @MainActor
-    init(model: AppModel) {
-        sessions = model.modeAgents
-        questions = model.pendingQuestions
-        settings = model.settings
-        answerErrors = model.answerErrors
-    }
-
-    init(sessions: [AgentSession], questions: [AgentQuestion]? = nil, settings: ModeSettings = .default,
-         answerErrors: [String: String] = [:]) {
-        self.sessions = sessions
-        self.questions = questions ?? sessions.flatMap(\.pendingQuestions)
-        self.settings = settings
-        self.answerErrors = answerErrors
-    }
-
-    var counts: AgentCounts { AgentCounts(sessions) }
-
-    /// Most urgent first, then most recently active.
-    var sortedSessions: [AgentSession] {
-        sessions.sorted { a, b in
-            a.state.rank != b.state.rank ? a.state.rank < b.state.rank : a.updatedAt > b.updatedAt
-        }
-    }
-
-    /// Oldest first: the agent that has waited longest is on top.
-    var sortedQuestions: [AgentQuestion] { questions.sorted { $0.createdAt < $1.createdAt } }
-
-    /// The last `limit` events across all agents, newest last.
-    func tail(_ limit: Int) -> [HUDLogLine] {
-        var lines: [HUDLogLine] = []
-        for s in sessions {
-            for e in s.recentEvents {
-                lines.append(HUDLogLine(id: "\(s.id)|\(e.id)", provider: s.provider, at: e.at, kind: e.kind, text: e.text))
-            }
-        }
-        lines.sort { $0.at < $1.at }
-        return Array(lines.suffix(max(0, limit)))
-    }
-
-    func session(for q: AgentQuestion) -> AgentSession? { sessions.first { $0.id == q.sessionID } }
-}
-
-struct HUDLogLine: Identifiable, Equatable {
-    let id: String
-    let provider: String
-    let at: Date
-    let kind: AgentEvent.Kind
-    let text: String
-}
+// Building blocks shared by the face furniture (agents, logs, questions, clock, system), the
+// chrome and the question cards.
 
 // MARK: - Formatting
 
@@ -82,6 +19,12 @@ enum HUDFormat {
         let h = m / 60
         if h < 24 { return m % 60 == 0 ? "\(h)h" : "\(h)h \(m % 60)m" }
         return "\(h / 24)d"
+    }
+
+    /// "now", "4m ago", "2h ago" (for finished agents).
+    static func ago(_ d: Date, now: Date) -> String {
+        let e = elapsed(since: d, now: now)
+        return e == "now" ? "now" : e + " ago"
     }
 
     private static let clockFormatter: DateFormatter = {
@@ -115,7 +58,7 @@ extension View {
         return self
             .background(shape.fill(Color.black.opacity(0.18)))
             .hudGlass(in: shape, tint: tint, interactive: interactive)
-            .overlay(shape.strokeBorder(HUDEdge.gradient, lineWidth: 0.75).allowsHitTesting(false))
+            .hudHairline(shape)
     }
 
     /// Capsule variant (chips).
@@ -123,7 +66,18 @@ extension View {
         self
             .background(Capsule().fill(Color.black.opacity(0.18)))
             .hudGlass(in: Capsule(), tint: tint)
-            .overlay(Capsule().strokeBorder(HUDEdge.gradient, lineWidth: 0.75).allowsHitTesting(false))
+            .hudHairline(Capsule())
+    }
+
+    /// The specular hairline around a HUD surface. The gradient is a plain gradient fill (a GPU
+    /// gradient layer) masked by a solid stroke; a gradient *stroke* would be painted on the CPU
+    /// into a 64-bit backing store again on every frame of any resize or entrance animation.
+    func hudHairline<S: InsettableShape>(_ shape: S, lineWidth: CGFloat = 0.75) -> some View {
+        overlay {
+            HUDEdge.gradient
+                .mask(shape.strokeBorder(Color.black, lineWidth: lineWidth))
+                .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -222,6 +176,10 @@ struct HUDPulse: NSViewRepresentable {
         cycle.duration = 2.4
         cycle.repeatCount = .infinity
         cycle.isRemovedOnCompletion = false
+        // A soft 1.4 s ping reads the same at 30 fps; uncapped it would run at the panel's 120 Hz.
+        let rate = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        cycle.preferredFrameRateRange = rate
+        ping.preferredFrameRateRange = rate
         ring.add(cycle, forKey: "ping")
         v.layer?.addSublayer(ring)
         return v
@@ -232,27 +190,7 @@ struct HUDPulse: NSViewRepresentable {
     }
 }
 
-/// Provider glyph for a session, with a state ring for the list.
-struct HUDAgentMark: View {
-    let provider: String
-    var state: AgentState? = nil
-    var size: CGFloat = 26
-
-    var body: some View {
-        ProviderMark(provider: provider, size: size)
-            .overlay(alignment: .bottomTrailing) {
-                if let state {
-                    Circle()
-                        .fill(Theme.stateColor(state))
-                        .frame(width: size * 0.34, height: size * 0.34)
-                        .overlay(Circle().strokeBorder(Theme.Night.background, lineWidth: 1.5))
-                        .offset(x: 2, y: 2)
-                }
-            }
-    }
-}
-
-/// Section header used inside panels ("Agents", "Activity", "Waiting on you").
+/// Section header used inside panels ("Agents", "System", "Waiting on you").
 struct HUDSectionLabel: View {
     let title: String
     var count: Int? = nil

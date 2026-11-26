@@ -34,6 +34,9 @@ final class OverlayPanel: NSPanel {
         setFrame(frame, display: false)
     }
 
+    /// The view that should hold keyboard focus (the SwiftUI root that takes input).
+    private(set) weak var inputView: NSView?
+
     /// Install a SwiftUI root as the panel's content.
     func host<V: View>(_ view: V) {
         let hosting = OverlayHostingView(rootView: view)
@@ -42,12 +45,56 @@ final class OverlayPanel: NSPanel {
         hosting.frame = NSRect(origin: .zero, size: frame.size)
         hosting.autoresizingMask = [.width, .height]
         contentView = hosting
+        inputView = hosting
+    }
+
+    /// Install Silicon Mode's two layers as sibling hosting views in one container:
+    /// - `face` underneath. It is never hit-tested, and its frames (30 per second) re-render only
+    ///   the face's own small SwiftUI graph.
+    /// - `top` above it, transparent: furniture, chrome, the unlock sheet and panic. It changes only
+    ///   when they do, so a face frame never re-renders furniture and vice versa.
+    /// Liquid Glass in `top` samples the face beneath it: both are layers of the same window.
+    func hostLayered<Face: View, Top: View>(face: Face, top: Top) {
+        let bounds = NSRect(origin: .zero, size: frame.size)
+        let container = NSView(frame: bounds)
+        container.wantsLayer = true
+        container.autoresizingMask = [.width, .height]
+
+        // The face never takes pointer events: its wrapper answers no hit test, so hover and click
+        // hit-testing never walk the full-screen face tree.
+        let faceLayer = PassthroughView(frame: bounds)
+        let faceHost = NSHostingView(rootView: face)
+        let topHost = OverlayHostingView(rootView: top)
+        faceHost.frame = bounds
+        faceHost.autoresizingMask = [.width, .height]
+        faceLayer.addSubview(faceHost)
+        for v in [faceLayer, topHost] as [NSView] {
+            v.frame = bounds
+            v.autoresizingMask = [.width, .height]
+            container.addSubview(v)
+        }
+        faceHost.sizingOptions = []
+        faceHost.safeAreaRegions = []
+        topHost.sizingOptions = []
+        topHost.safeAreaRegions = []
+
+        contentView = container
+        initialFirstResponder = topHost
+        inputView = topHost
+    }
+
+    /// Make the input view first responder unless focus already sits inside it (a reply field).
+    func focusInputView() {
+        guard let v = inputView else { return }
+        if let r = firstResponder as? NSView, r.isDescendant(of: v) { return }
+        makeFirstResponder(v)
     }
 
     /// Detach content and close. Safe to call more than once.
     func tearDown() {
         orderOut(nil)
         contentView = nil
+        inputView = nil
         close()
     }
 }
@@ -56,6 +103,11 @@ final class OverlayPanel: NSPanel {
 /// "Do not enter" button must work with one click while another app is frontmost).
 final class OverlayHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// A purely visual layer: it and everything inside it are invisible to hit-testing.
+final class PassthroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Screens

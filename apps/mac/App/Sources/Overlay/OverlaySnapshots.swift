@@ -6,9 +6,12 @@ import SiliconModeKit
 ///   overlay.countdown         countdown strip at ~3 s left over a stand-in desktop
 ///   overlay.enter             enter shockwave mid-frame (--time = seconds into the animation)
 ///   overlay.enter.bang        the flash at impact
-///   overlay.root              Silicon Mode, "bounce" face, grace period
+///   overlay.root              Silicon Mode, "bounce" face, grace period, default furniture
 ///   overlay.root.locked       after the grace period
 ///   overlay.root.unlock       unlock sheet presented
+///   overlay.root.furniture    every kind of furniture placed
+///   furniture.hidden          furniture hidden while agents need you ("N need you" pill)
+///   furniture.hidden-peek     …and the pill clicked (the questions show)
 ///   overlay.exit              implode mid-frame
 ///   overlay.panic.<style>     each panic style (--time picks the moment)
 @MainActor
@@ -30,6 +33,18 @@ enum OverlaySnapshots {
             SnapshotItem(id: "overlay.root.unlock") {
                 AppModel.shared.unlockPresented = true
                 return AnyView(root(SiliconModePreview(graceRemaining: nil, locked: true, unlockPresented: true, faceID: "bounce")))
+            },
+            SnapshotItem(id: "overlay.root.furniture") {
+                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                furniture: HUDSample.source(furniture: HUDSample.everyPiece))))
+            },
+            SnapshotItem(id: "furniture.hidden") {
+                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                furnitureHidden: true)))
+            },
+            SnapshotItem(id: "furniture.hidden-peek") {
+                AnyView(root(SiliconModePreview(sessions: HUDSample.sessions(), graceRemaining: nil, locked: true, faceID: "bounce",
+                                                furnitureHidden: true, questionsPeek: true)))
             },
             SnapshotItem(id: "overlay.exit") { AnyView(exit(at: pin(0.4))) },
         ]
