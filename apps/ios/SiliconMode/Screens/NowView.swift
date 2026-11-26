@@ -66,7 +66,7 @@ struct NowView: View {
         guard let mac = store.selectedMac else { return "" }
         let online = mac.status?.isOnline() ?? false
         let state = mac.status?.state ?? .off
-        if !online { return mac.lastSeenAt.map { "Offline · seen \(Fmt.ago($0)) ago" } ?? "Offline" }
+        if !online { return mac.lastSeenAt.map { "Offline · seen \(Fmt.agoPhrase($0))" } ?? "Offline" }
         return state.isOn ? "Silicon Mode \(state.title.lowercased())" : "Online"
     }
 

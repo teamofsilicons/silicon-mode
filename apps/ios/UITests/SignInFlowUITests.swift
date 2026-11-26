@@ -29,6 +29,42 @@ final class SignInFlowUITests: XCTestCase {
         add(shot)
     }
 
+    /// Opens the first agent's detail sheet (screenshot attached to the result bundle).
+    func testAgentDetailSheet() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-SMScroll", "agents", "-SMScrollDelay", "4"]
+        if let mac = ProcessInfo.processInfo.environment["SM_MAC"] { app.launchArguments += ["-selectedMac", mac] }
+        if ProcessInfo.processInfo.environment["SM_DEMO"] != nil { app.launchArguments += ["-SMDemo", "YES"] }
+        app.launch()
+        let row = app.buttons.containing(NSPredicate(format: "label CONTAINS 'Working'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 40))
+        row.tap()
+        let header = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Recent events'")).firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 15))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "agent-detail"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// Signs out from Settings (revokes the cell session) and lands on the sign-in screen.
+    func testSignOut() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-SMTab", "settings"]
+        app.launch()
+        let signOut = app.buttons["Sign out"].firstMatch
+        if !signOut.waitForExistence(timeout: 30) {
+            app.swipeUp()
+        }
+        for _ in 0..<4 where !signOut.isHittable { app.swipeUp() }
+        signOut.tap()
+        let confirm = app.sheets.buttons["Sign out"].firstMatch.exists ? app.sheets.buttons["Sign out"].firstMatch
+            : app.buttons.matching(identifier: "Sign out").element(boundBy: 1)
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        confirm.tap()
+        XCTAssertTrue(app.buttons["Sign in with Silicon Accounts"].waitForExistence(timeout: 30))
+    }
+
     /// Taps the first option of the first pending question and waits for the "Sent" state.
     func testAnswerFirstQuestion() throws {
         let label = ProcessInfo.processInfo.environment["SM_OPTION"] ?? "Allow once"

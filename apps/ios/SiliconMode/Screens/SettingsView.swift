@@ -212,7 +212,7 @@ private struct MacRow: View {
                 .background(state.isOn ? AnyShapeStyle(Theme.siliconGradient) : AnyShapeStyle(Theme.surfaceMuted), in: .rect(cornerRadius: 10, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text(mac.name).allo(15, .semibold).foregroundStyle(Theme.foreground)
-                Text(online ? (state.isOn ? "Silicon Mode \(state.title.lowercased())" : "Online") : (mac.lastSeenAt.map { "Seen \(Fmt.ago($0)) ago" } ?? "Offline"))
+                Text(online ? (state.isOn ? "Silicon Mode \(state.title.lowercased())" : "Online") : (mac.lastSeenAt.map { "Seen \(Fmt.agoPhrase($0))" } ?? "Offline"))
                     .allo(13)
                     .foregroundStyle(Theme.textMuted)
             }

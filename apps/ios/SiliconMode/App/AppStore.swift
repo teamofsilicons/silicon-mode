@@ -489,6 +489,10 @@ final class AppStore {
     private func apply(_ c: RealtimeChange) {
         switch c.table {
         case "device_status":
+            if c.operation == "DELETE" {        // a Mac was removed
+                Task { await loadMacs(); await loadSelected() }
+                return
+            }
             guard let s = c.decode(DeviceStatus.self) else { return }
             if let i = macs.firstIndex(where: { $0.id == s.deviceId.lowercased() }) {
                 withAnimation(Theme.Motion.slow) { macs[i].status = s }

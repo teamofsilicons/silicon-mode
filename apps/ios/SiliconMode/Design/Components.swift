@@ -186,6 +186,12 @@ enum Fmt {
         return "\(Int(s / 86400))d"
     }
 
+    /// "just now", "5m ago", "2h ago".
+    static func agoPhrase(_ date: Date?, now: Date = .now) -> String {
+        let a = ago(date, now: now)
+        return a == "now" ? "just now" : (a == "—" ? a : "\(a) ago")
+    }
+
     static func duration(_ seconds: Double) -> String {
         let s = Int(max(0, seconds))
         if s < 60 { return "\(s)s" }

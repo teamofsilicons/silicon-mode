@@ -27,6 +27,12 @@ enum DemoData {
                                                                                   online: true, updatedAt: now)),
         ]
         store.hasLoadedMacs = true
+        if UserDefaults.standard.bool(forKey: "SMNoMacs") {   // first run: nothing connected yet
+            store.macs = []
+            store.realtimeStatus = .live
+            store.auth = .signedIn
+            return
+        }
         if store.selectedMacID == nil || !store.macs.contains(where: { $0.id == store.selectedMacID }) {
             store.select(store.macs[0])
         }

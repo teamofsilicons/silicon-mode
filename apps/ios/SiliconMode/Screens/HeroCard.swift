@@ -42,9 +42,11 @@ struct HeroCard: View {
 
     var body: some View {
         let animate = !reduceMotion && scenePhase == .active && SnapshotClock.fixed == nil
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: !animate)) { tl in
-            let t = SnapshotClock.time(tl.date)
-            ZStack {
+        // Only the drawings ride the clock; the text and chips above them don't re-render per frame.
+        ZStack {
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: !animate)) { tl in
+                let t = SnapshotClock.time(tl.date)
+                ZStack {
                 Aurora(palette: palette, t: t * (state == .panic ? 2.4 : 1), amplitude: state.isOn ? 1 : 0.6)
                     .overlay {
                         if state == .panic && !reduceMotion {
@@ -61,8 +63,9 @@ struct HeroCard: View {
                     .padding(.bottom, 44)
                     .saturation(online ? 1 : 0.2)
                     .opacity(online ? 1 : 0.7)
-                content
+                }
             }
+            content
         }
         .frame(height: 292)
         .clipShape(.rect(cornerRadius: Theme.Radius.hero, style: .continuous))
@@ -164,7 +167,7 @@ struct HeroCard: View {
                 Text("Online")
             } else {
                 Circle().fill(fg3).frame(width: 6, height: 6).padding(3)
-                Text(mac.lastSeenAt.map { "Seen \(Fmt.ago($0)) ago" } ?? "Offline")
+                Text(mac.lastSeenAt.map { "Seen \(Fmt.agoPhrase($0))" } ?? "Offline")
             }
         }
         .allo(12, .semibold, fixed: true)

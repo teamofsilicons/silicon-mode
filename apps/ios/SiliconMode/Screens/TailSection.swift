@@ -119,9 +119,10 @@ struct SessionDetailSheet: View {
                         if let m = live.model { row("Model", m) }
                         if let c = live.cwd { row("Folder", c, mono: true) }
                         if let s = live.startedAt { row("Started", "\(Fmt.clock(s)) · \(Fmt.duration(Date().timeIntervalSince(s))) ago") }
-                        if let l = live.lastEventAt { row("Last event", "\(Fmt.ago(l)) ago") }
+                        if let l = live.lastEventAt { row("Last event", Fmt.agoPhrase(l)) }
                         if let w = live.waitingReason { row("Waiting for", w.capitalized) }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .surfaceCard()
                     SectionHeader(title: "Recent events", count: events.count)
                     if events.isEmpty {
