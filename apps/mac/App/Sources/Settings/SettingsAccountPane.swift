@@ -251,7 +251,7 @@ struct SettingsAccountBanner: View {
             }
             ForEach(0..<3, id: \.self) { i in
                 HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 2).fill([Color(hex: "D97757"), Color(hex: "10A37F"), Color(hex: "6E6E6E")][i]).frame(width: 8, height: 8)
+                    RoundedRectangle(cornerRadius: 2).fill([ProviderCatalog.info(for: "claude-code").color, ProviderCatalog.info(for: "codex").color, ProviderCatalog.info(for: "opencode").color][i]).frame(width: 8, height: 8)
                     RoundedRectangle(cornerRadius: 2).fill(Color.black.opacity(0.08)).frame(width: CGFloat([110, 80, 96][i]), height: 6)
                 }
             }

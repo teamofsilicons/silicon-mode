@@ -210,7 +210,7 @@ private struct OnboardingScreen: View {
             if bloom > 0.4 {
                 var orbit = night
                 orbit.opacity = dark * min((bloom - 0.4) / 0.6, 1)
-                let colors = [Color(hex: "D97757"), Color(hex: "10A37F"), Color(hex: "8B5CF6")]
+                let colors = [ProviderCatalog.info(for: "claude-code").color, ProviderCatalog.info(for: "codex").color, Color(hex: "8B5CF6")]
                 for i in 0..<3 {
                     let a = t * 0.9 + Double(i) * 2 * .pi / 3
                     let p = CGPoint(x: c.x + cos(a) * s * 0.58, y: c.y + sin(a) * s * 0.30)
