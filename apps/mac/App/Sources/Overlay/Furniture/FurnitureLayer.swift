@@ -95,12 +95,10 @@ struct FurnitureLayer: View {
         case .agents:
             return AgentsPiece.demand(count: agentCount, collapsed: collapsed)
         case .logs:
-            // Line counts, not measured heights. The log book isn't observed here: it changes in
-            // the same refresh as `modeAgents`, which this layer does observe.
+            // The selected tab's lines, never measured views (see `LogsPiece.demand`).
             let minimized = preview?.logsMinimized ?? ui.logsMinimized(piece.id)
-            let lines = preview.map { LogsPiece.longestLog($0.sessions, book: nil) }
-                ?? LogsPiece.longestLog(model.modeAgents, book: model.logBook)
-            return LogsPiece.demand(minimized: minimized, lines: lines, screenHeight: screen.height)
+            return LogsPiece.demand(pieceID: piece.id, slot: piece.slot, minimized: minimized, screen: screen,
+                                    preview: preview, model: model)
         case .questions:
             return QuestionsPiece.demand(questions, hasAgents: agentCount > 0)
         case .clock:

@@ -258,22 +258,18 @@ enum CoreText {
         return EventText.clip(String(line), max: max)
     }
 
-    /// First line of prose from Markdown: skips code fences, drops heading/quote/list markers,
-    /// emphasis and inline-code backticks.
+    /// The first block of prose of a Markdown message as plain text (`EventText.plain`): skips
+    /// code fences, and a heading ("## Summary", a "**Done**" line) when prose follows it. A line
+    /// that introduces a list ("Five tracks are running:") brings its items along, so it doesn't
+    /// read unfinished ("Five tracks are running: logs; cards; chrome").
     static func firstProseLine(_ s: String, max: Int = 400) -> String {
-        var inFence = false
-        for raw in s.split(whereSeparator: \.isNewline) {
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") || line.hasPrefix("~~~") { inFence.toggle(); continue }
-            if inFence || line.isEmpty || line.allSatisfy({ "-*_=|:".contains($0) || $0 == " " }) { continue }
-            while let f = line.first, "#>".contains(f) { line.removeFirst() }
-            line = line.trimmingCharacters(in: .whitespaces)
-            for marker in ["- ", "* ", "+ "] where line.hasPrefix(marker) { line.removeFirst(2) }
-            line = line.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "__", with: "")
-                .replacingOccurrences(of: "`", with: "")
-            if !line.isEmpty { return EventText.clip(line, max: max) }
+        let blocks = EventText.plainBlocks(s, limit: max)
+        guard let i = blocks.firstIndex(where: { $0.kind != .heading }) ?? blocks.indices.first else {
+            return firstLine(s, max: max)
         }
-        return firstLine(s, max: max)
+        let items = blocks[(i + 1)...].prefix { $0.kind == .item }
+        guard blocks[i].text.hasSuffix(":"), !items.isEmpty else { return EventText.clip(blocks[i].text, max: max) }
+        return EventText.clip(EventText.joined(blocks[i...(i + items.count)]), max: max)
     }
 
     /// First sentence (or line) of prose, clipped.

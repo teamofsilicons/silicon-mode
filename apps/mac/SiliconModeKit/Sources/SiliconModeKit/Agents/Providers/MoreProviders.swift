@@ -530,9 +530,12 @@ struct EventList {
     /// Adds one event line. Text is redacted (API keys, tokens, passwords…) like the core providers'
     /// `EventLog.append`: it is clipped generously first (so redaction stays cheap on long messages),
     /// redacted, then clipped to its final length (so a secret cut at the edge is still caught).
+    /// The assistant's Markdown is read as plain text first (`EventText.plain`).
     mutating func add(_ id: String, at: Date?, _ kind: AgentEvent.Kind, _ text: String?) {
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let line = EventText.clip(Redactor.redact(EventText.clip(text, max: 600)))
+        let source = kind == .assistant ? EventText.plain(markdown: String(text.prefix(8000)), limit: 600) : text
+        let line = EventText.clip(Redactor.redact(EventText.clip(source, max: 600)))
+        guard !line.isEmpty else { return }
         events.append(AgentEvent(id: "\(prefix):\(id)", at: at ?? .distantPast, kind: kind, text: line))
     }
 

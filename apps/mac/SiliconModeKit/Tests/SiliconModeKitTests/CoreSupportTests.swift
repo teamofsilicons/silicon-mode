@@ -180,7 +180,9 @@ struct StubHooks: HookStateReader {
 
     @Test func proseFromMarkdown() {
         #expect(CoreText.firstSentence("```json\n{\"a\": 1}\n```\n**Done** with `npm test`. Next steps follow.") == "Done with npm test.")
-        #expect(CoreText.firstSentence("## Summary\n- Fixed the race in the cart timer. Also more.") == "Summary")
+        // A heading followed by prose says nothing on its own: the prose is the summary.
+        #expect(CoreText.firstSentence("## Summary\n- Fixed the race in the cart timer. Also more.") == "Fixed the race in the cart timer.")
+        #expect(CoreText.firstSentence("## Summary") == "Summary")
         #expect(CoreText.firstSentence("ok") == "ok")
     }
 

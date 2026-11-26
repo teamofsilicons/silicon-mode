@@ -385,7 +385,7 @@ import Foundation
         #expect(s.pid == 9000)
         #expect(s.title == "rename the demo function")
         #expect(s.state == .finished)
-        #expect(s.recentEvents.map(\.text) == ["rename the demo function", "I'll rename `foo` to `bar`.",
+        #expect(s.recentEvents.map(\.text) == ["rename the demo function", "I'll rename foo to bar.",
                                                "Applied edit to Sources/Demo.swift", "Commit abc1234 rename foo to bar"])
         #expect(await AiderProvider(env: world.env(home)).scan(scanContext([])).isEmpty)
     }

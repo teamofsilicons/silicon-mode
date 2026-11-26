@@ -35,6 +35,8 @@ import Foundation
              "updatedAt": 1_795_168_740_000, "hasActiveRun": true, "activeRunIds": ["run-1"]],
             ["key": "agent:main:untitled", "lastMessagePreview": "Using \(secret) here",
              "updatedAt": 1_795_168_740_000, "hasActiveRun": true, "activeRunIds": ["run-2"]],
+            ["key": "agent:main:markdown", "displayName": "Notes", "lastMessagePreview": "**Done:** moved `\(secret)` *out*",
+             "updatedAt": 1_795_168_740_000, "hasActiveRun": true, "activeRunIds": ["run-3"]],
         ]])
         // No chat.history: sessions fall back to their gateway preview.
         world.run.withLock { $0 = { args in
@@ -43,7 +45,7 @@ import Foundation
         let p = OpenClawProvider(env: world.env(home))
         await p.fetchSessions(now: MoreFixtures.now)
         let out = await p.scan(scanContext([gateway]))
-        #expect(out.count == 3)
+        #expect(out.count == 4)
 
         // Nothing shown anywhere carries the secret (or a recognisable piece of it).
         let shown = out.flatMap { s in
@@ -61,6 +63,10 @@ import Foundation
 
         let untitled = try #require(out.first { $0.nativeID == "agent:main:untitled" })
         #expect(untitled.title == "Using ••• here")
+
+        // A Markdown preview reads as plain text, still redacted.
+        let markdown = try #require(out.first { $0.nativeID == "agent:main:markdown" })
+        #expect(markdown.recentEvents.map(\.text) == ["Done: moved ••• out"])
 
         // An approval whose session isn't listed yet.
         let orphan = try #require(out.first { $0.nativeID == "agent:main:orphan" })
