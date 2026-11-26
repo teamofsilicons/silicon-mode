@@ -101,7 +101,10 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
             usedApprovals.formUnion(mine.map(\.id))
             var events = snapshot.history[s.key] ?? []
             if events.isEmpty, let p = s.preview {
-                events = [AgentEvent(id: "openclaw:\(s.key):preview", at: s.updatedAt, kind: .assistant, text: Self.line(p))]
+                // The last message, usually the agent's Markdown: read as plain text, like other assistant lines.
+                let plain = EventText.plain(markdown: String(p.prefix(8000)), limit: 600)
+                events = [AgentEvent(id: "openclaw:\(s.key):preview", at: s.updatedAt, kind: .assistant,
+                                     text: Self.line(plain.isEmpty ? p : plain))]
             }
             let title = MoreText.title(s.title.map { Self.line($0, max: 600) }, s.preview.map { Self.line($0, max: 600) }, fallback: "OpenClaw")
             out.append(AgentSession(provider: info.id, nativeID: s.key, title: title,
