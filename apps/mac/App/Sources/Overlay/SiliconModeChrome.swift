@@ -181,8 +181,10 @@ private struct NeedYouLabel: View {
                 .contentTransition(.opacity)
                 .animation(AgentSummaryMotion.change, value: count)
         } icon: {
+            // One solid colour with the label (hierarchical would draw the bell as a translucent,
+            // brownish orange on the dark glass).
             Image(systemName: "bell.badge.fill")
-                .symbolRenderingMode(.hierarchical)
+                .symbolRenderingMode(.monochrome)
         }
         .font(.headline)
         .foregroundStyle(HUDTint.needsYou)
