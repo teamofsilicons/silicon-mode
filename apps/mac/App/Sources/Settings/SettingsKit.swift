@@ -18,6 +18,9 @@ enum SettingsRender {
     nonisolated(unsafe) static var previewSignedIn: Bool?
     nonisolated(unsafe) static var previewHookStatuses: [String: HookInstaller.Status]?
     nonisolated(unsafe) static var previewBiometrics: Bool?
+    /// The Face furniture pane shows (and leaves unedited) this layout instead of the user's.
+    nonisolated(unsafe) static var previewFurniture: [FurniturePiece]?
+    nonisolated(unsafe) static var previewFurnitureHidden: Bool?
 }
 
 /// Extra Silicon tokens (shared/design/tokens.json) not in Theme.
@@ -429,6 +432,38 @@ extension View {
         } else {
             self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
         }
+    }
+}
+
+/// A borderless glyph button for compact row controls (reorder, remove): muted at rest, a soft
+/// tile and `tint` on hover.
+struct SettingsIconButton: View {
+    let systemImage: String
+    /// Tooltip and accessibility label.
+    let label: String
+    var tint: Color? = nil
+    var size = CGSize(width: 26, height: 26)
+    var fontSize: CGFloat = 13
+    let action: () -> Void
+    @State private var hover = false
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        let lit = hover && enabled
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: fontSize, weight: .semibold))
+                .foregroundStyle(lit ? (tint ?? Theme.foreground) : Theme.textMuted)
+                .frame(width: size.width, height: size.height)
+                .background(lit ? (tint ?? Theme.foreground).opacity(0.08) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(enabled ? 1 : 0.3)
+        .onHover { h in withAnimation(Theme.Motion.fast) { hover = h } }
+        .help(label)
+        .accessibilityLabel(label)
     }
 }
 
