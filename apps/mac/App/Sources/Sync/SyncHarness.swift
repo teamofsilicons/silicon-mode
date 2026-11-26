@@ -16,6 +16,12 @@ import Security
 @main
 struct SyncHarnessMain {
     @MainActor static func main() async {
+        #if SYNC_HARNESS_UI
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshots"), i + 2 < CommandLine.arguments.count {
+            SyncUISnapshots.render(fontPath: CommandLine.arguments[i + 1], outDir: CommandLine.arguments[i + 2])
+            exit(0)
+        }
+        #endif
         let live = CommandLine.arguments.contains("--live")
         let h = Harness()
         await h.offline()
@@ -179,6 +185,7 @@ final class Harness {
         }
         account.signIn()
         let signedIn = await waitUntil(20) { account.isSignedIn }
+        _ = await waitUntil(5) { !browserResult.isEmpty }
         check("signed in via loopback", signedIn, "state=\(account.state) browser=\(browserResult.prefix(200))")
         check("page reports success with profile", browserResult.contains("\"ok\":true") && browserResult.contains("\"handle\""))
         check("profile loaded", account.account?.uuid.count == 36 && !(account.account?.displayName.isEmpty ?? true),
@@ -501,6 +508,38 @@ final class FakeHost: SyncHost {
         return .applied
     }
 }
+
+#if SYNC_HARNESS_UI
+import SwiftUI
+import CoreText
+
+/// `--snapshots <AlloVariable.ttf> <out dir>`: render every SyncPreviews variant, light + dark.
+/// Build with `-D SYNC_HARNESS_UI` and add `App/Sources/Design/Theme.swift` to the swiftc inputs.
+@MainActor
+enum SyncUISnapshots {
+    static func render(fontPath: String, outDir: String) {
+        CTFontManagerRegisterFontsForURL(URL(fileURLWithPath: fontPath) as CFURL, .process, nil)
+        _ = NSApplication.shared
+        // Warm-up pass: the first few offscreen renders skip glass controls.
+        for (_, view) in SyncPreviews.variants.prefix(3) { _ = ImageRenderer(content: view.frame(width: 568, height: 200)).cgImage }
+        for (id, view) in SyncPreviews.variants {
+            for dark in [false, true] {
+                let content = view
+                    .frame(width: 568, height: 200)
+                    .environment(\.colorScheme, dark ? .dark : .light)
+                let r = ImageRenderer(content: content)
+                r.scale = 2
+                NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+                    guard let cg = r.cgImage else { print("render failed \(id)"); return }
+                    let out = "\(outDir)/\(id)-\(dark ? "dark" : "light").png"
+                    try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                    print(out)
+                }
+            }
+        }
+    }
+}
+#endif
 
 final class NoRedirect: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,

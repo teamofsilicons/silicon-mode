@@ -350,7 +350,22 @@ enum SyncRedactor {
 
     private static let home = NSHomeDirectory()
 
+    /// Memoized: the same titles/summaries are seen on every poll.
+    @MainActor private static var memo: [String: String] = [:]
+
     static func clean(_ s: String) -> String {
+        if Thread.isMainThread, let hit = MainActor.assumeIsolated({ memo[s] }) { return hit }
+        let out = compute(s)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                if memo.count > 2000 { memo.removeAll(keepingCapacity: true) }
+                memo[s] = out
+            }
+        }
+        return out
+    }
+
+    private static func compute(_ s: String) -> String {
         var out = s
         if !home.isEmpty, home != "/" { out = out.replacingOccurrences(of: home, with: "~") }
         for (re, tpl) in rules.patterns {

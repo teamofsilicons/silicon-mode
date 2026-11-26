@@ -30,14 +30,14 @@ enum LoopbackPage {
 :root{
   --bg:#F8F8F8;--card:#FFFFFF;--fg:#1B1B1B;--muted:#6B6B6B;--faint:#A4A4A4;--border:#E9E9E9;
   --accent:#3460F0;--accent-fg:#FFFFFF;--g1:#E2D8F8;--g2:#FADFC6;--ink1:#644C8A;--ink2:#8A542D;--danger:#B42318;
-  --pill:#F1F1F1;
+  --pill:#F1F1F1;--orb-edge:rgba(255,255,255,.55);
   --shadow:0 1px 2px rgba(70,45,20,.05),0 2px 6px -2px rgba(70,45,20,.05),0 28px 60px -24px rgba(90,60,25,.16);
   --spring:cubic-bezier(.34,1.56,.64,1);--ease:cubic-bezier(.22,1,.36,1);
 }
 @media (prefers-color-scheme:dark){:root{
   --bg:#0F0F0F;--card:#191919;--fg:#F2F2F2;--muted:#8C8C8C;--faint:#4D4D4D;--border:#2B2B2B;
   --accent:#7D9BFF;--accent-fg:#141414;--g1:#CBBAEB;--g2:#EDCAA3;--ink1:#463C59;--ink2:#5A422F;--danger:#F4968C;
-  --pill:#242424;
+  --pill:#242424;--orb-edge:rgba(255,255,255,.14);
   --shadow:0 1px 2px rgba(0,0,0,.5),0 30px 80px -30px rgba(0,0,0,.8);
 }}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -51,7 +51,7 @@ body{background:var(--bg);color:var(--fg);display:grid;place-items:center;paddin
 @keyframes rise{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
 .orb{position:relative;width:88px;height:88px;margin:0 auto;border-radius:30px;
   background:linear-gradient(135deg,var(--g1),var(--g2));display:grid;place-items:center}
-.orb::after{content:"";position:absolute;inset:-1px;border-radius:31px;border:1px solid rgba(255,255,255,.35);pointer-events:none}
+.orb::after{content:"";position:absolute;inset:0;border-radius:30px;box-shadow:inset 0 0 0 1px var(--orb-edge);pointer-events:none}
 .ring{position:absolute;inset:0;border-radius:30px;border:2px solid var(--g2);opacity:0}
 [data-state=ok] .ring{animation:ring 1.4s var(--ease) .15s both}
 @keyframes ring{from{opacity:.9;transform:scale(1)}to{opacity:0;transform:scale(1.55)}}
@@ -63,7 +63,7 @@ svg.mac{width:58px;height:58px;overflow:visible}
 [data-state=ok] .mac .lid{animation:settle .9s var(--spring) forwards}
 @keyframes settle{to{transform:rotate(-62deg)}}
 [data-state=error] .mac .lid{animation:none;transform:rotate(-108deg);transition:transform .5s var(--ease)}
-.badge{position:absolute;right:-8px;bottom:-8px;width:32px;height:32px;border-radius:50%;
+.badge{position:absolute;z-index:2;right:-8px;bottom:-8px;width:32px;height:32px;border-radius:50%;
   background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;
   box-shadow:0 0 0 4px var(--card);transform:scale(0);opacity:0}
 [data-state=ok] .badge{animation:pop .6s var(--spring) .35s forwards}
@@ -86,6 +86,7 @@ p{font-size:15px;line-height:1.45;color:var(--muted);letter-spacing:-.01em;margi
 .av{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--g1),var(--g2));color:#1B1A1F;
   display:grid;place-items:center;font-weight:600;font-size:13px}
 .who b{font-weight:500}
+.who .av{color:#1B1A1F}
 .who span{color:var(--muted);font-variant-numeric:tabular-nums}
 .dots{display:inline-flex;gap:5px;margin-top:22px}
 .dots i{width:6px;height:6px;border-radius:50%;background:var(--faint);animation:dot 1.2s ease-in-out infinite}

@@ -66,7 +66,8 @@ final class CloudSync {
     @ObservationIgnored var urgentDebounce: Duration = .milliseconds(300)
     @ObservationIgnored var heartbeatInterval: Duration = .seconds(60)
     @ObservationIgnored var realtimeLinger: Duration = .seconds(30)
-    /// While questions are pending and the socket is down, ask push_batch for answers this often.
+    /// While questions are pending, make sure a push (whose reply carries unconsumed answers) happens
+    /// at least this often — the safety net under realtime (doubled while the socket is live).
     @ObservationIgnored var answerPollInterval: Duration = .seconds(15)
     @ObservationIgnored var deviceInfo: () -> SyncDeviceInfo = { SyncDeviceInfo.current() }
     @ObservationIgnored var usageBackfillDays = 21
@@ -79,6 +80,7 @@ final class CloudSync {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let ledgerStore: SyncLedgerStore
     @ObservationIgnored private var ledger: SyncLedger?
+    @ObservationIgnored private var lastSavedLedger: SyncLedger?
 
     @ObservationIgnored private var running = false
     @ObservationIgnored private var registeredThisRun = false
@@ -93,6 +95,7 @@ final class CloudSync {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     /// The next flush must reach the server even with nothing to send (it returns pending answers).
     @ObservationIgnored private var answerSyncDue = false
+    @ObservationIgnored private var lastPushAt: ContinuousClock.Instant?
     @ObservationIgnored private var backoffUntil: ContinuousClock.Instant?
     @ObservationIgnored private var failures = 0
     @ObservationIgnored private var poisonCount = 0
@@ -236,7 +239,11 @@ final class CloudSync {
             while !Task.isCancelled {
                 try? await Task.sleep(for: poll)
                 guard !Task.isCancelled, let self else { return }
-                if !self.realtimeLive, !(self.ledger?.pushedQuestions.isEmpty ?? true) { self.requestAnswerSync(urgent: false) }
+                guard !(self.ledger?.pushedQuestions.isEmpty ?? true) else { continue }
+                let window = self.realtimeLive ? poll * 2 : poll
+                if self.lastPushAt.map({ ContinuousClock.now - $0 >= window - .seconds(1) }) ?? true {
+                    self.requestAnswerSync(urgent: false)
+                }
             }
         }
     }
@@ -322,6 +329,7 @@ final class CloudSync {
             let body = try batch.rpcBody()
             let data: Data
             do { data = try await client.rpc("push_batch", body) } catch { if answerSync { answerSyncDue = true }; throw error }
+            lastPushAt = .now
             guard running, deviceID == dev else { return }
             apply(commit, heartbeat: heartbeat)
             markSynced()
@@ -478,11 +486,16 @@ final class CloudSync {
             let changed = prev == nil || prev!.row.significantKey != row.significantKey
             let touched = !changed && prev!.row.lastEventAt != row.lastEventAt && now.timeIntervalSince(prev!.sentAt) > 30
             if changed || touched { b.sessions.append(row); included.insert(row.id) }
-            let events = s.recentEvents.sorted { $0.at < $1.at }.map { e -> SyncLedger.LocalEvent in
-                let (kind, detail) = SyncMapper.eventKind(e.kind)
-                return .init(id: e.id, at: SyncTime.iso(e.at), kind: kind, summary: SyncMapper.eventSummary(e.text), detail: detail)
+            let seen = Set(l.seqs[row.id]?.seen ?? [])
+            let fresh = s.recentEvents.filter { !seen.contains($0.id) }.sorted { $0.at < $1.at }
+            if fresh.isEmpty {
+                if let t = l.seqs[row.id]?.touched, now.timeIntervalSince(t) > 3600 { l.seqs[row.id]?.touched = now }
+            } else {
+                l.enqueue(sessionUUID: row.id, now: now, events: fresh.map { e in
+                    let (kind, detail) = SyncMapper.eventKind(e.kind)
+                    return .init(id: e.id, at: SyncTime.iso(e.at), kind: kind, summary: SyncMapper.eventSummary(e.text), detail: detail)
+                })
             }
-            l.enqueue(sessionUUID: row.id, events: events, now: now)
         }
         // Sessions that vanished locally: end them.
         for (uuid, live) in l.live where current[uuid] == nil {
@@ -602,7 +615,12 @@ final class CloudSync {
         saveLedger()
     }
 
-    private func saveLedger() { if let l = ledger { ledgerStore.save(l) } }
+    /// Persist the ledger (encoded + written off the main thread) if it changed since the last save.
+    private func saveLedger() {
+        guard let l = ledger, l != lastSavedLedger else { return }
+        lastSavedLedger = l
+        ledgerStore.save(l)
+    }
 
     // MARK: Offline marker
 

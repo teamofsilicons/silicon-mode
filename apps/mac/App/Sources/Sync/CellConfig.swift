@@ -144,6 +144,8 @@ enum SyncLog {
     static func info(_ s: @autoclosure () -> String) {
         #if DEBUG
         NSLog("SiliconMode.sync: %@", s())
+        #elseif SYNC_HARNESS
+        if ProcessInfo.processInfo.environment["SYNC_DEBUG"] != nil { print("    · \(s())") }
         #endif
     }
     static func error(_ s: @autoclosure () -> String) { NSLog("SiliconMode.sync: %@", s()) }

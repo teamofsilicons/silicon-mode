@@ -62,7 +62,7 @@ struct SyncLedger: Codable, Sendable, Equatable {
     /// Assigns seqs to events not seen before (in order) and appends them to the outbox.
     /// Returns how many were new.
     @discardableResult
-    mutating func enqueue(sessionUUID: String, events: [LocalEvent], now: Date = Date()) -> Int {
+    mutating func enqueue(sessionUUID: String, now: Date = Date(), events: [LocalEvent]) -> Int {
         var s = seqs[sessionUUID] ?? SessionSeq()
         let seen = Set(s.seen)
         var added = 0
@@ -127,9 +127,9 @@ final class SyncLedgerStore: @unchecked Sendable {
     }
 
     func save(_ l: SyncLedger) {
-        guard let data = try? JSONEncoder().encode(l) else { return }
         let url = self.url
         queue.async {
+            guard let data = try? JSONEncoder().encode(l) else { return }
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? data.write(to: url, options: .atomic)
         }

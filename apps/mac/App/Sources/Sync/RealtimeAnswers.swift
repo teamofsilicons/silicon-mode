@@ -164,6 +164,7 @@ actor RealtimeAnswers {
             let wasLive = isLive
             isLive = false
             let code = ws.closeCode.rawValue
+            SyncLog.info("realtime closed code=\(code) error=\(error)")
             ws.cancel()
             if socket === ws { socket = nil }
             if Task.isCancelled { return .cancelled }
@@ -180,14 +181,17 @@ actor RealtimeAnswers {
     private func handle(_ obj: [String: Any], _ ws: URLSessionWebSocketTask) async throws {
         switch obj["type"] as? String {
         case "ready":
+            SyncLog.info("realtime ready")
             try await subscribe(ws)
         case "subscribed":
+            SyncLog.info("realtime subscribed cursor=\(obj["cursor"] ?? "nil")")
             isLive = true
             onStatus(.live)
             if let c = (obj["cursor"] as? NSNumber)?.int64Value { setCursor(c) }
             // Anything inserted before we (re)subscribed without a cursor arrives via push_batch.
             onResync()
         case "change":
+            SyncLog.info("realtime change \(obj["table"] ?? "?") \(obj["operation"] ?? "?")")
             if let c = (obj["cursor"] as? NSNumber)?.int64Value { setCursor(c) }
             if let eid = obj["event_id"] as? String {
                 if recentEventIDs.contains(eid) { return }

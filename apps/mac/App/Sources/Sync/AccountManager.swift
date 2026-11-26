@@ -52,6 +52,8 @@ final class AccountManager {
     @ObservationIgnored var willSignOut: (@MainActor () async -> Void)?
 
     @ObservationIgnored private var server: LoopbackAuthServer?
+    /// A finished sign-in's listener, kept a moment so the page's POST response flushes.
+    @ObservationIgnored private var retiringServer: LoopbackAuthServer?
     @ObservationIgnored private var signInDeadline: Task<Void, Never>?
     @ObservationIgnored private var signInURL: URL?
     @ObservationIgnored private var observers: [UUID: @MainActor (Bool) -> Void] = [:]
@@ -124,6 +126,7 @@ final class AccountManager {
     func startSignIn(openBrowser: Bool) async {
         state = .signingIn
         stopServer()
+        retiringServer?.stop(); retiringServer = nil
         let server = LoopbackAuthServer { [weak self] fragment, query in
             await self?.complete(fragment: fragment, query: query)
                 ?? LoopbackResult(ok: false, title: "Silicon Mode quit", message: "Open Silicon Mode and try again.")
@@ -248,9 +251,14 @@ final class AccountManager {
         signInDeadline?.cancel(); signInDeadline = nil
         signInURL = nil
         // Let the page's POST response flush before the listener goes away.
-        let s = server
+        guard let s = server else { return }
         server = nil
-        Task { try? await Task.sleep(for: .seconds(2)); s?.stop() }
+        retiringServer = s
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            s.stop()
+            if self?.retiringServer === s { self?.retiringServer = nil }
+        }
     }
 
     private func stopServer() {
