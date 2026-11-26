@@ -15,6 +15,7 @@ struct QuestionsPiece: View {
     static let headerHeight: CGFloat = 20
     static let quietHeight: CGFloat = 32
     static let compactHeight: CGFloat = headerHeight + 12 + 34
+    static let moreHeight: CGFloat = 32
 
     var body: some View {
         let qs = FurnitureOrder.questions(preview?.questions ?? model.pendingQuestions)
@@ -33,7 +34,7 @@ struct QuestionsPiece: View {
         if qs.isEmpty { return .fixed(hasAgents ? quietHeight : 0) }
         let shown = qs.prefix(maxCards)
         let cards = shown.reduce(CGFloat(0)) { $0 + estimatedCardHeight($1) } + 12 * CGFloat(shown.count - 1)
-        let more: CGFloat = qs.count > maxCards ? 12 + 40 : 0
+        let more: CGFloat = qs.count > maxCards ? 12 + moreHeight : 0
         return FurnitureDemand(min: compactHeight, ideal: headerHeight + 12 + cards + more)
     }
 
@@ -72,11 +73,14 @@ struct QuestionStack: View {
                 }
             } else {
                 HStack {
-                    HUDSectionLabel(title: "Waiting on you", count: questions.count, color: Theme.Night.warning)
-                    Spacer(minLength: 0)
+                    if !leading { Spacer(minLength: 0) }
+                    HUDSectionLabel(title: "Waiting on You", count: questions.count, symbol: "bell.badge.fill", tint: HUDTint.needsYou)
+                    if leading { Spacer(minLength: 0) }
                 }
                 .frame(height: QuestionsPiece.headerHeight)
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8)
+                // The title floats over the face: a soft shadow keeps it legible on bright faces.
+                .shadow(color: .black.opacity(0.5), radius: 8)
                 .transition(.opacity)
                 // Candidates keyed by how many cards are *dropped*, so while everything fits the
                 // identity stays put (cards keep typed replies / selections and animate in place).
@@ -115,14 +119,14 @@ struct QuestionStack: View {
     private var compact: some View {
         HStack(spacing: 8) {
             HUDStateDot(state: .needsYou, size: 7)
-            Text("\(questions.count) waiting · make room to answer here")
-                .font(Theme.allo(12.5, .medium))
-                .foregroundStyle(Theme.Night.secondary)
+            Text("\(Text("\(questions.count) waiting").foregroundStyle(.primary)) \(Text("· make room to answer here").foregroundStyle(.secondary))")
+                .font(.subheadline.weight(.medium))
+                .monospacedDigit()
                 .lineLimit(1)
         }
         .padding(.horizontal, 14)
         .frame(height: 34)
-        .hudChip(tint: Theme.Night.warning.opacity(0.14))
+        .hudChip(tint: HUDTint.needsYou.opacity(0.14))
     }
 
     private var quiet: some View {
@@ -133,33 +137,29 @@ struct QuestionStack: View {
             if c.finished > 0 { return "\(c.finished) finished." }
             return "Nothing needs you."
         }()
-        return HStack(spacing: 8) {
+        return Label {
+            Text("\(Text("All quiet.").foregroundStyle(.primary)) \(Text(detail).foregroundStyle(.secondary))")
+        } icon: {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.Night.success)
-            Text("\(Text("All quiet.").foregroundStyle(Theme.Night.foreground)) \(Text(detail).foregroundStyle(Theme.Night.muted))")
-                .font(Theme.allo(12.5, .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(HUDTint.finished)
         }
-        .padding(.horizontal, 14)
+        .font(.subheadline.weight(.medium))
+        .lineLimit(1)
+        .padding(.horizontal, 12)
         .frame(height: QuestionsPiece.quietHeight)
         .hudChip()
     }
 
+    /// Questions that didn't fit: a quiet capsule, like a collapsed notification stack.
     private func moreStack(_ n: Int) -> some View {
-        ZStack(alignment: .top) {
-            ForEach(0..<min(n, 2), id: \.self) { i in
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(0.05 - Double(i) * 0.015))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.07)))
-                    .frame(height: 10)
-                    .padding(.horizontal, CGFloat(i + 1) * 14)
-                    .offset(y: CGFloat(i) * 6)
-            }
-            Text("+\(n) more waiting")
-                .font(Theme.allo(12, .medium))
-                .foregroundStyle(Theme.Night.warning.opacity(0.9))
-                .padding(.top, 22)
-        }
-        .frame(maxWidth: .infinity)
+        Label("\(n) more waiting", systemImage: "rectangle.stack.fill")
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .padding(.horizontal, 14)
+            .frame(height: QuestionsPiece.moreHeight)
+            .hudChip()
+            .frame(maxWidth: .infinity)
     }
 }

@@ -14,10 +14,10 @@ struct SystemPiece: View {
 
     static let padding: CGFloat = 16
     static let spacing: CGFloat = 12
-    static let headerHeight: CGFloat = 18
-    static let cpuHeight: CGFloat = 56
-    static let memoryHeight: CGFloat = 38
-    static let lineHeight: CGFloat = 18
+    static let headerHeight: CGFloat = 20
+    static let cpuHeight: CGFloat = 52
+    static let memoryHeight: CGFloat = 36
+    static let lineHeight: CGFloat = 20
 
     private struct Rows {
         var cpu, memory, battery, network: Bool
@@ -50,7 +50,7 @@ struct SystemPiece: View {
         }
         .padding(Self.padding)
         .frame(width: width, alignment: .leading)
-        .hudPanel(radius: 22)
+        .hudPanel()
         .accessibilityElement(children: .combine)
     }
 
@@ -58,17 +58,15 @@ struct SystemPiece: View {
 
     private func header(_ a: SystemActivity?) -> some View {
         HStack(spacing: 8) {
-            HUDSectionLabel(title: "System")
+            HUDSectionLabel(title: "System", symbol: "gauge.with.dots.needle.50percent")
             Spacer(minLength: 0)
             if let a, let t = Self.thermal(a.thermal) {
-                HStack(spacing: 4) {
-                    Image(systemName: "thermometer.medium").font(.system(size: 9, weight: .bold))
-                    Text(t.label).font(Theme.allo(10.5, .semibold))
-                }
-                .foregroundStyle(t.color)
-                .padding(.horizontal, 7)
-                .frame(height: 18)
-                .background(Capsule().fill(t.color.opacity(0.14)))
+                Label(t.label, systemImage: "thermometer.medium")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(t.color)
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .background(t.color.opacity(0.16), in: .capsule)
             }
         }
         .frame(height: Self.headerHeight)
@@ -77,16 +75,16 @@ struct SystemPiece: View {
     private func cpu(_ a: SystemActivity?) -> some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("CPU")
-                    .font(Theme.allo(11.5, .medium))
-                    .foregroundStyle(Theme.Night.muted)
+                Label("CPU", systemImage: "cpu")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 Text(a.map { Self.percent($0.cpu) } ?? "—")
-                    .font(Theme.allo(26, .light))
-                    .tracking(Theme.tracking(26, display: true))
+                    .font(.title2.weight(.semibold))
                     .monospacedDigit()
-                    .foregroundStyle(Theme.Night.foreground)
+                    .foregroundStyle(.primary)
+                    .contentTransition(.numericText())
             }
-            .frame(width: 78, alignment: .leading)
+            .frame(width: 84, alignment: .leading)
             SystemSparkline(values: a?.cpuHistory ?? [])
                 .frame(height: 36)
         }
@@ -95,24 +93,25 @@ struct SystemPiece: View {
 
     private func memory(_ a: SystemActivity?) -> some View {
         let tint: Color = switch a?.pressure ?? .normal {
-        case .normal: Theme.Night.accent
-        case .warning: Theme.Night.warning
-        case .critical: Theme.Night.danger
+        case .normal: .green
+        case .warning: .yellow
+        case .critical: .red
         }
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Memory")
-                    .font(Theme.allo(11.5, .medium))
-                    .foregroundStyle(Theme.Night.muted)
+                Label("Memory", systemImage: "memorychip")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 6)
                 Text(a.map { "\(Self.gigabytes($0.memUsed)) of \(Self.gigabytes($0.memTotal))" } ?? "—")
-                    .font(Theme.allo(12, .medium))
+                    .font(.subheadline.weight(.medium))
                     .monospacedDigit()
-                    .foregroundStyle(Theme.Night.secondary)
+                    .foregroundStyle(.primary)
             }
+            // A capacity bar; the geometry only places the fill (it never feeds back into layout).
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(.fill.tertiary)
                     Capsule().fill(tint)
                         .frame(width: max(6, geo.size.width * CGFloat(a?.memFraction ?? 0)))
                 }
@@ -126,16 +125,17 @@ struct SystemPiece: View {
     private func battery(_ b: SystemActivity.Battery) -> some View {
         HStack(spacing: 8) {
             Image(systemName: Self.batterySymbol(b))
-                .font(.system(size: 13, weight: .regular))
-                .foregroundStyle(b.level < 0.15 && !b.pluggedIn ? Theme.Night.danger : Theme.Night.secondary)
+                .font(.body)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(b.level < 0.15 && !b.pluggedIn ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
                 .frame(width: 26, alignment: .leading)
             Text(Self.percent(b.level))
-                .font(Theme.allo(12.5, .medium))
+                .font(.subheadline.weight(.semibold))
                 .monospacedDigit()
-                .foregroundStyle(Theme.Night.foreground)
-            Text(b.charging ? "Charging" : (b.pluggedIn ? "Plugged in" : "On battery"))
-                .font(Theme.allo(12, .regular))
-                .foregroundStyle(Theme.Night.muted)
+                .foregroundStyle(.primary)
+            Text(b.charging ? "Charging" : (b.pluggedIn ? "Plugged In" : "On Battery"))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
         .frame(height: Self.lineHeight)
@@ -144,8 +144,8 @@ struct SystemPiece: View {
     private func network(_ a: SystemActivity?) -> some View {
         HStack(spacing: 14) {
             Image(systemName: "network")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(Theme.Night.secondary)
+                .font(.body)
+                .foregroundStyle(.secondary)
                 .frame(width: 26, alignment: .leading)
             rate("arrow.down", a?.netIn)
             rate("arrow.up", a?.netOut)
@@ -157,12 +157,12 @@ struct SystemPiece: View {
     private func rate(_ symbol: String, _ v: Double?) -> some View {
         HStack(spacing: 4) {
             Image(systemName: symbol)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Theme.Night.muted)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.tertiary)
             Text(v.map(Self.rate) ?? "—")
-                .font(Theme.allo(12.5, .medium))
+                .font(.subheadline.weight(.medium))
                 .monospacedDigit()
-                .foregroundStyle(Theme.Night.foreground)
+                .foregroundStyle(.primary)
         }
     }
 
@@ -197,9 +197,9 @@ struct SystemPiece: View {
     static func thermal(_ t: ProcessInfo.ThermalState) -> (label: String, color: Color)? {
         switch t {
         case .nominal: nil
-        case .fair: ("Warm", Theme.Night.warning)
-        case .serious: ("Hot", Theme.Night.danger)
-        case .critical: ("Throttling", Theme.Night.danger)
+        case .fair: ("Warm", .orange)
+        case .serious: ("Hot", .red)
+        case .critical: ("Throttling", .red)
         @unknown default: nil
         }
     }
@@ -215,7 +215,7 @@ private struct SystemSparkline: View {
                 var base = Path()
                 base.move(to: CGPoint(x: 0, y: size.height - 1))
                 base.addLine(to: CGPoint(x: size.width, y: size.height - 1))
-                ctx.stroke(base, with: .color(Color.white.opacity(0.1)), lineWidth: 1)
+                ctx.stroke(base, with: .color(Color.white.opacity(0.12)), lineWidth: 1)
                 return
             }
             // 60 samples fill the width; fewer start from the right.
@@ -231,9 +231,10 @@ private struct SystemSparkline: View {
             fill.addLine(to: CGPoint(x: pts[pts.count - 1].x, y: size.height))
             fill.addLine(to: CGPoint(x: pts[0].x, y: size.height))
             fill.closeSubpath()
-            ctx.fill(fill, with: .linearGradient(Gradient(colors: [Theme.Night.accent.opacity(0.28), Theme.Night.accent.opacity(0)]),
+            let tint = HUDTint.working
+            ctx.fill(fill, with: .linearGradient(Gradient(colors: [tint.opacity(0.32), tint.opacity(0)]),
                                                  startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
-            ctx.stroke(line, with: .color(Theme.Night.accent), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            ctx.stroke(line, with: .color(tint), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
         }
         .accessibilityHidden(true)
     }

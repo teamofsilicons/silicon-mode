@@ -14,9 +14,6 @@ struct FurnitureLayer: View {
     /// Live: the overlay stage (questions peek). Nil in previews.
     var stage: OverlayStage?
 
-    /// Ideal heights measured by the pieces themselves (the logs body).
-    @State private var measurements = FurnitureMeasurements()
-
     private var ui: FurnitureUIState { .shared }
 
     var body: some View {
@@ -42,12 +39,12 @@ struct FurnitureLayer: View {
         .environment(\.colorScheme, .dark)
     }
 
-    /// What is drawn: the layout, nothing while hidden, or just the Questions piece while peeking.
+    /// What is drawn: the layout, nothing while hidden, or just the placed Questions piece while
+    /// peeking. A user who removed the Questions piece never gets answerable cards from a peek.
     static func shownPieces(settings: ModeSettings, peek: Bool, hasQuestions: Bool) -> [FurniturePiece] {
         guard settings.furnitureHidden else { return settings.furniture }
-        guard peek, hasQuestions else { return [] }
-        let placed = settings.furniture.first { $0.kind == .questions }
-        return [placed ?? FurniturePiece(id: "questions", kind: .questions, slot: FurnitureKind.questions.defaultSlot)]
+        guard peek, hasQuestions, let placed = settings.furniture.first(where: { $0.kind == .questions }) else { return [] }
+        return [placed]
     }
 
     @ViewBuilder
@@ -58,8 +55,7 @@ struct FurnitureLayer: View {
         let ordered = slot.isTop ? placements : placements.reversed()
         VStack(alignment: h, spacing: m.spacing) {
             ForEach(ordered) { p in
-                FurniturePieceView(piece: p.piece, budget: p.height, width: p.width, slot: slot,
-                                   measurements: measurements, preview: preview)
+                FurniturePieceView(piece: p.piece, budget: p.height, width: p.width, slot: slot, preview: preview)
                     .equatable()
                     .frame(width: p.width, alignment: Alignment(horizontal: h, vertical: slot.isTop ? .top : .bottom))
                     .modifier(FurnitureCap(height: p.height))
@@ -78,9 +74,12 @@ struct FurnitureLayer: View {
         case .agents:
             return AgentsPiece.demand(count: agentCount, collapsed: collapsed)
         case .logs:
+            // Line counts, not measured heights. The log book isn't observed here: it changes in
+            // the same refresh as `modeAgents`, which this layer does observe.
             let minimized = preview?.logsMinimized ?? ui.logsMinimized(piece.id)
-            let body = preview.map(LogsPiece.previewBodyIdeal) ?? measurements.ideal[piece.id]
-            return LogsPiece.demand(minimized: minimized, bodyIdeal: body, screenHeight: screen.height)
+            let lines = preview.map { LogsPiece.longestLog($0.sessions, book: nil) }
+                ?? LogsPiece.longestLog(model.modeAgents, book: model.logBook)
+            return LogsPiece.demand(minimized: minimized, lines: lines, screenHeight: screen.height)
         case .questions:
             return QuestionsPiece.demand(questions, hasAgents: agentCount > 0)
         case .clock:
@@ -99,20 +98,19 @@ struct FurniturePieceView: View, Equatable {
     let budget: CGFloat
     let width: CGFloat
     let slot: FurnitureSlot
-    let measurements: FurnitureMeasurements
     var preview: FurnitureSource?
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.piece == b.piece && a.budget == b.budget && a.width == b.width && a.slot == b.slot
-            && a.measurements === b.measurements && a.preview == nil && b.preview == nil
+            && a.preview == nil && b.preview == nil
     }
 
     var body: some View {
         switch piece.kind {
         case .agents:
-            AgentsPiece(budget: budget, width: width, preview: preview)
+            AgentsPiece(budget: budget, width: width, leading: slot.isLeading, preview: preview)
         case .logs:
-            LogsPiece(pieceID: piece.id, budget: budget, width: width, slot: slot, measurements: measurements, preview: preview)
+            LogsPiece(pieceID: piece.id, budget: budget, width: width, slot: slot, preview: preview)
         case .questions:
             QuestionsPiece(budget: budget, width: width, leading: slot.isLeading, preview: preview)
         case .clock:
