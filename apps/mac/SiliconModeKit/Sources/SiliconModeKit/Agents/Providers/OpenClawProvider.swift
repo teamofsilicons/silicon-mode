@@ -101,9 +101,10 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
             usedApprovals.formUnion(mine.map(\.id))
             var events = snapshot.history[s.key] ?? []
             if events.isEmpty, let p = s.preview {
-                events = [AgentEvent(id: "openclaw:\(s.key):preview", at: s.updatedAt, kind: .assistant, text: EventText.clip(p))]
+                events = [AgentEvent(id: "openclaw:\(s.key):preview", at: s.updatedAt, kind: .assistant, text: Self.line(p))]
             }
-            out.append(AgentSession(provider: info.id, nativeID: s.key, title: MoreText.title(s.title, s.preview, fallback: "OpenClaw"),
+            let title = MoreText.title(s.title.map { Self.line($0, max: 600) }, s.preview.map { Self.line($0, max: 600) }, fallback: "OpenClaw")
+            out.append(AgentSession(provider: info.id, nativeID: s.key, title: title,
                                     cwd: s.cwd, state: st, updatedAt: s.updatedAt, pid: gateways.first?.pid, model: s.model,
                                     recentEvents: Array(events.suffix(ctx.maxEvents)), pendingQuestions: questions))
         }
@@ -113,7 +114,7 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
             let first = list[0]
             out.append(AgentSession(provider: info.id, nativeID: key, title: first.agentID.map { "OpenClaw · \($0)" } ?? "OpenClaw",
                                     state: .needsYou, updatedAt: list.map(\.createdAt).max() ?? ctx.now, pid: gateways.first?.pid,
-                                    recentEvents: list.map { AgentEvent(id: "openclaw:\($0.id)", at: $0.createdAt, kind: .permission, text: EventText.clip($0.title)) },
+                                    recentEvents: list.map { AgentEvent(id: "openclaw:\($0.id)", at: $0.createdAt, kind: .permission, text: Self.line($0.title)) },
                                     pendingQuestions: list.map { question(for: $0, sessionKey: key) }))
         }
         // Interactive `openclaw tui` / `openclaw agent` clients with no gateway session yet.
@@ -158,10 +159,25 @@ public final class OpenClawProvider: AgentProvider, @unchecked Sendable {
         if allowed.contains("allow-once") { options.append(.init(id: "allow", label: "Allow", style: .primary)) }
         if allowed.contains("allow-always") { options.append(.init(id: "allow_always", label: "Always allow")) }
         if allowed.contains("deny") { options.append(.init(id: "deny", label: "Deny", style: .destructive)) }
-        let detail = [a.detail, a.warning].compactMap { $0 }.joined(separator: "\n")
+        let detail = [a.detail, a.warning].compactMap { $0 }.map { Self.block($0) }.filter { !$0.isEmpty }.joined(separator: "\n")
         return AgentQuestion(id: "openclaw:\(a.kind):\(a.id)", sessionID: "\(info.id):\(sessionKey)", provider: info.id,
-                             kind: .permission, title: a.title, detail: detail.isEmpty ? nil : detail, options: options,
+                             kind: .permission, title: Self.line(a.title), detail: detail.isEmpty ? nil : detail, options: options,
                              createdAt: a.createdAt, answerable: a.kind == "exec" || a.kind == "plugin")
+    }
+
+    // MARK: Redaction
+
+    /// One display line, redacted like `EventList.add`: clipped generously (so redaction stays cheap),
+    /// redacted, then clipped to its final length (so a secret cut at the first edge is still caught).
+    /// Gateway titles, previews and approval presentations are free text and may carry secrets.
+    static func line(_ s: String, max: Int = 140) -> String {
+        EventText.clip(Redactor.redact(EventText.clip(s, max: Swift.max(600, max))), max: max)
+    }
+
+    /// Multi-line text (an approval's command / warning): newlines kept, same clip → redact → clip.
+    static func block(_ s: String, max: Int = 600) -> String {
+        let r = Redactor.redact(String(s.trimmingCharacters(in: .whitespacesAndNewlines).prefix(max + 200)))
+        return r.count <= max ? r : String(r.prefix(max - 1)) + "…"
     }
 
     // MARK: Approvals

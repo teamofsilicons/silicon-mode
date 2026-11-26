@@ -46,13 +46,14 @@ public final class QwenProvider: AgentProvider, @unchecked Sendable {
         var lastAt: Date?
         var firstPrompt: String?
         var model: String?
-        for (i, line) in MoreFiles.tailLines(path, maxBytes: 384 << 10).enumerated() {
+        // Records without a uuid fall back to their byte offset: stable as the file grows (window positions are not).
+        for (off, line) in MoreFiles.tailLinesWithOffsets(path, maxBytes: 384 << 10) {
             guard let r = J.parse(line) else { continue }
             if cwd == nil { cwd = r["cwd"].text }
             let at = r["timestamp"].date
             if let at { lastAt = at }
             if let m = r["model"].text { model = m }
-            let rid = r["uuid"].text ?? "\(i)"
+            let rid = r["uuid"].text ?? "\(off)"
             let msg = r["message"]
             let parts = msg["parts"].array.isEmpty ? msg["content"].array : msg["parts"].array
             switch r["type"].string ?? "" {

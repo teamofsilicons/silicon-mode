@@ -139,6 +139,102 @@ import Foundation
         #expect(c.events.map(\.id) == ["copilot:cp:0", "copilot:cp:\(off)", "copilot:cp:\(off).0"])
     }
 
+    // MARK: Grok (ACP)
+
+    static func acp(_ update: String) -> String { #"{"params":{"sessionId":"g-1","update":"# + update + "}}\n" }
+
+    static func chunk(_ who: String, _ text: String) -> String {
+        acp(#"{"sessionUpdate":"\#(who)_message_chunk","content":{"type":"text","text":"\#(text)"}}"#)
+    }
+
+    /// One turn: a prompt and a reply both streamed in chunks, a tool call with an id (and every fifth
+    /// turn one without), a closing reply.
+    static func grokTurn(_ i: Int) -> String {
+        var s = chunk("user", "Prompt \(i) ") + chunk("user", "please.")
+        for c in 0..<6 { s += chunk("agent", "Reply \(i) part \(c) " + String(repeating: "w", count: 40 + (i * 7 + c) % 53) + " ") }
+        s += acp(#"{"sessionUpdate":"tool_call","toolCallId":"t\#(i)","title":"Edit f\#(i).swift","kind":"edit","status":"pending"}"#)
+        s += acp(#"{"sessionUpdate":"tool_call_update","toolCallId":"t\#(i)","status":"completed"}"#)
+        if i % 5 == 0 { s += acp(#"{"sessionUpdate":"tool_call","title":"Ran: echo \#(i)","kind":"execute","status":"completed"}"#) }
+        return s + chunk("agent", "Done \(i).") + acp(#"{"sessionUpdate":"turn_completed"}"#)
+    }
+
+    @Test func grokIdsSurviveGrowthPastTheTailWindow() throws {
+        let home = TempHome()
+        var text = ""
+        var n = 0
+        while text.utf8.count < GrokProvider.tailBytes + (16 << 10) { text += Self.grokTurn(n); n += 1 }
+        let path = home.write(".grok/sessions/%2Ftmp%2Fdemo/g-1/updates.jsonl", text: text, mtime: nil)
+        func events() throws -> [String] {
+            try #require(GrokProvider.parse(updates: path, maxEvents: 100_000)).events.map { "\($0.id)=\($0.text)" }
+        }
+        let before = try events()
+        #expect(before.count > 500)
+        #expect(Set(before.map { $0.prefix { $0 != "=" } }).count == before.count)   // ids are unique
+        #expect(before.contains("grok:g-1:tool:t\(n - 1)=Edit f\(n - 1).swift"))
+        #expect(before.contains { $0.hasSuffix("=Ran: echo \(n - 1 - (n - 1) % 5)") })
+
+        // Grow by whole turns until the window opens inside a streamed reply: the first chunks of
+        // that reply are out of view, so it must not show up under a new (sliding) id.
+        func opensMidReply() -> Bool {
+            guard let first = MoreFiles.tailLinesWithOffsets(path, maxBytes: GrokProvider.tailBytes).first else { return false }
+            let previous = Self.allLines(text).last { $0.offset < first.offset }
+            return first.line.contains("agent_message_chunk") && previous?.line.contains("agent_message_chunk") == true
+        }
+        var grown = 0
+        repeat {
+            let more = Self.grokTurn(n)
+            try CoreFixtures.append(path, more)
+            text += more; n += 1; grown += 1
+        } while grown < 30 || (!opensMidReply() && grown < 300)
+        #expect(opensMidReply())
+
+        let after = try events()
+        // The window slid forward: what's still in view keeps its ids (and text), new events follow.
+        let k = try #require(before.firstIndex(of: after[0]))
+        #expect(k > 0)
+        #expect(Array(after.prefix(before.count - k)) == Array(before[k...]))
+        let old = Set(before)
+        #expect(after.dropFirst(before.count - k).allSatisfy { !old.contains($0) })
+        #expect(after.last?.hasSuffix("=Done \(n - 1).") == true)
+
+        // A streamed reply keeps its first chunk's id while it grows.
+        try CoreFixtures.append(path, Self.chunk("user", "One more.") + Self.chunk("agent", "First part. "))
+        let growing = try #require(GrokProvider.parse(updates: path, maxEvents: 5)?.events.last)
+        try CoreFixtures.append(path, Self.chunk("agent", "Second part."))
+        let grownReply = try #require(GrokProvider.parse(updates: path, maxEvents: 5)?.events.last)
+        #expect(growing.kind == .assistant)
+        #expect(grownReply.id == growing.id)
+        #expect(grownReply.text == "First part. Second part.")
+    }
+
+    @Test func grokSmallLogKeepsItsLeadingMessage() throws {
+        let home = TempHome()
+        let path = home.write("g/updates.jsonl", text: Self.chunk("user", "Hi ") + Self.chunk("user", "there"))
+        let s = try #require(GrokProvider.parse(updates: path, maxEvents: 10))
+        #expect(s.events.map { "\($0.id)=\($0.text)" } == ["grok:g:0=Hi there"])
+        #expect(s.title == "Hi there")
+    }
+
+    // MARK: Droid / Qwen
+
+    @Test func droidAndQwenFallBackToByteOffsets() throws {
+        let home = TempHome()
+        let header = #"{"type":"session_start","id":"d-1","cwd":"/tmp/demo"}"#
+        let user = #"{"type":"message","timestamp":"2026-11-20T10:00:01Z","message":{"role":"user","content":"Bump it"}}"#
+        let reply = #"{"type":"message","timestamp":"2026-11-20T10:00:05Z","message":{"role":"assistant","content":"Bumped."}}"#
+        let d = home.write("factory/d-1.jsonl", text: header + "\n" + user + "\n" + reply + "\n")
+        let ds = try #require(DroidProvider.parse(path: d, maxEvents: 10))
+        let u = header.utf8.count + 1, r = u + user.utf8.count + 1
+        #expect(ds.events.map(\.id) == ["factory-droid:d-1:\(u)", "factory-droid:d-1:\(r)"])
+
+        let q1 = #"{"type":"user","timestamp":"2026-11-20T10:00:00.000Z","message":{"role":"user","parts":[{"text":"Run the linter"}]}}"#
+        let q2 = #"{"type":"assistant","timestamp":"2026-11-20T10:00:04.000Z","message":{"role":"model","parts":[{"text":"Running it."},{"functionCall":{"id":"fc1","name":"run_shell_command","args":{"command":"swiftlint"}}}]}}"#
+        let q = home.write("qwen/chats/q-1.jsonl", text: q1 + "\n" + q2 + "\n")
+        let qs = try #require(QwenProvider.parse(path: q, maxEvents: 10))
+        let off = q1.utf8.count + 1
+        #expect(qs.events.map(\.id) == ["qwen-code:q-1:0", "qwen-code:q-1:\(off)", "qwen-code:q-1:\(off).1"])
+    }
+
     // MARK: Omni
 
     @Test func omniLinesWithoutSeqHashStably() {
