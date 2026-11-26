@@ -1,0 +1,123 @@
+# Silicon Mode.app — generate with `xcodegen generate` (SiliconMode.xcodeproj is git-ignored).
+#
+#   App/Sources/        the app target (SwiftUI + AppKit): overlay, faces, menu bar, settings, sync
+#   App/Resources/      fonts, sounds, logos, shaders, asset catalog
+#   SiliconModeKit/     SwiftPM library: mode engine, lid sensor, PIN vault, agent providers, hook server
+#   Hook/               `silicon-mode-hook`, the tiny helper agent hooks (Claude Code, Codex…) call
+#
+# Bundle: Silicon Mode.app/Contents/Helpers/silicon-mode-hook
+name: SiliconMode
+options:
+  bundleIdPrefix: ai.tos
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  SiliconModeKit:
+    path: SiliconModeKit
+settings:
+  base:
+    DEVELOPMENT_TEAM: LTBSK59BJ2
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    SWIFT_STRICT_CONCURRENCY: complete
+  configs:
+    Release:
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+      OTHER_CODE_SIGN_FLAGS: "--timestamp"
+targets:
+  SiliconMode:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Sources
+      - path: App/Resources
+        excludes:
+          - Info.plist
+          - SiliconMode.entitlements
+          - "Fonts/**"
+          - "Sounds/**"
+      - path: App/Resources/Fonts
+        type: folder
+        buildPhase: resources
+      - path: App/Resources/Sounds
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: SiliconModeKit
+        product: SiliconModeKit
+      - target: silicon-mode-hook
+        embed: false
+      - sdk: ServiceManagement.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: LocalAuthenticationEmbeddedUI.framework
+      - sdk: Carbon.framework
+    postBuildScripts:
+      - name: Embed hook helper
+        script: |
+          set -e
+          mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          cp -f "$BUILT_PRODUCTS_DIR/silicon-mode-hook" "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/silicon-mode-hook"
+          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+            codesign --force --options runtime --timestamp=none --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/silicon-mode-hook"
+          fi
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_NAME: Silicon Mode
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tos.mode
+        PRODUCT_MODULE_NAME: SiliconMode
+        CODE_SIGN_ENTITLEMENTS: App/Resources/SiliconMode.entitlements
+        INFOPLIST_FILE: App/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        MTL_ENABLE_DEBUG_INFO: NO
+    info:
+      path: App/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Silicon Mode
+        CFBundleName: Silicon Mode
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSHumanReadableCopyright: "© 2026 Team of Silicons"
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        ITSAppUsesNonExemptEncryption: false
+        ATSApplicationFontsPath: Fonts
+        CFBundleURLTypes:
+          - CFBundleURLName: ai.tos.mode
+            CFBundleURLSchemes: [siliconmode]
+  silicon-mode-hook:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Hook
+      - path: SiliconModeKit/Sources/SiliconModeKit/Hooks/HookWire.swift
+    settings:
+      base:
+        PRODUCT_NAME: silicon-mode-hook
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tos.mode.hook
+        SKIP_INSTALL: YES
+        SWIFT_STRICT_CONCURRENCY: minimal
+schemes:
+  SiliconMode:
+    build:
+      targets:
+        SiliconMode: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    archive:
+      config: Release
