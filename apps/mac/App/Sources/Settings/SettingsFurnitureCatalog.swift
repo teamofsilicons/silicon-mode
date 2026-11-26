@@ -4,28 +4,27 @@ import SiliconModeKit
 // What the Face furniture pane knows about each kind of piece (name, glyph, options), the option
 // keys the overlay's pieces read, and the pure edits the pane makes to a layout.
 
-/// Option keys stored in `FurniturePiece.options`, shared with the overlay's pieces.
+/// Option keys stored in `FurniturePiece.options`: the overlay pieces' keys (`FurnitureOptions`),
+/// with the labels and typed readers the pane needs.
 enum SettingsFurnitureOption {
     // Clock
     /// "digital" (default), "analog" or "words".
-    static let style = "style"
+    static let style = FurnitureOptions.Clock.style
     /// 24-hour time. Default: the locale's preference.
-    static let use24h = "use24h"
+    static let use24h = FurnitureOptions.Clock.use24h
     /// Show seconds (a 1 Hz seconds hand / digits). Default off.
-    static let seconds = "seconds"
+    static let seconds = FurnitureOptions.Clock.seconds
 
     static let digital = "digital", analog = "analog", words = "words"
     static let clockStyles: [(id: String, label: String)] = [(digital, "Digital"), (analog, "Analog"), (words, "Words")]
 
     // System activity: which rows show. Each defaults to on.
-    static let cpu = "cpu", memory = "memory", battery = "battery", network = "network"
+    static let cpu = FurnitureOptions.System.cpu, memory = FurnitureOptions.System.memory
+    static let battery = FurnitureOptions.System.battery, network = FurnitureOptions.System.network
     static let systemRows = [cpu, memory, battery, network]
 
-    /// Whether the user's locale writes times without AM/PM.
-    static let localePrefers24h: Bool = {
-        let f = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "H"
-        return !f.contains("a")
-    }()
+    /// Whether the user's locale writes times without AM/PM (the same default the clocks use).
+    static var localePrefers24h: Bool { ClockFace.localePrefers24h }
 
     static func clockStyle(_ p: FurniturePiece) -> String {
         let s = p.options[style]?.string ?? digital

@@ -5,10 +5,12 @@ import SiliconModeKit
 
 // MARK: - Layout
 
-/// Where each piece of furniture lands on a screen, following the overlay's rules:
+/// Where each piece of furniture lands on a screen, following the overlay's rules
+/// (`FurniturePlan`, with the same `FurnitureMetrics`):
 /// - four corner slots: top slots stack down from the top edge, bottom slots stack up from the
 ///   bottom edge (bottom-left above the lid-angle readout, bottom-right above the Unlock button);
-/// - per side, the top slot gets what it needs up to 55% of the column, the bottom slot the rest;
+/// - per side, the top slot gets what it needs up to 55% of the screen height, the bottom slot the
+///   rest, and the top slot takes back whatever the bottom slot leaves unused;
 /// - the agents list and the log body shrink to fit, everything else keeps its size.
 struct SettingsFurnitureLayout {
     struct Item: Identifiable, Equatable {
@@ -35,12 +37,16 @@ struct SettingsFurnitureLayout {
 
     /// The 16" MacBook Pro's default-scaled screen (what the overlay snapshots use).
     static let screen = CGSize(width: 1512, height: 982)
-    static let margin: CGFloat = 28
-    static let gap: CGFloat = 14
-    static let leadingWidth: CGFloat = 340
-    static let trailingWidth: CGFloat = 368
-    static let bottomLeadingInset: CGFloat = 32 + 14 + 16
-    static let bottomTrailingInset: CGFloat = 26 + 42 + 16
+    // Slot geometry: the overlay's own metrics, so the preview lands pieces where the overlay does.
+    static let margin = FurnitureMetrics.margin
+    /// Between pieces in one slot.
+    static let gap = FurnitureMetrics.spacing
+    /// Between a column's top and bottom slots.
+    static let slotGap = FurnitureMetrics.slotGap
+    static let leadingWidth = FurnitureMetrics.leadingWidth
+    static let trailingWidth = FurnitureMetrics.trailingWidth
+    static let bottomLeadingInset = FurnitureMetrics.bottomLeadingInset
+    static let bottomTrailingInset = FurnitureMetrics.bottomTrailingInset
 
     // Piece metrics (the silhouettes draw exactly these heights).
     static let agentChips: CGFloat = 32
@@ -74,8 +80,7 @@ struct SettingsFurnitureLayout {
     }
 
     static func width(_ p: FurniturePiece, screen: CGSize) -> CGFloat {
-        let slot = p.slot.isLeading ? leadingWidth : trailingWidth
-        return p.kind == .logs ? max(slot, min(560, screen.width * 0.4)) : slot
+        p.kind == .logs ? FurnitureMetrics.logsWidth(screen: screen.width, slot: p.slot) : FurnitureMetrics.slotWidth(p.slot)
     }
 
     static func height(_ p: FurniturePiece, level: Int) -> CGFloat {
@@ -130,6 +135,14 @@ struct SettingsFurnitureLayout {
         }
     }
 
+    /// How many pieces of a stack are drawn: those that still don't fit at their smallest are left
+    /// out, farthest from the corner first (as the overlay does).
+    private static func kept(_ stack: [FurniturePiece], _ levels: [Int], budget: CGFloat) -> Int {
+        var n = stack.count
+        while n > 0, stackHeight(Array(stack.prefix(n)), Array(levels.prefix(n))) > budget + 0.5 { n -= 1 }
+        return n
+    }
+
     static func place(_ pieces: [FurniturePiece], state: State = State(), screen: CGSize = screen) -> [Item] {
         var out: [Item] = []
         for leading in [true, false] {
@@ -139,21 +152,35 @@ struct SettingsFurnitureLayout {
             let colBottom = screen.height - (leading ? bottomLeadingInset : bottomTrailingInset)
             let column = colBottom - colTop
 
-            var topLevels = top.map { naturalLevel($0, state) }
-            fit(top, &topLevels, budget: bottom.isEmpty ? column : column * 0.55)
-            let topUsed = stackHeight(top, topLevels)
+            let natural = top.map { naturalLevel($0, state) }
+            var topLevels = natural
             var bottomLevels = bottom.map { naturalLevel($0, state) }
-            fit(bottom, &bottomLevels, budget: column - (top.isEmpty ? 0 : topUsed + gap))
+            var topBudget = column, bottomBudget = column
+            if !top.isEmpty && !bottom.isEmpty {
+                // The top slot gets what it needs up to 55% of the screen, the bottom slot the rest;
+                // then the top slot takes back what the bottom slot leaves unused.
+                let avail = column - slotGap
+                fit(top, &topLevels, budget: min(avail, screen.height * FurnitureMetrics.topShare))
+                bottomBudget = max(0, avail - stackHeight(top, topLevels))
+                fit(bottom, &bottomLevels, budget: bottomBudget)
+                let n = kept(bottom, bottomLevels, budget: bottomBudget)
+                topLevels = natural
+                topBudget = n == 0 ? column : avail - stackHeight(Array(bottom.prefix(n)), Array(bottomLevels.prefix(n)))
+            }
+            fit(top, &topLevels, budget: topBudget)
+            fit(bottom, &bottomLevels, budget: bottomBudget)
+            let shownTop = kept(top, topLevels, budget: topBudget)
+            let shownBottom = kept(bottom, bottomLevels, budget: bottomBudget)
 
             func x(_ w: CGFloat) -> CGFloat { leading ? margin : screen.width - margin - w }
             var y = colTop
-            for (p, level) in zip(top, topLevels) {
+            for (p, level) in zip(top.prefix(shownTop), topLevels) {
                 let w = width(p, screen: screen), h = height(p, level: level)
                 out.append(Item(piece: p, frame: CGRect(x: x(w), y: y, width: w, height: h), level: level))
                 y += h + gap
             }
             y = colBottom
-            for (p, level) in zip(bottom, bottomLevels) {
+            for (p, level) in zip(bottom.prefix(shownBottom), bottomLevels) {
                 let w = width(p, screen: screen), h = height(p, level: level)
                 y -= h
                 out.append(Item(piece: p, frame: CGRect(x: x(w), y: y, width: w, height: h), level: level))
@@ -220,7 +247,7 @@ struct SettingsFurniturePreview: View {
                 .opacity(hidden ? 1 : 0.8)
                 .position(x: screen.width / 2, y: screen.height * 0.47)
             if !hidden {
-                ForEach(emptySlots(items), id: \.self) { slot in
+                ForEach(emptySlots, id: \.self) { slot in
                     emptySlot(slot)
                 }
             }
@@ -268,8 +295,9 @@ struct SettingsFurniturePreview: View {
             .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: corner.unitPoint)))
     }
 
-    private func emptySlots(_ items: [SettingsFurnitureLayout.Item]) -> [FurnitureSlot] {
-        let used = Set(items.map(\.piece.slot))
+    /// Slots nothing is placed in. (A slot whose pieces were all left out for room isn't empty.)
+    private var emptySlots: [FurnitureSlot] {
+        let used = Set(pieces.map(\.slot))
         return SettingsFurnitureCatalog.slotOrder.filter { !used.contains($0) }
     }
 

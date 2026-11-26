@@ -149,7 +149,10 @@ struct LogTabStrip: View {
                     .padding(.leading, 16)
                 Spacer(minLength: 0)
             } else if HUDRender.isSnapshot {
-                HStack(spacing: 2) { tabs }
+                // No scroll view: start the strip one tab before the selected one, as the live
+                // strip scrolls the selected tab into view.
+                let i = sessions.firstIndex { $0.id == selectedID } ?? 0
+                HStack(spacing: 2) { tabs(Array(sessions.dropFirst(max(0, i - 1)))) }
                     .padding(.leading, 8)
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     .clipped()
@@ -157,7 +160,7 @@ struct LogTabStrip: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal) {
-                        HStack(spacing: 2) { tabs }
+                        HStack(spacing: 2) { tabs(sessions) }
                             .padding(.horizontal, 8)
                     }
                     .scrollIndicators(.never)
@@ -186,8 +189,7 @@ struct LogTabStrip: View {
         }
     }
 
-    @ViewBuilder
-    private var tabs: some View {
+    private func tabs(_ sessions: [AgentSession]) -> some View {
         ForEach(sessions) { s in
             LogTab(session: s, selected: s.id == selectedID, connected: connected)
                 .id(s.id)
