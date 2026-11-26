@@ -9,6 +9,7 @@
     uv run scripts/make-sounds.py --report               # ...and prints duration / peak / RMS / loudness / loop seam
     uv run scripts/make-sounds.py --only enter,panic-siren --out /tmp/sm
     uv run --with matplotlib scripts/make-sounds.py --spectrograms /tmp/sm-spec
+    uv run scripts/make-sounds.py --no-render --check-player   # headless test of SoundPlayer.swift (no audio out)
 
 Output: 48 kHz, 16-bit, mono PCM WAV (TPDF-dithered). Deterministic: fixed seeds, no clock input.
 
@@ -319,7 +320,9 @@ class Track:
 
 
 def circular(fn: Callable[[np.ndarray], np.ndarray], x: np.ndarray, down: int = 1, reps: int = 4) -> np.ndarray:
-    """Apply a (causal, time-invariant) process to a periodic signal and return its steady-state period."""
+    """Apply a time-invariant process (filters, reverb, limiter, decimation: anything whose memory/look-ahead
+    is shorter than a period) to a periodic signal and return its steady-state period, so the result loops
+    seamlessly."""
     n = len(x)
     y = fn(np.tile(x, reps))
     m = n // down
@@ -441,22 +444,22 @@ def _tick(note: str, seed: int, accent: float = 0.0) -> Track:
 
 
 # Countdown: 5, 4 -> "tick" (E6); then 3, 2, 1 climb the E pentatonic (F#6, G#6, B6) into the enter chord (E).
-@sound("tick", loudness=-25.0, peak=-8.0)
+@sound("tick", loudness=-26.5, peak=-9.5)
 def tick():
     return _tick("E6", 201)
 
 
-@sound("tick-3", loudness=-25.0, peak=-8.0)
+@sound("tick-3", loudness=-26.5, peak=-9.5)
 def tick3():
     return _tick("F#6", 203, 0.25)
 
 
-@sound("tick-2", loudness=-24.5, peak=-7.5)
+@sound("tick-2", loudness=-26.0, peak=-9.0)
 def tick2():
     return _tick("G#6", 202, 0.5)
 
 
-@sound("tick-1", loudness=-24.0, peak=-7.0)
+@sound("tick-1", loudness=-25.5, peak=-8.5)
 def tick1():
     return _tick("B6", 201, 1.0)
 
@@ -555,10 +558,12 @@ def wrong_pin():
         n = ns(0.096)
         t = tv(n)
         f1 = 155.0 * (1.0 - 0.10 * smoothstep(0.0, 0.09, t))
-        tone = tones(lowpass_tone(1150.0, 2), formant_tone([(620.0, 500.0, 0.8)], floor=0.5))
+        # a nasal "nnh" formant pair keeps it readable on laptop speakers, which can't play 155 Hz itself
+        tone = tones(lowpass_tone(1900.0, 2), highpass_tone(260.0, 1),
+                     formant_tone([(680.0, 420.0, 0.9), (1450.0, 600.0, 0.45)], floor=0.35))
         x = square(f1, n, tone) + 0.8 * square(f1 * 164.0 / 155.0, n, tone, ph0=0.25)
-        T.add(sat(0.55 * x * gate(n, 0.003, 0.035), 1.7), at, 0.5 * g)
-        T.add(thump(140.0, 85.0, 0.085, glide=0.02), at, 0.40 * g)
+        T.add(sat(0.6 * x * gate(n, 0.003, 0.035), 1.7), at, 0.5 * g)
+        T.add(thump(150.0, 95.0, 0.07, glide=0.02), at, 0.28 * g)
     return T.reverb(ROOM, 0.08)
 
 
@@ -854,13 +859,188 @@ def spectrogram(path: Path, y: np.ndarray, title: str) -> None:
     plt.close(fig)
 
 
+# Headless test of apps/mac/App/Sources/Core/SoundPlayer.swift: compiled together with this file (Swift 6, strict
+# concurrency) and driven in AVAudioEngine's offline manual-rendering mode, so it never touches audio hardware.
+PLAYER_TEST = r'''import Foundation
+import AVFoundation
+
+let dir = URL(fileURLWithPath: CommandLine.arguments[1])
+let SR = 48_000
+var failures = 0
+@MainActor func check(_ cond: Bool, _ msg: String) {
+    print((cond ? "PASS " : "FAIL ") + msg)
+    if !cond { failures += 1 }
+}
+func samples(_ name: String) -> [Float] {
+    let f = try! AVAudioFile(forReading: dir.appendingPathComponent("\(name).wav"), commonFormat: .pcmFormatFloat32, interleaved: false)
+    let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length))!
+    try! f.read(into: b)
+    return Array(UnsafeBufferPointer(start: b.floatChannelData![0], count: Int(b.frameLength)))
+}
+func maxAbs(_ a: ArraySlice<Float>) -> Float { a.reduce(0) { max($0, abs($1)) } }
+func maxStep(_ a: [Float]) -> Float { zip(a.dropFirst(), a).reduce(0) { max($0, abs($1.0 - $1.1)) } }
+
+// 1. Every bundled file decodes.
+let audit = SoundPlayer.audit(soundsDirectory: dir)
+audit.forEach { print("   " + $0) }
+check(audit.count == SoundPlayer.bundledSoundNames.count && audit.allSatisfy { $0.hasPrefix("ok ") }, "all \(audit.count) sounds decode with AVAudioFile")
+
+let sp = SoundPlayer(soundsDirectory: dir, offlineRendering: true)
+
+// 2. A UI one-shot comes out bit-exact, then silence.
+sp.play(.enter)
+let enter = samples("enter")
+var out = sp.renderOffline(frames: enter.count + 4800)
+var err: Float = 0
+for i in 0..<enter.count { err = max(err, abs(out[i] - enter[i])) }
+check(err < 1e-6, "enter plays sample-exact (max err \(err))")
+check(maxAbs(out[enter.count...]) == 0, "silence after enter")
+
+// 3. Overlap: three keypresses 10 ms apart rotate variants and sum.
+let k1 = samples("keypress-2"), k2 = samples("keypress-3"), k3 = samples("keypress")
+sp.play(.keypress); var a = sp.renderOffline(frames: 480)
+sp.play(.keypress); a += sp.renderOffline(frames: 480)
+sp.play(.keypress); a += sp.renderOffline(frames: 9600)
+err = 0
+for i in 0..<a.count {
+    var e: Float = 0
+    if i < k1.count { e += k1[i] }
+    if i >= 480, i - 480 < k2.count { e += k2[i - 480] }
+    if i >= 960, i - 960 < k3.count { e += k3[i - 960] }
+    err = max(err, abs(a[i] - e))
+}
+check(err < 1e-5, "overlapping keypresses mix, variants rotate (max err \(err))")
+
+// 4. Ticks: the last three seconds get their own sounds.
+sp.playTick(remaining: 2)
+let t2 = samples("tick-2")
+out = sp.renderOffline(frames: t2.count)
+err = zip(out, t2).reduce(0) { max($0, abs($1.0 - $1.1)) }
+check(err < 1e-6, "playTick(remaining: 2) plays tick-2")
+
+// 5. Panic: 150 ms fade-in, then a seamless loop at full volume.
+sp.startPanic(soundID: "siren", volume: 1)
+check(sp.isPanicPlaying, "isPanicPlaying after startPanic")
+let siren = samples("panic-siren")
+let L = siren.count
+out = sp.renderOffline(frames: SR * 4)
+check(abs(out[0]) < 1e-3, "fade-in starts from silence (first sample \(out[0]))")
+let mid = 3600 // 75 ms → gain ≈ 0.5
+let ratio = siren[mid] != 0 ? out[mid] / siren[mid] : 0.5
+check(abs(ratio - 0.5) < 0.01, "fade-in is halfway at 75 ms (gain \(ratio))")
+err = 0
+for i in 7300..<out.count { err = max(err, abs(out[i] - siren[i % L])) }
+check(err < 1e-6, "loop repeats sample-exact across \(out.count / L) loop points after the fade-in (max err \(err))")
+let seam = abs(siren[0] - siren[L - 1])
+check(seam <= maxStep(siren), "loop seam step \(seam) ≤ largest in-loop step \(maxStep(siren))")
+
+// 6. Stop: 250 ms fade-out, no clicks, then digital silence.
+let before = out
+sp.stopPanic()
+check(!sp.isPanicPlaying, "isPanicPlaying false after stopPanic")
+out = sp.renderOffline(frames: SR / 2)
+check(maxAbs(out[12_100...]) == 0, "silent after 250 ms fade-out")
+let steps = maxStep(Array(before.suffix(2000)) + out)
+check(steps <= maxStep(siren) * 1.01, "no click across the stop (max step \(steps))")
+
+// 7. Switching sounds while one plays fades the old one out (4 ms) and restarts the new one from its top.
+sp.startPanic(soundID: "klaxon", volume: 0.5)
+out = sp.renderOffline(frames: SR)
+sp.startPanic(soundID: "glitch", volume: 0.5)
+let sw = sp.renderOffline(frames: SR)
+let klaxon = samples("panic-klaxon"), glitch = samples("panic-glitch")
+let swStep = maxStep(Array(out.suffix(1000)) + Array(sw.prefix(2000)))
+check(swStep <= max(maxStep(klaxon), maxStep(glitch)) * 0.25 + 0.02, "switching klaxon → glitch fades without a click (max step \(swStep))")
+var bestOffset = -1
+for off in 0...400 {
+    var e: Float = 0
+    for i in 8000..<12_800 { e = max(e, abs(sw[i] - 0.25 * glitch[(i - off) % glitch.count])) }
+    if e < 1e-5 { bestOffset = off; break }
+}
+check(bestOffset >= 0, "switched loop starts from its first sample after the fade (offset \(bestOffset) frames)")
+
+// 8. Unknown ids fall back to the first panic sound; volume changes ramp.
+sp.startPanic(soundID: "does-not-exist", volume: 1)
+out = sp.renderOffline(frames: SR)
+check(sp.isPanicPlaying && maxAbs(out[...]) > 0.1, "unknown panic id still sounds (falls back to klaxon)")
+sp.setPanicVolume(0)
+out = sp.renderOffline(frames: SR / 4)
+check(maxAbs(out[4000...]) == 0, "setPanicVolume(0) ramps to silence in 80 ms")
+sp.stopPanic()
+_ = sp.renderOffline(frames: SR / 2)
+
+// 9. Preview: one loop (≥1.2 s) then fade, at volume²; ignored during a real alarm.
+sp.preview(panicSoundID: "mistake", volume: 0.5)
+out = sp.renderOffline(frames: SR * 2)
+let mistake = samples("panic-mistake")
+let pk = maxAbs(out[0..<57_600])
+check(pk > 0.1 && pk <= maxAbs(mistake[...]) * 0.25 + 1e-4, "preview plays at volume² (peak \(pk))")
+check(maxAbs(out[(57_600 + 12_100)...]) == 0, "preview fades out after one loop")
+sp.startPanic(soundID: "siren", volume: 1)
+sp.preview(panicSoundID: "glitch", volume: 1)
+out = sp.renderOffline(frames: SR)
+err = 0
+for i in 7300..<out.count { err = max(err, abs(out[i] - siren[i % L])) }
+check(err < 1e-6, "preview ignored while the alarm sounds")
+sp.stopPanic()
+
+_ = sp.renderOffline(frames: SR / 2)
+
+// 10. Idle suspend: refuses while something sounds; after a stop/restart one-shots and the alarm still play.
+sp.play(.question)
+check(!sp.suspendIfIdle(), "does not suspend while a one-shot is playing")
+_ = sp.renderOffline(frames: SR)
+Thread.sleep(forTimeInterval: 2.4)  // busy-until is wall-clock; offline rendering outruns it
+check(sp.suspendIfIdle(), "suspends once everything is silent")
+sp.play(.unlock)
+let unlock = samples("unlock")
+out = sp.renderOffline(frames: unlock.count)
+err = zip(out, unlock).reduce(0) { max($0, abs($1.0 - $1.1)) }
+check(err < 1e-6, "one-shot plays sample-exact after an engine suspend/restart (max err \(err))")
+Thread.sleep(forTimeInterval: 1.5)
+check(sp.suspendIfIdle(), "suspends again")
+sp.startPanic(soundID: "siren", volume: 1)
+check(!sp.suspendIfIdle(), "does not suspend during an alarm")
+out = sp.renderOffline(frames: SR * 2)
+err = 0
+for i in 7300..<out.count { err = max(err, abs(out[i] - siren[i % L])) }
+check(err < 1e-6, "alarm loops sample-exact after an engine restart (max err \(err))")
+sp.stopPanic()
+
+print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
+exit(failures == 0 ? 0 : 1)
+'''
+
+
+def check_player(sounds: Path) -> int:
+    import platform
+    import subprocess
+    import tempfile
+    sys.stdout.flush()
+    source = ROOT / "apps/mac/App/Sources/Core/SoundPlayer.swift"
+    with tempfile.TemporaryDirectory() as tmp:
+        main_swift, exe = Path(tmp) / "main.swift", Path(tmp) / "soundplayer-check"
+        main_swift.write_text(PLAYER_TEST)
+        build = subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-strict-concurrency=complete", "-O",
+                                "-target", f"{platform.machine()}-apple-macos26.0",
+                                str(source), str(main_swift), "-o", str(exe)])
+        if build.returncode:
+            return build.returncode
+        return subprocess.run([str(exe), str(sounds)]).returncode
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--only", default="", help="comma-separated sound names")
     ap.add_argument("--report", action="store_true", help="print stats for the written files")
     ap.add_argument("--spectrograms", type=Path, help="write a waveform + spectrogram PNG per sound here")
+    ap.add_argument("--no-render", action="store_true", help="don't render (use with --check-player)")
+    ap.add_argument("--check-player", action="store_true",
+                    help="compile SoundPlayer.swift with a headless test and run it against --out")
     args = ap.parse_args()
+    if args.no_render:
+        return check_player(args.out) if args.check_player else 0
     only = {s for s in args.only.split(",") if s}
     args.out.mkdir(parents=True, exist_ok=True)
     if args.spectrograms:
@@ -880,7 +1060,7 @@ def main() -> int:
         if args.spectrograms:
             spectrogram(args.spectrograms / f"{spec.name}.png", np.tile(back, 2) if spec.loop else back,
                         spec.name + (" (2 loops)" if spec.loop else ""))
-    return 0
+    return check_player(args.out) if args.check_player else 0
 
 
 if __name__ == "__main__":

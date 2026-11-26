@@ -283,19 +283,21 @@ final class SoundPlayer {
         idleTask?.cancel()
         idleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            self?.stopIfIdle()
+            guard !Task.isCancelled, let self else { return }
+            if !self.suspendIfIdle(), self.graph?.engine.isRunning == true { self.scheduleIdleCheck(after: 2) }
         }
     }
 
-    private func stopIfIdle() {
-        guard let g = graph, g.engine.isRunning else { return }
+    /// Stops the engine (letting the audio hardware idle) if nothing is sounding. The next sound restarts it,
+    /// which costs ~20 ms once. Returns true if it stopped.
+    @discardableResult
+    func suspendIfIdle() -> Bool {
+        guard let g = graph, g.engine.isRunning else { return false }
         let now = ProcessInfo.processInfo.systemUptime
-        if panicMode != .off || !g.voice.isSilent || g.busyUntil.contains(where: { $0 > now }) {
-            scheduleIdleCheck(after: 2)
-            return
-        }
-        g.engine.stop()   // the audio hardware can idle again; the next sound restarts it (~20 ms)
+        guard panicMode == .off, g.voice.isSilent, !g.busyUntil.contains(where: { $0 > now }) else { return false }
+        for p in g.players { p.stop() }
+        g.engine.stop()
+        return true
     }
 
     private func playOneShot(_ name: String) {
@@ -307,7 +309,7 @@ final class SoundPlayer {
         let node = g.players[i]
         if g.busyUntil[i] > now { node.stop() }
         node.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
-        if !node.isPlaying { node.play() }
+        node.play()   // no-op if already playing; required after the engine was stopped and restarted
         g.busyUntil[i] = now + Double(buffer.frameLength) / Self.sampleRate + 0.05
     }
 
