@@ -34,7 +34,7 @@ enum FaceSnapshots {
     private static func ctx(_ sessions: [AgentSession], preview: Bool = false, showClock: Bool = true,
                             options: [String: FaceOptionValue] = [:], panic: Bool = false) -> FaceContext {
         FaceContext(sessions: sessions, counts: AgentCounts(sessions), options: options, showClock: showClock,
-                    isPreview: preview, isPanicking: panic)
+                    isPreview: preview, isPanicking: panic).withoutQuestions
     }
 
     private static var bounce: [SnapshotItem] {

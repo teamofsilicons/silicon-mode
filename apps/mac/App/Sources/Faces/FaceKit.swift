@@ -24,6 +24,37 @@ struct FaceContext {
 }
 
 extension FaceContext {
+    /// What a face is allowed to see. Questions are not part of any face: they are answered on the
+    /// Questions piece (which always stays, even with the furniture hidden). So a face never gets
+    /// a question, and an agent waiting on you is drawn like a quiet, paused one (`idle`): no "?"
+    /// signs, blocks or badges, no question text (nor the question and permission events in the
+    /// agent's history), no alarm.
+    var withoutQuestions: FaceContext {
+        func asks(_ e: AgentEvent) -> Bool { e.kind == .question || e.kind == .permission }
+        guard sessions.contains(where: { s in
+            s.state == .needsYou || !s.pendingQuestions.isEmpty || s.recentEvents.contains(where: asks)
+                || (s.identity?.members.contains { $0.state == .needsYou } ?? false)
+        }) else { return self }
+        var c = self
+        c.sessions = sessions.map { s in
+            var s = s
+            if s.state == .needsYou { s.state = .idle }
+            s.pendingQuestions = []
+            s.recentEvents.removeAll(where: asks)
+            if var id = s.identity {
+                id.members = id.members.map { m in
+                    var m = m
+                    if m.state == .needsYou { m.state = .idle }
+                    return m
+                }
+                s.identity = id
+            }
+            return s
+        }
+        c.counts = AgentCounts(c.sessions)
+        return c
+    }
+
     /// Frame interval for calm scenes, where nothing on the face moves faster than about 60 pt/s
     /// and no burst is playing: 20 fps (never faster than `frameInterval`). Slow motion looks the
     /// same at 20 fps, and every skipped frame saves a full SwiftUI pass plus a full-screen
@@ -182,7 +213,17 @@ struct FaceDescriptor: Identifiable {
     let name: String
     let summary: String
     let options: [FaceOptionSpec]
+    /// Draws the face. Every face gets its context through `FaceContext.withoutQuestions`.
     let make: @MainActor (FaceContext) -> AnyView
+
+    init(id: String, name: String, summary: String, options: [FaceOptionSpec],
+         make: @escaping @MainActor (FaceContext) -> AnyView) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.options = options
+        self.make = { ctx in make(ctx.withoutQuestions) }
+    }
 
     func resolvedOptions(_ user: [String: FaceOptionValue]?) -> [String: FaceOptionValue] {
         var o: [String: FaceOptionValue] = [:]
