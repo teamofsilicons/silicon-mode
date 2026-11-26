@@ -197,8 +197,9 @@ final class AppModel {
         publishAngle(reading, now: now)
 
         let events = engine.update(now: now, angle: reading, agentsRunning: counts.running)
-        apply(events)
+        // Publish the new state first: effects (hold policy, cloud status, overlay) read it.
         syncFromEngine(now: now)
+        apply(events)
     }
 
     /// The engine gets every raw sample; the UI gets a steadied, whole-degree angle. The sensor
@@ -285,8 +286,9 @@ final class AppModel {
 
     private func handle(_ c: ModeEngine.Command) {
         let now = MonotonicClock.now()
-        apply(engine.handle(c, now: now, agentsRunning: counts.running))
+        let events = engine.handle(c, now: now, agentsRunning: counts.running)
         syncFromEngine(now: now)
+        apply(events)
     }
 
     // MARK: Effects
