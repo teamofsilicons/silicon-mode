@@ -33,9 +33,37 @@ public actor AgentHub {
 
     public var providerInfos: [AgentProviderInfo] { providers.map(\.info) }
 
-    /// One scan across all providers (concurrently).
+    /// The newest scan that has been requested but has not started yet (callers join it).
+    private var queued: (generation: Int, task: Task<Snapshot, Never>)?
+    /// The newest scan requested (running, queued or done); the next one waits for it.
+    private var tail: Task<Snapshot, Never>?
+    private var generation = 0
+
+    /// One scan across all providers (concurrently), coalesced: scans never overlap, so snapshots
+    /// come back in order. A caller that arrives while a scan runs (that scan may predate its change,
+    /// e.g. an answer) gets the next scan, which starts when the running one ends; every caller
+    /// arriving meanwhile shares that one follow-up, so bursts never pile up scans.
     @discardableResult
     public func refresh() async -> Snapshot {
+        if let queued { return await queued.task.value }
+        generation += 1
+        let gen = generation
+        let previous = tail
+        let task = Task { () -> Snapshot in
+            _ = await previous?.value
+            self.started(gen)
+            return await self.scanAll()
+        }
+        tail = task
+        queued = (gen, task)
+        return await task.value
+    }
+
+    private func started(_ gen: Int) {
+        if queued?.generation == gen { queued = nil }
+    }
+
+    private func scanAll() async -> Snapshot {
         let ctx = ScanContext(now: Date(), processes: ProcessTable.snapshot(), activeWindow: activeWindow,
                               maxEvents: maxEvents, hooks: hooks)
         let active = providers.filter { !disabledProviders.contains($0.info.id) }
