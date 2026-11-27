@@ -100,6 +100,59 @@ enum SettingsSnapshots {
         out.append(SnapshotItem(id: "settings-controls-dark", size: CGSize(width: 520, height: 420), dark: true, view: {
             AnyView(SettingsControlsGallery())
         }))
+
+        // Trigger point picker
+        func capture(_ phase: TriggerCapturePhase, progress: Double = 0) -> TriggerCaptureState {
+            TriggerCaptureState(phase: phase, progress: progress)
+        }
+        let waiting = capture(.waiting)
+        let steady = capture(.holding(steady: true), progress: 0.6)
+        let done = capture(.done(value: 72, previous: 75, lid: 72), progress: 1)
+        for dark in [false, true] {
+            let d = dark ? "-dark" : ""
+            settings("settings-mode-drag\(d)", .mode, dark: dark) { SettingsRender.previewGaugeDragging = true }
+            settings("settings-mode-capture-waiting\(d)", .mode, dark: dark) { SettingsRender.previewCapture = waiting }
+            settings("settings-mode-capture-steady\(d)", .mode, dark: dark) {
+                SettingsRender.previewAngle = 72
+                SettingsRender.previewCapture = steady
+            }
+            settings("settings-mode-capture-done\(d)", .mode, dark: dark) {
+                SettingsRender.previewAngle = 72
+                SettingsRender.previewCapture = done
+            }
+        }
+        settings("settings-mode-capture-clamped", .mode, dark: false) {
+            SettingsRender.previewAngle = 22
+            SettingsRender.previewCapture = capture(.done(value: 30, previous: 75, lid: 22), progress: 1)
+        }
+        settings("settings-mode-nosensor", .mode, dark: false) { SettingsRender.previewAngle = nil }
+        // The pane on its own at the narrowest and widest content widths a resizable window gives it.
+        for (id, width) in [("settings-mode-narrow", 560.0), ("settings-mode-wide", 1100.0)] {
+            for dark in [false, true] {
+                out.append(SnapshotItem(id: id + (dark ? "-dark" : ""), size: CGSize(width: width + 48, height: 520), dark: dark, view: {
+                    resetPreview()
+                    if id.hasSuffix("narrow") { SettingsRender.previewCapture = waiting }
+                    return AnyView(SettingsTint.windowBG.overlay(alignment: .top) {
+                        SettingsModePane().padding(24).fixedSize(horizontal: false, vertical: true)
+                    }.clipped())
+                }))
+            }
+        }
+        for (id, state) in [("onboarding-2-capture-steady", steady), ("onboarding-2-capture-done", done)] {
+            for dark in [false, true] {
+                out.append(SnapshotItem(id: id + (dark ? "-dark" : ""), size: OnboardingView.size, dark: dark, view: {
+                    resetPreview()
+                    SettingsRender.previewAngle = 72
+                    SettingsRender.previewCapture = state
+                    return AnyView(OnboardingView(step: .howItWorks, hosted: true))
+                }))
+            }
+        }
+        out.append(SnapshotItem(id: "onboarding-2-drag", size: OnboardingView.size, dark: false, view: {
+            resetPreview()
+            SettingsRender.previewGaugeDragging = true
+            return AnyView(OnboardingView(step: .howItWorks, hosted: true))
+        }))
         return out
     }
 
@@ -111,6 +164,8 @@ enum SettingsSnapshots {
         SettingsRender.previewHookStatuses = nil
         SettingsRender.previewFurniture = FurniturePiece.defaults
         SettingsRender.previewFurnitureHidden = false
+        SettingsRender.previewCapture = nil
+        SettingsRender.previewGaugeDragging = false
         unlockFlowOpen = false
     }
 

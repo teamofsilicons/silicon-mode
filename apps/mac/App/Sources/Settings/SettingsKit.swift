@@ -21,6 +21,9 @@ enum SettingsRender {
     /// The Face furniture pane shows (and leaves unedited) this layout instead of the user's.
     nonisolated(unsafe) static var previewFurniture: [FurniturePiece]?
     nonisolated(unsafe) static var previewFurnitureHidden: Bool?
+    /// The trigger picker shows this capture state, and draws its gauge as if the ray were grabbed.
+    nonisolated(unsafe) static var previewCapture: TriggerCaptureState?
+    nonisolated(unsafe) static var previewGaugeDragging = false
 }
 
 /// Extra Silicon tokens (shared/design/tokens.json) not in Theme.
