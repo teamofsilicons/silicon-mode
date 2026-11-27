@@ -147,6 +147,7 @@ enum DebugCommands {
         let sync = AppModelSyncHost(model: m).syncLocalState()
         let state: [String: Any] = [
             "phase": String(describing: m.phase),
+            "countdownBlur": CountdownBlurNSView.debugState,
             "armed": m.armed,
             "angle": m.angle as Any,
             "sensor": String(describing: m.sensorAvailability),

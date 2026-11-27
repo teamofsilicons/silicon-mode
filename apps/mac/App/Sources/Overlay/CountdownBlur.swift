@@ -27,6 +27,8 @@ struct CountdownBackdropBlur: NSViewRepresentable {
 
 final class CountdownBlurNSView: NSView {
     var maxRadius: CGFloat = 46
+    /// What the last configured strip ended up with (debug state dump).
+    nonisolated(unsafe) static var debugState = "unconfigured"
 
     private let host = NSView()
     private var effects: [NSVisualEffectView] = []
@@ -35,9 +37,10 @@ final class CountdownBlurNSView: NSView {
     private var configured = false
     private var configureAttempts = 0
     private var visible = false
-    private var animating = false
+    /// The stacked public blurs stand in (the variable blur wasn't ready, or doesn't exist).
+    private var usingFallback = false
 
-    override var isFlipped: Bool { true }
+    // The radius mask's orientation is picked from the backdrop layer itself (see `configure`).
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -75,8 +78,7 @@ final class CountdownBlurNSView: NSView {
     override func layout() {
         super.layout()
         if configured, filter != nil { reapplyIfNeeded() }
-        guard !animating else { return }
-        host.frame = targetFrame(visible)
+        host.frame = bounds
     }
 
     override func viewDidChangeBackingProperties() {
@@ -84,20 +86,21 @@ final class CountdownBlurNSView: NSView {
         if configured, filter != nil { reapplyIfNeeded() }
     }
 
-    /// AppKit can rebuild the material's layer tree (screen change, backing scale change);
-    /// put the variable blur back if our filter went missing.
-    private func reapplyIfNeeded() {
-        guard let filter, let current = Self.findBackdrop(effects[0].layer) else { return }
+    /// AppKit can rebuild the material's layer tree (screen change, backing scale change, the
+    /// window ordered on screen); put the variable blur back if our filter went missing. True
+    /// when it had to.
+    @discardableResult
+    private func reapplyIfNeeded() -> Bool {
+        guard let filter, let current = Self.findBackdrop(effects[0].layer) else { return false }
         let ours = (current.filters as? [NSObject])?.contains { $0 === filter } ?? false
-        guard current !== backdrop || !ours else { return }
+        guard current !== backdrop || !ours else { return false }
         filter.setValue(visible ? maxRadius : 0, forKey: "inputRadius")
+        filter.setValue(current.contentsAreFlipped() ? Self.radiusMaskTopDown : Self.radiusMaskBottomUp, forKey: "inputMaskImage")
         current.filters = [filter]
         current.superlayer?.sublayers?.filter { $0 !== current }.forEach { $0.isHidden = true }
         backdrop = current
-    }
-
-    private func targetFrame(_ shown: Bool) -> NSRect {
-        NSRect(x: 0, y: 0, width: bounds.width, height: shown ? bounds.height : 0)
+        Self.debugState = "reapplied; flipped=\(current.contentsAreFlipped()) frame=\(current.frame)"
+        return true
     }
 
     // MARK: Configure
@@ -113,6 +116,7 @@ final class CountdownBlurNSView: NSView {
             } else {
                 configured = true
                 installFallback()
+                Self.debugState = "fallback; window visible=\(window?.isVisible ?? false) attempts=\(configureAttempts)"
                 OverlayTiming.note(.countdown, "blur fallback (no backdrop layer)")
             }
             return
@@ -121,7 +125,9 @@ final class CountdownBlurNSView: NSView {
         if let f = Self.makeVariableBlur() {
             f.setValue("variableBlur", forKey: "name")
             f.setValue(visible ? maxRadius : 0, forKey: "inputRadius")
-            f.setValue(Self.radiusMaskImage, forKey: "inputMaskImage")
+            // The filter reads its mask bottom-up on an unflipped backdrop layer (row 0 = bottom
+            // edge) and top-down on a flipped one; which one this is depends on the views above.
+            f.setValue(backdrop.contentsAreFlipped() ? Self.radiusMaskTopDown : Self.radiusMaskBottomUp, forKey: "inputMaskImage")
             // Normalized edges wash the whole strip out evenly instead of grading it.
             f.setValue(false, forKey: "inputNormalizeEdges")
             backdrop.filters = [f]
@@ -129,11 +135,22 @@ final class CountdownBlurNSView: NSView {
             backdrop.superlayer?.sublayers?.filter { $0 !== backdrop }.forEach { $0.isHidden = true }
             self.backdrop = backdrop
             self.filter = f
+            Self.debugState = "variable; flipped=\(backdrop.contentsAreFlipped()) frame=\(backdrop.frame) superFrame=\(backdrop.superlayer?.frame ?? .zero) window=\(window?.frame ?? .zero) visible=\(window?.isVisible ?? false) attempts=\(configureAttempts)"
             OverlayTiming.point(.countdown, "blur-configured")
             OverlayTiming.note(.countdown, "variable blur ready (after \(configureAttempts) retries)")
         } else {
             installFallback()
         }
+    }
+
+    private func retryVariableBlur() {
+        for e in effects.dropFirst() { e.removeFromSuperview() }
+        effects = [effects[0]]
+        effects[0].maskImage = nil
+        usingFallback = false
+        configured = false
+        configureAttempts = 0
+        configure()
     }
 
     private static var variableBlurAvailable: Bool {
@@ -149,6 +166,8 @@ final class CountdownBlurNSView: NSView {
     /// Public fallback: several stacked behind-window blurs, each fading out at a different depth,
     /// so the combined blur opacity eases off smoothly toward the bottom.
     private func installFallback() {
+        usingFallback = true
+        if !visible { host.alphaValue = 0 }
         let first = effects[0]
         first.maskImage = Self.cachedAlphaMask(extent: 0.42)
         for extent in [0.7, 1.0] {
@@ -169,7 +188,8 @@ final class CountdownBlurNSView: NSView {
     }
 
     /// The masks are fixed: made once per process, not per countdown.
-    private static let radiusMaskImage = radiusMask()
+    private static let radiusMaskTopDown = radiusMask(rowZeroIsTop: true)
+    private static let radiusMaskBottomUp = radiusMask(rowZeroIsTop: false)
     private static var alphaMasks: [Double: NSImage] = [:]
 
     private static func cachedAlphaMask(extent: Double) -> NSImage {
@@ -180,12 +200,13 @@ final class CountdownBlurNSView: NSView {
     }
 
     /// Radius mask: full radius through the top ~30% (menu bar and notch included), easing to
-    /// zero at the bottom edge. The filter reads the mask bottom-up (row 0 is the layer's bottom
-    /// edge), so row 0 here is the strip's bottom.
-    private static func radiusMask(height h: Int = 256) -> CGImage? {
+    /// zero at the bottom edge. `rowZeroIsTop`: whether the filter will read row 0 as the strip's
+    /// top edge (a flipped backdrop layer) or its bottom.
+    private static func radiusMask(rowZeroIsTop: Bool, height h: Int = 256) -> CGImage? {
         var px = [UInt8](repeating: 0, count: h * 4)
         for y in 0..<h {
-            let t = 1 - Double(y) / Double(h - 1)
+            let r = Double(y) / Double(h - 1)
+            let t = rowZeroIsTop ? r : 1 - r
             let k = min(max((t - 0.28) / 0.72, 0), 1)
             let a = 1 - k * k * (3 - 2 * k)
             px[y * 4 + 3] = UInt8((a * 255).rounded())
@@ -220,35 +241,39 @@ final class CountdownBlurNSView: NSView {
 
     // MARK: Animation
 
+    /// The strip always spans its full height (growing it from nothing made AppKit rebuild the
+    /// material's layers mid-animation and drop the variable blur); it comes in and goes out by
+    /// its blur radius.
     func setVisible(_ shown: Bool, handoff: Bool) {
         guard shown != visible else { return }
         visible = shown
+        // A strip built ahead of time, ordered out, may not have had its backdrop layer yet and
+        // fell back to the stacked blurs. On screen now: try the real variable blur again.
+        if shown, usingFallback, Self.variableBlurAvailable { retryVariableBlur() }
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
         if shown {
+            host.frame = bounds
             host.alphaValue = 1
-            animateRadius(to: maxRadius, duration: 0.55)
-            if reduce {
-                host.frame = targetFrame(true)
+            if filter == nil {
+                // Fallback blurs: fade them in.
                 host.alphaValue = 0
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.3
+                    ctx.duration = reduce ? 0.3 : 0.5
                     host.animator().alphaValue = 1
                 }
                 return
             }
-            host.frame = targetFrame(false)
-            animating = true
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.62
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 0.9, 0.24, 1)
-                ctx.allowsImplicitAnimation = true
-                host.animator().frame = targetFrame(true)
-            }, completionHandler: { [weak self] in
-                MainActor.assumeIsolated { self?.animating = false }
-            })
-        } else if handoff || reduce {
-            // Hold the blur while the shockwave passes, then dissolve it.
+            reapplyIfNeeded()
+            animateRadius(to: maxRadius, duration: reduce ? 0.3 : 0.6)
+            // Ordering the window on screen can rebuild the material's layers a beat later.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                guard let self, self.visible, self.reapplyIfNeeded() else { return }
+                self.filter?.setValue(0, forKey: "inputRadius")
+                self.animateRadius(to: self.maxRadius, duration: 0.5)
+            }
+        } else if handoff {
+            // Hold the blur while Silicon Mode fades in above it, then dissolve it.
             DispatchQueue.main.asyncAfter(deadline: .now() + (reduce ? 0 : 0.5)) { [weak self] in
                 guard let self, !self.visible else { return }
                 NSAnimationContext.runAnimationGroup { ctx in
@@ -257,18 +282,14 @@ final class CountdownBlurNSView: NSView {
                     self.host.animator().alphaValue = 0
                 }
             }
-        } else {
-            // Retract up into the top edge.
+        } else if filter != nil {
+            // Cancelled: the blur eases back to nothing.
             animateRadius(to: 0, duration: 0.38)
-            animating = true
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.4
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.75, 0.3)
-                ctx.allowsImplicitAnimation = true
-                host.animator().frame = targetFrame(false)
-            }, completionHandler: { [weak self] in
-                MainActor.assumeIsolated { self?.animating = false }
-            })
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.32
+                host.animator().alphaValue = 0
+            }
         }
     }
 

@@ -16,6 +16,9 @@ final class OverlayPanel: NSPanel {
         super.init(contentRect: frame,
                    styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
                    backing: .buffered, defer: false)
+        // Before `level`: setting `isFloatingPanel` resets the level to .floating (3), which put
+        // the countdown under the menu bar (24) instead of above it.
+        isFloatingPanel = true
         self.level = level
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         isOpaque = false
@@ -27,7 +30,6 @@ final class OverlayPanel: NSPanel {
         isReleasedWhenClosed = false
         animationBehavior = .none
         becomesKeyOnlyIfNeeded = false
-        isFloatingPanel = true
         worksWhenModal = true
         acceptsMouseMovedEvents = true
         appearance = NSAppearance(named: .darkAqua)
