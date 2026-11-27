@@ -81,6 +81,25 @@ enum SettingsFurnitureCatalog {
         }
     }
 
+    /// One short line for the preview's corner menu.
+    static func tagline(_ k: FurnitureKind) -> String {
+        switch k {
+        case .agents: "Who needs you, who's working, who's done."
+        case .logs: "Every line, a tab per agent."
+        case .questions: "Answer agents from the face."
+        case .clock: "Digital, analog or in words."
+        case .system: "CPU, memory, battery and network."
+        }
+    }
+
+    /// What a corner's menu offers: kinds that can still be added (in "Add furniture" order), and
+    /// the pieces in other corners (corner by corner, top to bottom).
+    static func offers(for slot: FurnitureSlot, in list: [FurniturePiece]) -> (add: [FurnitureKind], move: [FurniturePiece]) {
+        let add = addOrder.filter { SettingsFurnitureEdit.canAdd($0, to: list) }
+        let move = slotOrder.filter { $0 != slot }.flatMap { SettingsFurnitureEdit.visualOrder($0, in: list) }
+        return (add, move)
+    }
+
     static func title(_ s: FurnitureSlot) -> String {
         switch s {
         case .topLeading: "Top left"
@@ -190,9 +209,44 @@ enum SettingsFurnitureEdit {
 
     /// Moves a piece to another slot, outermost in that slot's stack.
     static func moving(_ id: String, to slot: FurnitureSlot, in list: [FurniturePiece]) -> [FurniturePiece] {
-        guard var piece = list.first(where: { $0.id == id }), piece.slot != slot else { return list }
+        guard let piece = list.first(where: { $0.id == id }), piece.slot != slot else { return list }
+        return moving(id, to: slot, index: outermost(slot, in: list.filter { $0.id != id }), in: list)
+    }
+
+    /// Moves a piece into `slot` at `index` of that slot's visual order (top of the screen to the
+    /// bottom, counted without the piece itself; clamped). Same slot: a reorder. Every other piece
+    /// keeps its place, and the list keeps its order outside the slot (dropping a piece where it
+    /// already is changes nothing).
+    ///
+    ///     // top right holds clock, questions (top to bottom)
+    ///     moving("questions", to: .topTrailing, index: 0, in: l)   // questions, clock
+    ///     // bottom left holds logs; a bottom stack's first piece is its lowest
+    ///     moving("clock", to: .bottomLeading, index: 1, in: l)     // logs, clock (clock below)
+    static func moving(_ id: String, to slot: FurnitureSlot, index: Int, in list: [FurniturePiece]) -> [FurniturePiece] {
+        guard var piece = list.first(where: { $0.id == id }) else { return list }
         piece.slot = slot
-        return list.filter { $0.id != id } + [piece]
+        var visual = visualOrder(slot, in: list.filter { $0.id != id })
+        visual.insert(piece, at: min(max(index, 0), visual.count))
+        let stack: [FurniturePiece] = slot.isTop ? visual : visual.reversed()
+        // The slot's new stack takes the list positions its pieces (and the moved piece) held.
+        let positions = list.indices.filter { list[$0].slot == slot || list[$0].id == id }
+        var out = list
+        for (k, pos) in positions.enumerated() { out[pos] = stack[k] }
+        return out
+    }
+
+    /// The visual index of a slot's open end (outermost: below a top stack, above a bottom one).
+    static func outermost(_ slot: FurnitureSlot, in list: [FurniturePiece]) -> Int {
+        slot.isTop ? list.count(where: { $0.slot == slot }) : 0
+    }
+
+    /// Adds a fresh piece of `kind` (with `options`) at the open end of `slot`.
+    static func adding(_ kind: FurnitureKind, options: [String: FaceOptionValue] = [:], to slot: FurnitureSlot,
+                       in list: [FurniturePiece]) -> [FurniturePiece] {
+        guard canAdd(kind, to: list) else { return list }
+        var piece = FurniturePiece.make(kind, slot: slot)
+        piece.options = options
+        return FurniturePiece.sanitized(list + [piece])
     }
 
     static func setting(_ options: [String: FaceOptionValue], for id: String, in list: [FurniturePiece]) -> [FurniturePiece] {

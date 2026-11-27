@@ -201,25 +201,105 @@ struct SettingsFurnitureLayout {
 
 // MARK: - Preview
 
-/// A live, always-dark schematic of the overlay: the face, the four corner slots, each placed
-/// piece drawn as its real silhouette, and the chrome that always stays (Unlock and the eye toggle,
-/// dimmed as they are while nobody is at the Mac). Hovering a piece highlights it (and its row in
-/// the pane).
+/// A live, always-dark schematic of the overlay, and the place to arrange it: the face, the four
+/// corner slots, each placed piece drawn as its real silhouette, and the chrome that always stays
+/// (Unlock and the eye toggle, dimmed as they are while nobody is at the Mac).
+///
+/// With `onEdit` it's the editor. A piece can be picked up and dropped into any corner: the
+/// corner it would land in lights up and its stack opens a gap at the landing spot; Escape, or a
+/// drop outside the preview, puts it back. An empty corner (or the + at the open end of a stack)
+/// offers what can go there. Hovering a piece highlights it (and its row in the pane).
+///
+/// Everything is drawn on the 1512×982 virtual screen and scaled to fit; the pointer is mapped
+/// back onto that screen, so hit tests and drop targets use the same frames the layout does.
 struct SettingsFurniturePreview: View {
+    typealias Item = SettingsFurnitureLayout.Item
+    typealias LayoutState = SettingsFurnitureLayout.State
+    /// Applies an edit made in the preview, with the animation to make it with.
+    typealias Edit = (Animation, ([FurniturePiece]) -> [FurniturePiece]) -> Void
+
     let pieces: [FurniturePiece]
     var hidden = false
     var highlighted: String? = nil
     var onHover: ((String?) -> Void)? = nil
+    /// Nil: a picture only (snapshots).
+    var onEdit: Edit? = nil
+    /// Snapshot-only: a frozen editor state, drawn without `onEdit`.
+    var staged: Staged? = nil
+
+    /// An editor state for snapshots (points on the virtual screen).
+    struct Staged {
+        /// A piece held with its middle at a point.
+        var drag: (id: String, at: CGPoint)? = nil
+        /// The corner under the pointer.
+        var hover: FurnitureSlot? = nil
+    }
+
+    /// Where a held piece would land: a slot, and an index in its visual order (top of the screen
+    /// to the bottom, counted without the piece), as `SettingsFurnitureEdit.moving(_:to:index:in:)`
+    /// takes it.
+    struct Target: Equatable {
+        var slot: FurnitureSlot
+        var index: Int
+    }
+
+    struct Drag: Equatable {
+        /// The piece as it was picked up (it keeps that size while held).
+        let item: Item
+        /// How far it has moved, on the virtual screen.
+        var translation: CGSize = .zero
+        /// Nil while the pointer is outside the preview: a drop there puts the piece back.
+        var target: Target?
+        var id: String { item.id }
+    }
+
+    /// The app's appearance (the preview itself is always dark; its menus aren't).
+    @Environment(\.colorScheme) private var scheme
+    @State private var drag: Drag?
+    @State private var hoverPiece: String?
+    @State private var hoverSlot: FurnitureSlot?
+    @State private var menuSlot: FurnitureSlot?
+    /// The piece springing into place after a drop, kept above the others until it lands.
+    @State private var settling: String?
+    /// The rest of the current gesture is ignored: it began off a piece, or Escape cancelled it.
+    @State private var ignoringGesture = false
+    @State private var escape = SettingsEscapeWatcher()
+    @GestureState private var pressing = false
 
     private let screen = SettingsFurnitureLayout.screen
+    private var editable: Bool { onEdit != nil && !hidden }
+    /// Hover states and the + buttons: while editable, or staged for a snapshot.
+    private var editorShown: Bool { (editable || staged != nil) && !hidden }
+    /// On-screen size of the + at the open end of a stack (it doesn't scale with the preview).
+    private static let plusSize: CGFloat = 22
+
+    private enum Spring {
+        static let lift = Animation.spring(duration: 0.24, bounce: 0.28)
+        static let reflow = Animation.spring(duration: 0.32, bounce: 0.12)
+        static let drop = Animation.spring(duration: 0.42, bounce: 0.22)
+    }
 
     var body: some View {
-        let items = SettingsFurnitureLayout.place(pieces, state: .current(pieces), screen: screen)
+        let state = LayoutState.current(pieces)
+        let held = drag ?? stagedDrag(state)
+        let arranged = arrangement(held)
+        let shown = SettingsFurnitureLayout.place(arranged, state: state, screen: screen)
+        let lit = hoverSlot ?? staged?.hover
         GeometryReader { geo in
-            stage(items)
-                .frame(width: screen.width, height: screen.height)
-                .scaleEffect(geo.size.width / screen.width, anchor: .topLeading)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            let scale = geo.size.width / screen.width
+            ZStack(alignment: .topLeading) {
+                stage(shown, arranged: arranged, held: held, lit: lit)
+                    .frame(width: screen.width, height: screen.height)
+                    .scaleEffect(scale, anchor: .topLeading)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilitySummary(shown))
+                controls(shown, arranged: arranged, held: held, lit: lit, scale: scale)
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { hover($0, shown: shown, scale: scale) }
+            .gesture(dragGesture(scale: scale, bounds: geo.size, state: state), including: editable ? .all : .subviews)
+            .pointerStyle(drag != nil ? .grabActive : nil)
         }
         .aspectRatio(screen.width / screen.height, contentMode: .fit)
         .background(Theme.Night.background)
@@ -235,85 +315,395 @@ struct SettingsFurniturePreview: View {
         .environment(\.colorScheme, .dark)
         .animation(Theme.Motion.slow, value: hidden)
         .animation(Theme.Motion.fast, value: highlighted)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilitySummary(items))
+        .onChange(of: pressing) { _, live in
+            guard !live else { return }
+            // A gesture the system cut short never reports its end: put a held piece back.
+            Task { @MainActor in
+                if let d = drag { drop(d, at: nil) }
+                ignoringGesture = false
+            }
+        }
+        .onDisappear { escape.stop() }
     }
 
-    private func stage(_ items: [SettingsFurnitureLayout.Item]) -> some View {
-        ZStack(alignment: .topLeading) {
+    /// The pieces as they'd be with the held piece dropped where it's aimed (as they are while it's
+    /// outside the preview).
+    private func arrangement(_ held: Drag?) -> [FurniturePiece] {
+        guard let held, let t = held.target else { return pieces }
+        return SettingsFurnitureEdit.moving(held.id, to: t.slot, index: t.index, in: pieces)
+    }
+
+    // MARK: Stage (virtual screen)
+
+    private func stage(_ shown: [Item], arranged: [FurniturePiece], held: Drag?, lit: FurnitureSlot?) -> some View {
+        let used = Set(arranged.map(\.slot))
+        let landing = held?.target == nil ? nil : shown.first { $0.id == held?.id }
+        return ZStack(alignment: .topLeading) {
             Theme.Night.background
             // The face, calm: furniture is what's being arranged.
             SettingsBloomFace(size: 340, phase: 1)
                 .opacity(hidden ? 1 : 0.8)
                 .position(x: screen.width / 2, y: screen.height * 0.47)
             if !hidden {
-                ForEach(emptySlots, id: \.self) { slot in
-                    emptySlot(slot)
+                ForEach(SettingsFurnitureCatalog.slotOrder, id: \.self) { slot in
+                    targetZone(slot, shown: shown, on: held?.target?.slot == slot)
                 }
+                ForEach(SettingsFurnitureCatalog.slotOrder.filter { !used.contains($0) }, id: \.self) { slot in
+                    emptySlot(slot, lit: editorShown && held == nil && (lit == slot || menuSlot == slot))
+                }
+                if let landing { ghost(landing) }
             }
-            ForEach(items) { item in
-                piece(item)
+            ForEach(placed(shown, held: held)) { p in
+                piece(p, held: held)
             }
             chrome
         }
         .frame(width: screen.width, height: screen.height)
     }
 
-    // MARK: Pieces
+    /// A piece and where it's drawn: at its place in the layout, or (held) under the pointer.
+    private struct Placed: Identifiable {
+        let item: Item
+        let center: CGPoint
+        var held = false
+        var id: String { item.id }
+    }
 
-    private func piece(_ item: SettingsFurnitureLayout.Item) -> some View {
-        let on = highlighted == item.id
-        let dimmed = highlighted != nil && !on
-        let corner: Alignment = switch item.piece.slot {
-        case .topLeading: .topLeading
-        case .topTrailing: .topTrailing
-        case .bottomLeading: .bottomLeading
-        case .bottomTrailing: .bottomTrailing
+    private func placed(_ shown: [Item], held: Drag?) -> [Placed] {
+        var out = shown.map { Placed(item: $0, center: CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
+        guard let d = held else { return out }
+        let f = d.item.frame
+        let hand = Placed(item: d.item, center: CGPoint(x: f.midX + d.translation.width, y: f.midY + d.translation.height), held: true)
+        if let i = out.firstIndex(where: { $0.id == d.id }) { out[i] = hand } else { out.append(hand) }
+        return out
+    }
+
+    private func piece(_ p: Placed, held: Drag?) -> some View {
+        let item = p.item
+        let on = held == nil && highlighted == item.id
+        let corner = item.piece.slot.corner
+        let opacity: Double = if hidden {
+            on ? 0.4 : 0.16
+        } else if let held {
+            // Held: solid (fainter outside, where a drop puts it back). The rest step back a little,
+            // the stack it's aimed at less so.
+            p.held ? (held.target == nil ? 0.55 : 1) : (item.piece.slot == held.target?.slot ? 0.8 : 0.5)
+        } else {
+            highlighted != nil && !on ? 0.45 : 1
         }
+        let ring = RoundedRectangle(cornerRadius: 30, style: .continuous)
         return SettingsFurnitureSilhouette(item: item)
             .padding(12)
             .background {
                 if on {
-                    RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .fill(Theme.Night.accent.opacity(0.08))
-                        .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous)
-                            .strokeBorder(Theme.Night.accent.opacity(0.9), lineWidth: 4))
+                    ring.fill(Theme.Night.accent.opacity(0.08))
+                        .overlay(ring.strokeBorder(Theme.Night.accent.opacity(0.9), lineWidth: 4))
+                        .transition(.opacity)
+                } else if p.held {
+                    // In hand: an opaque card hugging the piece, so it reads above whatever it
+                    // crosses (a shadow alone vanishes on the dark stage).
+                    ring.fill(Color(white: 0.085))
+                        .overlay(ring.strokeBorder(Color.white.opacity(0.22), lineWidth: 2))
                         .transition(.opacity)
                 }
             }
             .padding(-12)
-            .opacity(hidden ? (on ? 0.4 : 0.16) : (dimmed ? 0.45 : 1))
-            .saturation(hidden ? 0 : 1)
             .frame(width: item.frame.width, height: item.frame.height, alignment: corner)
-            .contentShape(Rectangle())
-            .onHover { inside in
-                guard let onHover else { return }
-                if inside { onHover(item.id) } else if highlighted == item.id { onHover(nil) }
-            }
-            .help(SettingsFurnitureCatalog.title(item.piece.kind))
-            .position(x: item.frame.midX, y: item.frame.midY)
+            .scaleEffect(p.held ? 1.035 : 1)
+            .shadow(color: .black.opacity(p.held ? 0.7 : 0), radius: p.held ? 40 : 0, y: p.held ? 24 : 0)
+            .animation(Spring.lift, value: p.held)
+            .opacity(opacity)
+            .saturation(hidden ? 0 : 1)
+            .position(p.center)
+            // A held piece follows the pointer exactly; dropped, it springs into place.
+            .transaction { if p.held { $0.animation = nil } }
+            .zIndex(p.held || settling == item.id ? 1 : 0)
             .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: corner.unitPoint)))
     }
 
-    /// Slots nothing is placed in. (A slot whose pieces were all left out for room isn't empty.)
-    private var emptySlots: [FurnitureSlot] {
-        let used = Set(pieces.map(\.slot))
-        return SettingsFurnitureCatalog.slotOrder.filter { !used.contains($0) }
+    /// The corner a held piece is aimed at: a soft field around its stack (gap included).
+    private func targetZone(_ slot: FurnitureSlot, shown: [Item], on: Bool) -> some View {
+        let f = slotFrame(slot, shown: shown).insetBy(dx: -18, dy: -18)
+        return RoundedRectangle(cornerRadius: 36, style: .continuous)
+            .fill(Theme.Night.accent.opacity(0.06))
+            .overlay(RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .strokeBorder(Theme.Night.accent.opacity(0.24), lineWidth: 2.5))
+            .frame(width: f.width, height: f.height)
+            .position(x: f.midX, y: f.midY)
+            .opacity(on ? 1 : 0)
     }
 
-    private func emptySlot(_ slot: FurnitureSlot) -> some View {
+    /// Where the held piece would land.
+    private func ghost(_ item: Item) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        return shape
+            .fill(Theme.Night.accent.opacity(0.12))
+            .overlay(shape.strokeBorder(Theme.Night.accent.opacity(0.9), style: StrokeStyle(lineWidth: 3.5, dash: [14, 10])))
+            .frame(width: item.frame.width, height: item.frame.height)
+            .position(x: item.frame.midX, y: item.frame.midY)
+            .transition(.opacity)
+    }
+
+    /// Slots nothing is placed in get a dashed placeholder (a slot whose pieces were all left out
+    /// for room isn't empty). Lit while the pointer is over it or its menu is open.
+    private func emptySlot(_ slot: FurnitureSlot, lit: Bool) -> some View {
         let f = SettingsFurnitureLayout.emptyFrame(slot, screen: screen)
-        return RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .strokeBorder(Color.white.opacity(0.11), style: StrokeStyle(lineWidth: 2.5, dash: [11, 10]))
+        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        return shape
+            .fill(lit ? Theme.Night.accent.opacity(0.1) : Color.clear)
+            .overlay(shape.strokeBorder(lit ? Theme.Night.accent.opacity(0.75) : Color.white.opacity(0.11),
+                                        style: StrokeStyle(lineWidth: 2.5, dash: [11, 10])))
             .overlay {
                 Image(systemName: "plus")
                     .font(.system(size: 28, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.16))
+                    .foregroundStyle(lit ? Theme.Night.accent : Color.white.opacity(0.16))
+                    .scaleEffect(lit ? 1.12 : 1)
             }
             .frame(width: f.width, height: f.height)
             .position(x: f.midX, y: f.midY)
             .allowsHitTesting(false)
             .transition(.opacity)
+    }
+
+    // MARK: Controls (on-screen points)
+
+    /// What takes the pointer, laid over the stage in unscaled points (so hit areas, tooltips and
+    /// popovers line up): a grab handle per piece, a button per empty corner, the + at the open end
+    /// of a stack.
+    @ViewBuilder
+    private func controls(_ shown: [Item], arranged: [FurniturePiece], held: Drag?, lit: FurnitureSlot?, scale: CGFloat) -> some View {
+        if held == nil {
+            ForEach(shown) { item in
+                let f = scaled(item.frame, scale)
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(width: f.width, height: f.height)
+                    .pointerStyle(editable ? .grabIdle : nil)
+                    .help(SettingsFurnitureCatalog.title(item.piece.kind))
+                    .position(x: f.midX, y: f.midY)
+                    .accessibilityHidden(true)
+            }
+        }
+        if editorShown {
+            let used = Set(arranged.map(\.slot))
+            ForEach(SettingsFurnitureCatalog.slotOrder, id: \.self) { slot in
+                let name = SettingsFurnitureCatalog.title(slot).lowercased()
+                if !used.contains(slot) {
+                    let f = scaled(SettingsFurnitureLayout.emptyFrame(slot, screen: screen), scale)
+                    Button { openMenu(slot) } label: {
+                        Color.clear.contentShape(RoundedRectangle(cornerRadius: 20 * scale, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: f.width, height: f.height)
+                    .popover(isPresented: menuBinding(slot), arrowEdge: slot.isLeading ? .trailing : .leading) { menu(slot) }
+                    .help("Add to the \(name) corner")
+                    .accessibilityLabel("Add to the \(name) corner")
+                    .position(x: f.midX, y: f.midY)
+                    .allowsHitTesting(held == nil)
+                } else if held == nil, offersSomething(slot), let c = plusCenter(slot, shown: shown, scale: scale) {
+                    let visible = lit == slot || menuSlot == slot
+                    SettingsFurniturePlusButton(label: "Add to the \(name) corner") { openMenu(slot) }
+                        .popover(isPresented: menuBinding(slot), arrowEdge: slot.isLeading ? .trailing : .leading) { menu(slot) }
+                        .scaleEffect(visible ? 1 : 0.6)
+                        .opacity(visible ? 1 : 0)
+                        .allowsHitTesting(visible)
+                        .position(x: c.x * scale, y: c.y * scale)
+                }
+            }
+        }
+    }
+
+    private func scaled(_ r: CGRect, _ s: CGFloat) -> CGRect {
+        CGRect(x: r.minX * s, y: r.minY * s, width: r.width * s, height: r.height * s)
+    }
+
+    // MARK: Geometry (virtual screen)
+
+    /// A slot's stack as shown (its pieces' union), or the empty placeholder.
+    private func slotFrame(_ slot: FurnitureSlot, shown: [Item]) -> CGRect {
+        let frames = shown.filter { $0.piece.slot == slot }.map(\.frame)
+        guard let first = frames.first else { return SettingsFurnitureLayout.emptyFrame(slot, screen: screen) }
+        return frames.dropFirst().reduce(first) { $0.union($1) }
+    }
+
+    /// Where the + at the open end of a slot's stack goes (below a top stack, above a bottom one),
+    /// or nil when the slot shows nothing or the + would crowd the column's other slot.
+    private func plusCenter(_ slot: FurnitureSlot, shown: [Item], scale: CGFloat) -> CGPoint? {
+        let mine = shown.filter { $0.piece.slot == slot }.map(\.frame)
+        guard scale > 0, let outer = slot.isTop ? mine.max(by: { $0.maxY < $1.maxY }) : mine.min(by: { $0.minY < $1.minY })
+        else { return nil }
+        let size = Self.plusSize / scale, gap = SettingsFurnitureLayout.gap
+        let theirs = shown.filter { $0.piece.slot == slot.sibling }.map(\.frame)
+        if slot.isTop {
+            let y = outer.maxY + gap + size / 2
+            let floor = theirs.map(\.minY).min()
+                ?? screen.height - (slot.isLeading ? SettingsFurnitureLayout.bottomLeadingInset : SettingsFurnitureLayout.bottomTrailingInset)
+            return y + size / 2 + gap <= floor ? CGPoint(x: outer.midX, y: y) : nil
+        } else {
+            let y = outer.minY - gap - size / 2
+            let ceiling = theirs.map(\.maxY).max() ?? SettingsFurnitureLayout.margin
+            return y - size / 2 - gap >= ceiling ? CGPoint(x: outer.midX, y: y) : nil
+        }
+    }
+
+    /// The corner whose stack (or placeholder, or +) the point is near.
+    private func zone(at p: CGPoint, shown: [Item], scale: CGFloat) -> FurnitureSlot? {
+        SettingsFurnitureCatalog.slotOrder.first { slot in
+            var r = slotFrame(slot, shown: shown)
+            if let c = plusCenter(slot, shown: shown, scale: scale) {
+                let s = Self.plusSize / scale
+                r = r.union(CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s))
+            }
+            return r.insetBy(dx: -18, dy: -18).contains(p)
+        }
+    }
+
+    /// The slot and place a held piece would land in with the pointer at `p`. The column is the
+    /// pointer's half of the screen; its top or bottom slot, whichever side of the midpoint between
+    /// the two stacks the pointer is on; the index, the pieces of that stack whose middles are above
+    /// the pointer. Both read the layout as it's shown now, with the gap already open, so a target
+    /// holds until the pointer clearly crosses into the next one (it never flickers between two).
+    private func target(at p: CGPoint, for d: Drag, state: LayoutState) -> Target {
+        let arranged = arrangement(d)
+        let shown = SettingsFurnitureLayout.place(arranged, state: state, screen: screen)
+        let leading = p.x < screen.width / 2
+        let top: FurnitureSlot = leading ? .topLeading : .topTrailing
+        let bottom = top.sibling
+        let topEdge = shown.filter { $0.piece.slot == top }.map(\.frame.maxY).max()
+            ?? SettingsFurnitureLayout.emptyFrame(top, screen: screen).maxY
+        let bottomEdge = shown.filter { $0.piece.slot == bottom }.map(\.frame.minY).min()
+            ?? SettingsFurnitureLayout.emptyFrame(bottom, screen: screen).minY
+        let slot = p.y < (topEdge + bottomEdge) / 2 ? top : bottom
+        let others = shown.filter { $0.piece.slot == slot && $0.id != d.id }
+        // Pieces left out for room are the outermost ones: below a top stack, above a bottom one.
+        let unshown = arranged.count(where: { $0.slot == slot && $0.id != d.id }) - others.count
+        let above = others.count(where: { $0.frame.midY < p.y })
+        return Target(slot: slot, index: above + (slot.isTop ? 0 : unshown))
+    }
+
+    private func origin(of item: Item) -> Target {
+        let visual = SettingsFurnitureEdit.visualOrder(item.piece.slot, in: pieces)
+        return Target(slot: item.piece.slot, index: visual.firstIndex { $0.id == item.id } ?? 0)
+    }
+
+    private func stagedDrag(_ state: LayoutState) -> Drag? {
+        guard let s = staged?.drag,
+              let item = SettingsFurnitureLayout.place(pieces, state: state, screen: screen).first(where: { $0.id == s.id })
+        else { return nil }
+        var d = Drag(item: item, translation: CGSize(width: s.at.x - item.frame.midX, height: s.at.y - item.frame.midY),
+                     target: origin(of: item))
+        // Twice, as a live drag would get there: the second pass sees the gap the first opened.
+        for _ in 0..<2 { d.target = target(at: s.at, for: d, state: state) }
+        return d
+    }
+
+    // MARK: Pointer
+
+    private func hover(_ phase: HoverPhase, shown: [Item], scale: CGFloat) {
+        guard drag == nil else { return }
+        var piece: String?
+        var slot: FurnitureSlot?
+        if case .active(let at) = phase, scale > 0 {
+            let p = CGPoint(x: at.x / scale, y: at.y / scale)
+            let hit = shown.last { $0.frame.contains(p) }
+            piece = hit?.id
+            if editorShown { slot = hit?.piece.slot ?? zone(at: p, shown: shown, scale: scale) }
+        }
+        if piece != hoverPiece {
+            let was = hoverPiece
+            hoverPiece = piece
+            if let piece { onHover?(piece) } else if highlighted == was { onHover?(nil) }
+        }
+        if slot != hoverSlot { withAnimation(Theme.Motion.fast) { hoverSlot = slot } }
+    }
+
+    private func dragGesture(scale: CGFloat, bounds: CGSize, state: LayoutState) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .updating($pressing) { _, live, _ in live = true }
+            .onChanged { v in
+                guard !ignoringGesture, scale > 0 else { return }
+                if drag == nil, !pickUp(at: CGPoint(x: v.startLocation.x / scale, y: v.startLocation.y / scale), state: state) {
+                    ignoringGesture = true
+                    return
+                }
+                guard var d = drag else { return }
+                d.translation = CGSize(width: v.translation.width / scale, height: v.translation.height / scale)
+                let inside = CGRect(origin: .zero, size: bounds).contains(v.location)
+                let next = inside ? target(at: CGPoint(x: v.location.x / scale, y: v.location.y / scale), for: d, state: state) : nil
+                if let next, next != d.target {
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                }
+                d.target = next
+                withAnimation(Spring.reflow) { drag = d }
+            }
+            .onEnded { _ in
+                let skip = ignoringGesture
+                ignoringGesture = false
+                guard !skip, let d = drag else { return }
+                drop(d, at: d.target)
+            }
+    }
+
+    /// Lifts the piece under `start`, if any.
+    private func pickUp(at start: CGPoint, state: LayoutState) -> Bool {
+        let resting = SettingsFurnitureLayout.place(pieces, state: state, screen: screen)
+        guard let item = resting.last(where: { $0.frame.contains(start) }) else { return false }
+        menuSlot = nil
+        hoverSlot = nil
+        NSCursor.closedHand.set()
+        escape.start {
+            guard let d = drag else { return }
+            ignoringGesture = true
+            drop(d, at: nil)
+        }
+        withAnimation(Spring.lift) { drag = Drag(item: item, target: origin(of: item)) }
+        return true
+    }
+
+    /// Lets go of the held piece: into `target` (a spring into its new place, and the edit), or
+    /// back where it was.
+    private func drop(_ d: Drag, at target: Target?) {
+        escape.stop()
+        settling = d.id
+        withAnimation(Spring.drop) {
+            drag = nil
+            if let target {
+                onEdit?(Spring.drop) { SettingsFurnitureEdit.moving(d.id, to: target.slot, index: target.index, in: $0) }
+            }
+        } completion: {
+            if settling == d.id { settling = nil }
+        }
+    }
+
+    // MARK: Corner menu
+
+    private func openMenu(_ slot: FurnitureSlot) {
+        guard editable else { return }
+        withAnimation(Theme.Motion.fast) { menuSlot = slot }
+    }
+
+    private func menuBinding(_ slot: FurnitureSlot) -> Binding<Bool> {
+        Binding(get: { menuSlot == slot }, set: { open in
+            if !open, menuSlot == slot { withAnimation(Theme.Motion.fast) { menuSlot = nil } }
+        })
+    }
+
+    private func offersSomething(_ slot: FurnitureSlot) -> Bool {
+        let o = SettingsFurnitureCatalog.offers(for: slot, in: pieces)
+        return !o.add.isEmpty || !o.move.isEmpty
+    }
+
+    private func menu(_ slot: FurnitureSlot) -> some View {
+        SettingsFurnitureSlotMenu(
+            slot: slot, pieces: pieces,
+            onAdd: { kind, options in choose { SettingsFurnitureEdit.adding(kind, options: options, to: slot, in: $0) } },
+            onMove: { id in choose { SettingsFurnitureEdit.moving(id, to: slot, in: $0) } })
+            .environment(\.colorScheme, scheme)
+    }
+
+    private func choose(_ change: @escaping ([FurniturePiece]) -> [FurniturePiece]) {
+        menuSlot = nil
+        onEdit?(Spring.drop, change)
     }
 
     // MARK: Chrome (always there)
@@ -363,6 +753,252 @@ struct SettingsFurniturePreview: View {
         if items.isEmpty { return "Preview: no face furniture." }
         let parts = items.map { "\(SettingsFurnitureCatalog.title($0.piece.kind)) \(SettingsFurnitureCatalog.title($0.piece.slot).lowercased())" }
         return "Preview: " + parts.joined(separator: ", ")
+    }
+}
+
+/// The + at the open end of a stack: a small dark-glass disc, lit on hover.
+private struct SettingsFurniturePlusButton: View {
+    let label: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(hover ? Color.white : Color.white.opacity(0.75))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(hover ? Theme.Night.accent.opacity(0.45) : Color(white: 0.16)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(hover ? 0.32 : 0.2), lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(Theme.Motion.fast) { hover = h } }
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
+/// Watches for Escape while a piece is held (a drag never has keyboard focus), and swallows it.
+@MainActor
+private final class SettingsEscapeWatcher {
+    private var monitor: Any?
+
+    func start(_ onEscape: @escaping @MainActor () -> Void) {
+        stop()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53 else { return event }   // Escape
+            MainActor.assumeIsolated { onEscape() }
+            return nil
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
+// MARK: - Corner menu
+
+/// What can go in a corner: kinds that can still be added (a clock in each style) and pieces
+/// placed in other corners. Shown in a popover from the preview's empty corners and + buttons.
+struct SettingsFurnitureSlotMenu: View {
+    let slot: FurnitureSlot
+    let pieces: [FurniturePiece]
+    var onAdd: (FurnitureKind, [String: FaceOptionValue]) -> Void
+    var onMove: (String) -> Void
+
+    var body: some View {
+        let offer = SettingsFurnitureCatalog.offers(for: slot, in: pieces)
+        let full = pieces.count >= FurniturePiece.maxPieces
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 7) {
+                SettingsSlotGlyph(slot: slot, color: Theme.textMuted)
+                Text(SettingsFurnitureCatalog.title(slot)).alloText(12, .medium).foregroundStyle(Theme.textMuted)
+                if let note = SettingsFurnitureCatalog.note(slot) {
+                    Text(note).alloText(12).foregroundStyle(Theme.textFaint)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
+
+            if !offer.add.isEmpty {
+                section("Add")
+                ForEach(offer.add, id: \.self) { kind in
+                    if kind == .clock {
+                        clockRow
+                    } else {
+                        SlotMenuRow(icon: SettingsFurnitureCatalog.icon(kind), title: SettingsFurnitureCatalog.title(kind),
+                                    detail: SettingsFurnitureCatalog.tagline(kind)) { onAdd(kind, [:]) }
+                    }
+                }
+            } else if full {
+                Text("Up to \(FurniturePiece.maxPieces) pieces at once. Remove one to add another.")
+                    .alloText(12)
+                    .foregroundStyle(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+
+            if !offer.move.isEmpty {
+                section("Move here").padding(.top, offer.add.isEmpty && !full ? 0 : 6)
+                ForEach(offer.move) { piece in
+                    SlotMenuRow(icon: SettingsFurnitureCatalog.icon(piece.kind), title: SettingsFurnitureCatalog.title(piece.kind),
+                                detail: moveDetail(piece)) {
+                        onMove(piece.id)
+                    } trailing: {
+                        SettingsSlotGlyph(slot: piece.slot, size: 14, color: Theme.textFaint)
+                    }
+                }
+            }
+
+            if offer.add.isEmpty && offer.move.isEmpty && !full {
+                Text("Everything is already here.")
+                    .alloText(12)
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+        }
+        .padding(6)
+        .frame(width: 300, alignment: .leading)
+    }
+
+    private func section(_ title: String) -> some View {
+        Text(title)
+            .alloText(11, .medium)
+            .foregroundStyle(Theme.textFaint)
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
+    }
+
+    /// A clock row offers its styles.
+    private var clockRow: some View {
+        HStack(alignment: .top, spacing: 10) {
+            SlotMenuTile(icon: SettingsFurnitureCatalog.icon(.clock))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(SettingsFurnitureCatalog.title(.clock)).alloText(13, .medium).foregroundStyle(Theme.foreground)
+                HStack(spacing: 4) {
+                    ForEach(SettingsFurnitureOption.clockStyles, id: \.id) { style in
+                        SlotMenuChip(title: style.label) {
+                            onAdd(.clock, [SettingsFurnitureOption.style: .string(style.id)])
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Add a clock")
+    }
+
+    private func moveDetail(_ p: FurniturePiece) -> String {
+        let from = "From \(SettingsFurnitureCatalog.title(p.slot).lowercased())"
+        guard p.kind == .clock else { return from }
+        let style = SettingsFurnitureOption.clockStyles.first { $0.id == SettingsFurnitureOption.clockStyle(p) }?.label ?? "Digital"
+        return "\(style), \(from.lowercased())"
+    }
+}
+
+private struct SlotMenuRow<Trailing: View>: View {
+    let icon: String
+    let title: String
+    var detail: String? = nil
+    let action: () -> Void
+    @ViewBuilder var trailing: Trailing
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                SlotMenuTile(icon: icon, lit: hover)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).alloText(13, .medium).foregroundStyle(Theme.foreground)
+                    if let detail {
+                        Text(detail).alloText(11).foregroundStyle(Theme.textMuted).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 6)
+                trailing
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .background(hover ? Theme.foreground.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(Theme.Motion.fast) { hover = h } }
+        .accessibilityLabel(detail.map { "\(title), \($0)" } ?? title)
+    }
+}
+
+/// A corner-menu row's glyph tile.
+private struct SlotMenuTile: View {
+    let icon: String
+    var lit = false
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(lit ? Theme.accent : Theme.textSecondary)
+            .frame(width: 28, height: 28)
+            .background(lit ? Theme.accentSubtle : Theme.surfaceMuted, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+extension SlotMenuRow where Trailing == EmptyView {
+    init(icon: String, title: String, detail: String? = nil, action: @escaping () -> Void) {
+        self.init(icon: icon, title: title, detail: detail, action: action) { EmptyView() }
+    }
+}
+
+private struct SlotMenuChip: View {
+    let title: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .alloText(11, .medium)
+                .foregroundStyle(hover ? Theme.accent : Theme.textSecondary)
+                .padding(.horizontal, 9)
+                .frame(height: 22)
+                .background(hover ? Theme.accentSubtle : Theme.surfaceMuted, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(Theme.Motion.fast) { hover = h } }
+        .accessibilityLabel("Add a \(title.lowercased()) clock")
+    }
+}
+
+private extension FurnitureSlot {
+    /// The screen corner the slot's stack grows from.
+    var corner: Alignment {
+        switch self {
+        case .topLeading: .topLeading
+        case .topTrailing: .topTrailing
+        case .bottomLeading: .bottomLeading
+        case .bottomTrailing: .bottomTrailing
+        }
+    }
+
+    /// The column's other slot.
+    var sibling: FurnitureSlot {
+        switch self {
+        case .topLeading: .bottomLeading
+        case .bottomLeading: .topLeading
+        case .topTrailing: .bottomTrailing
+        case .bottomTrailing: .topTrailing
+        }
     }
 }
 
