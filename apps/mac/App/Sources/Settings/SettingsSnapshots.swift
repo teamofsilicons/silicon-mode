@@ -100,6 +100,28 @@ enum SettingsSnapshots {
         out.append(SnapshotItem(id: "settings-controls-dark", size: CGSize(width: 520, height: 420), dark: true, view: {
             AnyView(SettingsControlsGallery())
         }))
+
+        // Furniture editor: the preview mid-drag (into another corner, and a reorder), a hovered
+        // empty corner, the + at a stack's open end, and the corner menu's content (its popover
+        // can't render headless).
+        func editor(_ id: String, _ pieces: [FurniturePiece], _ staged: SettingsFurniturePreview.Staged) {
+            out.append(SnapshotItem(id: id, size: previewSize, dark: true, view: {
+                AnyView(SettingsFurniturePreview(pieces: pieces, staged: staged))
+            }))
+        }
+        editor("settings-furniture-editor-drag", furnitureSample, .init(drag: ("clock-digital", CGPoint(x: 330, y: 560))))
+        editor("settings-furniture-editor-reorder", furnitureSample, .init(drag: ("questions", CGPoint(x: 1290, y: 70))))
+        editor("settings-furniture-editor-drag-empty", FurniturePiece.defaults, .init(drag: ("logs", CGPoint(x: 1170, y: 800))))
+        editor("settings-furniture-editor-hover-empty", FurniturePiece.defaults, .init(hover: .bottomTrailing))
+        editor("settings-furniture-editor-hover-plus", furnitureSample, .init(hover: .topLeading))
+        for dark in [false, true] {
+            out.append(SnapshotItem(id: "settings-furniture-editor-menu\(dark ? "-dark" : "")", size: CGSize(width: 340, height: 470), dark: dark, view: {
+                AnyView(SettingsFurnitureMenuSample(slot: .bottomTrailing, pieces: FurniturePiece.defaults))
+            }))
+        }
+        out.append(SnapshotItem(id: "settings-furniture-editor-menu-sample", size: CGSize(width: 340, height: 470), dark: false, view: {
+            AnyView(SettingsFurnitureMenuSample(slot: .topLeading, pieces: furnitureSample))
+        }))
         return out
     }
 
@@ -151,6 +173,24 @@ enum SettingsSnapshots {
         FurniturePiece(id: "clock-analog", kind: .clock, slot: .bottomTrailing,
                        options: [SettingsFurnitureOption.style: .string(SettingsFurnitureOption.analog)]),
     ]
+}
+
+/// The preview's corner menu as its popover shows it (a stand-in for the popover chrome).
+private struct SettingsFurnitureMenuSample: View {
+    let slot: FurnitureSlot
+    let pieces: [FurniturePiece]
+
+    var body: some View {
+        SettingsFurnitureSlotMenu(slot: slot, pieces: pieces, onAdd: { _, _ in }, onMove: { _ in })
+            .padding(.vertical, 6)
+            .background(SettingsTint.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+            .compositingGroup()
+            .shadow(color: SettingsTint.shadow.opacity(0.12), radius: 16, y: 6)
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(SettingsTint.windowBG)
+    }
 }
 
 /// All the Silicon controls on one page, for design review.

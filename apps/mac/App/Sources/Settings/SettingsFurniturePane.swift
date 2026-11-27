@@ -4,8 +4,9 @@ import SiliconModeKit
 
 // MARK: - Face furniture
 
-/// What sits on top of the face in Silicon Mode: a live preview of the arrangement, the master
-/// switch, and the pieces corner by corner (move to another corner, reorder, options, remove).
+/// What sits on top of the face in Silicon Mode: a live preview that is also the editor (drag
+/// pieces between corners, click a corner to add one), the master switch, and the pieces corner
+/// by corner (options, remove, and moves for keyboard and VoiceOver).
 struct SettingsFurniturePane: View {
     @Environment(AppModel.self) private var model
     /// The piece under the pointer, here or in the preview (highlighted in both).
@@ -22,7 +23,12 @@ struct SettingsFurniturePane: View {
         let hidden = hidden
         let sampling = windowVisible && !hidden && list.contains { $0.kind == .system }
         VStack(alignment: .leading, spacing: 16) {
-            SettingsFurniturePreview(pieces: list, hidden: hidden, highlighted: hovered) { hovered = $0 }
+            VStack(alignment: .leading, spacing: 9) {
+                SettingsFurniturePreview(pieces: list, hidden: hidden, highlighted: hovered,
+                                         onHover: { hovered = $0 },
+                                         onEdit: SettingsRender.previewFurniture == nil ? { animation, change in apply(animation, change) } : nil)
+                hint(hidden: hidden)
+            }
 
             SettingsCard {
                 SettingsRow(icon: hidden ? "eye.slash" : "eye", title: "Show face furniture",
@@ -61,12 +67,12 @@ struct SettingsFurniturePane: View {
 
     // MARK: Edits
 
-    private func apply(_ change: ([FurniturePiece]) -> [FurniturePiece]) {
+    private func apply(_ animation: Animation = Theme.Motion.moderate, _ change: ([FurniturePiece]) -> [FurniturePiece]) {
         guard SettingsRender.previewFurniture == nil else { return }
         let current = model.settings.furniture
         let next = FurniturePiece.sanitized(change(current))
         guard next != current else { return }
-        withAnimation(Theme.Motion.moderate) { model.settings.furniture = next }
+        withAnimation(animation) { model.settings.furniture = next }
     }
 
     private func options(_ id: String) -> Binding<[String: FaceOptionValue]> {
@@ -81,6 +87,20 @@ struct SettingsFurniturePane: View {
             if !options.isEmpty, next.count > list.count, let i = next.indices.last { next[i].options = options }
             return next
         }
+    }
+
+    // MARK: Hint
+
+    private func hint(hidden: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: hidden ? "eye.slash" : "hand.point.up.left")
+                .font(.system(size: 11, weight: .medium))
+            Text(hidden ? "Furniture is hidden. Show it to arrange it here."
+                        : "Drag pieces to rearrange. Click an empty corner to add one.")
+                .alloText(12)
+        }
+        .foregroundStyle(Theme.textMuted)
+        .padding(.leading, 4)
     }
 
     // MARK: Add
@@ -137,7 +157,7 @@ struct SettingsFurniturePane: View {
             .padding(.leading, 4)
 
             if visual.isEmpty {
-                Text("Empty. Add a piece, or move one here.")
+                Text("Empty. Drag a piece here in the preview, or click the corner to add one.")
                     .alloText(12)
                     .foregroundStyle(Theme.textFaint)
                     .padding(.horizontal, 14)
@@ -154,7 +174,6 @@ struct SettingsFurniturePane: View {
                             piece: piece,
                             canMoveUp: i > 0,
                             canMoveDown: i < visual.count - 1,
-                            showsReorder: visual.count > 1,
                             highlighted: hovered == piece.id,
                             options: options(piece.id),
                             onSlot: { s in apply { SettingsFurnitureEdit.moving(piece.id, to: s, in: $0) } },
@@ -187,20 +206,26 @@ struct SettingsFurniturePane: View {
         .padding(.leading, 4)
     }
 
-    /// Same pieces, places and options as the default layout (ids aside).
+    /// Same pieces, places, order and options as the default layout (ids, and the list's order
+    /// across corners, aside).
     private static func isDefault(_ list: [FurniturePiece]) -> Bool {
         let d = FurniturePiece.defaults
-        return list.count == d.count && zip(list, d).allSatisfy { $0.kind == $1.kind && $0.slot == $1.slot && $0.options == $1.options }
+        return list.count == d.count && SettingsFurnitureCatalog.slotOrder.allSatisfy { slot in
+            let a = SettingsFurnitureEdit.visualOrder(slot, in: list), b = SettingsFurnitureEdit.visualOrder(slot, in: d)
+            return a.count == b.count && zip(a, b).allSatisfy { $0.kind == $1.kind && $0.options == $1.options }
+        }
     }
 }
 
 // MARK: - Piece row
 
+/// A placed piece: what it is, its corner (a click moves it to another), remove, and its options.
+/// Reordering within a corner happens in the preview; here it's in the context menu and the
+/// accessibility actions, for keyboard and VoiceOver.
 private struct SettingsFurniturePieceRow: View {
     let piece: FurniturePiece
     var canMoveUp: Bool
     var canMoveDown: Bool
-    var showsReorder: Bool
     var highlighted: Bool
     var options: Binding<[String: FaceOptionValue]>
     var onSlot: (FurnitureSlot) -> Void
@@ -226,6 +251,20 @@ private struct SettingsFurniturePieceRow: View {
         .background(highlighted ? Theme.foreground.opacity(0.025) : .clear)
         .contentShape(Rectangle())
         .onHover(perform: onHover)
+        .contextMenu { moveMenu }
+        .accessibilityElement(children: .contain)
+        .accessibilityActions { moveMenu }
+    }
+
+    /// Moves (and remove) as menu items: the row's context menu and its accessibility actions.
+    @ViewBuilder
+    private var moveMenu: some View {
+        if canMoveUp { Button("Move Up") { onMove(true) } }
+        if canMoveDown { Button("Move Down") { onMove(false) } }
+        ForEach(SettingsFurnitureCatalog.slotOrder.filter { $0 != piece.slot }, id: \.self) { slot in
+            Button("Move to \(SettingsFurnitureCatalog.title(slot))") { onSlot(slot) }
+        }
+        if let onRemove { Button("Remove \(title)", role: .destructive, action: onRemove) }
     }
 
     private var header: some View {
@@ -245,17 +284,6 @@ private struct SettingsFurniturePieceRow: View {
             }
             Spacer(minLength: 10)
             SettingsSlotPicker(selection: piece.slot, onPick: onSlot)
-            VStack(spacing: 1) {
-                SettingsIconButton(systemImage: "chevron.up", label: "Move \(title) up",
-                                   size: CGSize(width: 24, height: 16), fontSize: 9) { onMove(true) }
-                    .disabled(!canMoveUp)
-                SettingsIconButton(systemImage: "chevron.down", label: "Move \(title) down",
-                                   size: CGSize(width: 24, height: 16), fontSize: 9) { onMove(false) }
-                    .disabled(!canMoveDown)
-            }
-            .opacity(showsReorder ? 1 : 0)
-            .disabled(!showsReorder)
-            .accessibilityHidden(!showsReorder)
             if let onRemove {
                 SettingsIconButton(systemImage: "minus.circle", label: "Remove \(title)", tint: Theme.danger, fontSize: 14, action: onRemove)
             } else {
@@ -263,7 +291,7 @@ private struct SettingsFurniturePieceRow: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.textFaint)
                     .frame(width: 26, height: 26)
-                    .help("Questions always stay so agents waiting on you can be answered. Pick its corner instead.")
+                    .help("Questions always stay so agents waiting on you can be answered. Move it to another corner instead.")
                     .accessibilityLabel("\(title) can't be removed")
             }
         }
