@@ -251,6 +251,39 @@ struct Rig {
         #expect(r.engine.phase.isCountdown)
     }
 
+    @Test func holdKeepsAutoEntryOffUntilTheLidComesBackUp() {
+        var r = Rig()
+        r.hold(110, for: 1)
+        r.cmd(.holdAutoEntry(true))
+        r.move(from: 110, to: 70, over: 1)
+        r.hold(70, for: 6)
+        #expect(r.engine.phase == .idle)
+        // The capture set the trigger to where the lid rests; letting go must not start it there.
+        r.engine.settings.thresholdAngle = 71
+        r.cmd(.holdAutoEntry(false))
+        r.hold(70, for: 6)
+        #expect(r.engine.phase == .idle)
+        r.move(from: 70, to: 100, over: 0.5)
+        r.hold(100, for: 0.5)
+        r.move(from: 100, to: 60, over: 0.5)
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.isCountdown)
+    }
+
+    @Test func holdCancelsACountdownAndReleasesAtOnceWhenTheLidIsUp() {
+        var r = Rig()
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.isCountdown)
+        r.cmd(.holdAutoEntry(true))
+        #expect(r.engine.phase == .idle)
+        #expect(r.drain().contains(.countdownCancelled(.disabled)))
+        r.move(from: 60, to: 110, over: 0.5)
+        r.cmd(.holdAutoEntry(false))
+        r.move(from: 110, to: 60, over: 0.5)
+        r.hold(60, for: 1)
+        #expect(r.engine.phase.isCountdown)
+    }
+
     @Test func sleepEndsPanic() {
         var r = Rig { $0.graceSeconds = 0 }
         r.hold(60, for: 7)

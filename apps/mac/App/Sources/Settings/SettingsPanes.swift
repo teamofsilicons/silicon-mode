@@ -87,21 +87,9 @@ struct SettingsModePane: View {
 
     var body: some View {
         @Bindable var model = model
-        let live = SettingsRender.previewAngle ?? model.angle
         VStack(alignment: .leading, spacing: 16) {
             SettingsCard {
-                HStack(alignment: .top, spacing: 0) {
-                    SettingsLidGauge(angle: live, threshold: model.settings.thresholdAngle,
-                                     sourceLabel: model.simulatedAngle != nil ? "Simulated angle" : nil)
-                        .frame(height: 196)
-                        .padding(.horizontal, 18)
-                        .padding(.top, 14)
-                }
-                SettingsDivider(inset: 0)
-                SettingsSliderRow(icon: "angle", title: "Start below",
-                                  detail: zoneDetail(live),
-                                  value: $model.settings.thresholdAngle, range: 30...130, step: 1,
-                                  marker: live, format: SettingsFormat.degrees)
+                SettingsTriggerPicker()
             }
 
             SettingsSectionLabel(text: "Entering")
@@ -144,14 +132,6 @@ struct SettingsModePane: View {
                 }
             }
         }
-    }
-
-    private func zoneDetail(_ live: Double?) -> String {
-        let t = model.settings.thresholdAngle
-        guard let a = live else { return "The lid sensor isn't reporting. Use \u{2303}\u{2325}S to enter instead." }
-        return a < t
-            ? "Your lid is at \(SettingsFormat.degrees(a)), inside the Silicon Mode zone."
-            : "Your lid is at \(SettingsFormat.degrees(a)). Tilt it below \(SettingsFormat.degrees(t)) to start."
     }
 
     private var pauseRow: some View {

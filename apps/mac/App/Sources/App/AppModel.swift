@@ -297,6 +297,17 @@ final class AppModel {
         }
     }
 
+    /// "Set with your lid…" asks people to move the lid on purpose. While any capture holds it,
+    /// auto-entry (and a running countdown) stays off; after the last one lets go, the engine keeps
+    /// it off until the lid is back up past the threshold.
+    @ObservationIgnored private var autoEntryHolders: Set<String> = []
+    func holdAutoEntry(_ hold: Bool, by holder: String) {
+        let wasHeld = !autoEntryHolders.isEmpty
+        if hold { autoEntryHolders.insert(holder) } else { autoEntryHolders.remove(holder) }
+        let isHeld = !autoEntryHolders.isEmpty
+        if isHeld != wasHeld { handle(.holdAutoEntry(isHeld)) }
+    }
+
     func toggleFromShortcut() {
         switch phase {
         case .idle, .countdown: enterNow()

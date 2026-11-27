@@ -51,6 +51,10 @@ public struct ModeEngine: Sendable {
         case systemWillSleep
         /// Temporarily stop auto-entry until `until` (monotonic seconds), or nil to resume.
         case pauseAutoEntry(until: Double?)
+        /// Hold auto-entry off while the lid is moved on purpose (Settings capturing the trigger
+        /// angle). Releasing keeps it off until the lid is back up past the threshold, so a lid left
+        /// resting at the angle just captured doesn't start the countdown.
+        case holdAutoEntry(Bool)
         /// Re-enter an already locked session (the app was killed or crashed while locked).
         case restoreLocked
     }
@@ -106,6 +110,11 @@ public struct ModeEngine: Sendable {
     private var aboveSince: Double?
     private var wakeSuppressUntil: Double = -.infinity
     private var pausedUntil: Double?
+    /// `.holdAutoEntry(true)` is in effect.
+    private var held = false
+    /// Released from a hold, waiting for the lid to come back up.
+    private var heldUntilRaised = false
+    private var autoEntryHeld: Bool { held || heldUntilRaised }
     private var lastNow: Double = 0
 
     public init(settings: ModeSettings = .default) {
@@ -166,11 +175,12 @@ public struct ModeEngine: Sendable {
                 armed = true
                 events.append(.armedChanged(true))
             }
+            if heldUntilRaised, a >= threshold + raiseHysteresis { heldUntilRaised = false }
         }
 
         switch phase {
         case .idle:
-            guard let a, settings.autoEnterEnabled, armed, !isAutoEntryPaused(now: now) else { break }
+            guard let a, settings.autoEnterEnabled, armed, !isAutoEntryPaused(now: now), !autoEntryHeld else { break }
             guard a < threshold, sampler.isStable(now: now, window: stabilityWindow, tolerance: stabilityTolerance) else { break }
             guard !settings.requireAgentsRunning || agentsRunning > 0 else { break }
             guard now >= wakeSuppressUntil else { break }
@@ -188,7 +198,7 @@ public struct ModeEngine: Sendable {
             } else if settings.requireAgentsRunning && agentsRunning == 0 {
                 phase = .idle
                 events.append(.countdownCancelled(.agentsStopped))
-            } else if !settings.autoEnterEnabled || isAutoEntryPaused(now: now) {
+            } else if !settings.autoEnterEnabled || isAutoEntryPaused(now: now) || autoEntryHeld {
                 phase = .idle
                 events.append(.countdownCancelled(.disabled))
             } else if now - startedAt >= duration {
@@ -277,6 +287,20 @@ public struct ModeEngine: Sendable {
                 phase = .idle
                 return [.countdownCancelled(.disabled)]
             }
+            return []
+        case .holdAutoEntry(let on):
+            held = on
+            if on {
+                heldUntilRaised = false
+                if phase.isCountdown {
+                    phase = .idle
+                    return [.countdownCancelled(.disabled)]
+                }
+                return []
+            }
+            // Released: stay off until the lid is back up (unless it already is).
+            let up = sampler.latest.map { $0 >= settings.thresholdAngle + raiseHysteresis } ?? false
+            heldUntilRaised = !up
             return []
         }
     }

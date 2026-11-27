@@ -71,26 +71,55 @@ struct OnboardingWelcomeStep: View {
 struct OnboardingHowStep: View {
     @Environment(AppModel.self) private var model
     @State private var tried = false
+    @State private var capture = TriggerCapture()
 
     var body: some View {
+        @Bindable var model = model
         let live = SettingsRender.previewAngle ?? model.angle
-        let t = model.settings.thresholdAngle
+        let state = SettingsRender.previewCapture ?? capture.state
+        let saved = SettingsRender.previewCapture?.phase.setValue ?? model.settings.thresholdAngle
+        let capturing = state.phase.isCapturing
+        // While capturing, the zone follows the lid.
+        let range = TriggerCapture.range
+        let t = capturing ? min(max((live ?? saved).rounded(), range.lowerBound), range.upperBound) : saved
         let below = (live ?? 180) < t
         HStack(alignment: .center, spacing: 30) {
             VStack(spacing: 6) {
                 SettingsAngleReadout(angle: live, threshold: t, large: true, caption: "Your lid, live",
                                      sourceLabel: model.simulatedAngle != nil ? "Simulated" : nil, alignment: .center)
-                SettingsLidGauge(angle: live, threshold: t, large: true, showsReadout: false)
+                SettingsLidGauge(angle: live, threshold: t, large: true, showsReadout: false,
+                                 adjust: $model.settings.thresholdAngle, adjustRange: range, adjustDisabled: capturing)
                     .frame(width: 300, height: 196)
-                statusPill(live: live, below: below, threshold: t)
-                    .padding(.top, 6)
+                Group {
+                    if state.phase == .off {
+                        statusPill(live: live, below: below, threshold: t)
+                    } else {
+                        capturePill(state)
+                    }
+                }
+                .padding(.top, 6)
+                .animation(Theme.Motion.moderate, value: state.phase)
             }
             .frame(width: 310)
 
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 8) {
                     OnboardingTitle(text: "Tilt your lid to try it")
-                    OnboardingBody(text: "Silicon Mode watches the hinge. Below \(SettingsFormat.degrees(t)), with agents running, it takes over the screen.")
+                    OnboardingBody(text: "Silicon Mode watches the hinge. Below \(SettingsFormat.degrees(saved)), with agents running, it takes over the screen.")
+                    HStack(spacing: 10) {
+                        Button { capture.start(model: model, angle: live) } label: {
+                            Label("Set with your lid…", systemImage: "laptopcomputer")
+                        }
+                        .settingsButton(.secondary)
+                        .fixedSize()
+                        .disabled(live == nil || capturing)
+                        .help(live == nil ? "Needs the lid sensor." : "Hold your Mac where Silicon Mode should start.")
+                        Text("or drag the blue line.")
+                            .alloText(12)
+                            .foregroundStyle(Theme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, 4)
                 }
                 line(icon: "timer", title: "Countdown",
                      text: "\(Int(model.settings.countdownSeconds)) seconds to say \u{201C}not now\u{201D} before the face appears.")
@@ -108,6 +137,48 @@ struct OnboardingHowStep: View {
                 if model.settings.uiSoundsEnabled { model.sounds.play(.enter) }
             }
         }
+        .triggerCapture(capture, live: live)
+    }
+
+    /// "Set with your lid…" in progress (a small ring, Cancel) or just done (Undo).
+    private func capturePill(_ state: TriggerCaptureState) -> some View {
+        let done = state.phase.setValue
+        let text: String
+        switch state.phase {
+        case .waiting: text = "Move your lid to where it should start."
+        case .holding: text = "Hold it there…"
+        case .done(let v, _, _): text = "Set to \(SettingsFormat.degrees(v))."
+        case .off: text = ""
+        }
+        let tint = done != nil ? Theme.success : Theme.accent
+        return HStack(spacing: 8) {
+            ZStack {
+                Circle().stroke(tint.opacity(0.2), lineWidth: 2.5)
+                Circle()
+                    .trim(from: 0, to: state.progress)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(state.progress > 0 && done == nil ? .linear(duration: TriggerCapture.holdSeconds) : Theme.Motion.fast,
+                               value: state.progress)
+                if done != nil {
+                    Image(systemName: "checkmark").font(.system(size: 7, weight: .heavy))
+                }
+            }
+            .frame(width: 14, height: 14)
+            Text(text).alloText(12, .medium).contentTransition(.opacity)
+            Button(done != nil ? "Undo" : "Cancel") {
+                if done != nil { capture.undo(model: model) } else { capture.cancel(model: model) }
+            }
+            .buttonStyle(.plain)
+            .font(Theme.allo(12, .semibold))
+            .foregroundStyle(Theme.foreground)
+            .padding(.leading, 4)
+        }
+        .foregroundStyle(tint)
+        .padding(.leading, 12)
+        .padding(.trailing, 14)
+        .frame(height: 30)
+        .background(done != nil ? Theme.success.opacity(0.1) : Theme.accentSubtle, in: Capsule())
     }
 
     private func statusPill(live: Double?, below: Bool, threshold: Double) -> some View {
