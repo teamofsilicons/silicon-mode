@@ -495,7 +495,6 @@ struct OnboardingAccountStep: View {
 
 struct OnboardingDoneStep: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -521,7 +520,7 @@ struct OnboardingDoneStep: View {
             HStack(spacing: 6) {
                 Image(systemName: "menubar.rectangle").font(.system(size: 12))
                 Text("Silicon Mode lives in your menu bar.").alloText(12)
-                Button("Open Settings") { SettingsNavigator.open(using: openSettings) }
+                Button("Open Settings") { SettingsNavigator.open() }
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.accent)
                     .font(Theme.allo(12, .medium))

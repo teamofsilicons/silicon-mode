@@ -10,27 +10,126 @@ enum OverlayClock {
     }
 }
 
-/// The "bump" entrance (and its reverse): a NameDrop-style shockwave leaves the notch, refracts
-/// the face like a water lens and reveals it inside the ring while the face itself shoots in
-/// (scale-up + blur-to-sharp on a spring). Exit implodes the face back into the notch.
+/// Silicon Mode's entrance and exit: a blur-fade, nothing else. The desktop behind the windows
+/// blurs, the night base fades in over it, then the face resolves out of a soft blur while settling
+/// from a slightly larger scale; the furniture and chrome rise in. The exit plays it backwards and
+/// a little faster.
 ///
-/// Only wrap content that SwiftUI renders itself (faces, backgrounds): layer effects rasterize
-/// their content, so AppKit-backed views (text fields, Touch ID, glass) belong outside.
-/// After the entrance the effect is disabled and the timeline paused: zero idle cost.
-struct EnterTransition<Content: View>: View {
+/// The live overlay runs these timings on Core Animation (`OverlayPanel.playEntrance/playExit`);
+/// `enterFrame/exitFrame` are the same curves for SwiftUI (snapshots: `--time`).
+enum OverlayMotion {
+    /// A stretch of a transition, in seconds from its start.
+    struct Segment {
+        var start: Double
+        var duration: Double
+
+        /// 0…1 progress through the segment at `t`.
+        func progress(_ t: Double) -> Double {
+            guard duration > 0 else { return t >= start ? 1 : 0 }
+            return min(max((t - start) / duration, 0), 1)
+        }
+
+        var end: Double { start + duration }
+    }
+
+    // Enter
+    /// Desktop blur behind the windows: its radius grows from nothing.
+    static let backdropIn = Segment(start: 0, duration: 0.5)
+    static let backdropRadius: CGFloat = 36
+    /// The opaque night base over it.
+    static let baseIn = Segment(start: 0.16, duration: 0.7)
+    /// The face: fades in over the first part, sharpens and settles over the whole.
+    static let faceFadeIn = Segment(start: 0.3, duration: 0.6)
+    static let faceIn = Segment(start: 0.3, duration: 1.0)
+    /// Furniture and chrome rise in once the face is mostly there.
+    static let chromeDelay = 0.75
+    static let chromeDuration = 0.6
+    static let chromeRise: CGFloat = 10
+    static let enterDuration = faceIn.end
+
+    // Exit
+    static let faceBlurOut = Segment(start: 0, duration: 0.38)
+    static let faceFadeOut = Segment(start: 0.04, duration: 0.46)
+    static let baseOut = Segment(start: 0.16, duration: 0.42)
+    static let backdropOut = Segment(start: 0.34, duration: 0.45)
+    static let chromeOut = 0.22
+    static let exitDuration = backdropOut.end
+
+    /// Blur radius the face resolves from (and dissolves into).
+    static let faceBlur: CGFloat = 30
+    static let faceBlurExit: CGFloat = 24
+    /// Scale the face settles from (and drifts toward on the way out).
+    static let faceScaleIn: CGFloat = 1.045
+    static let faceScaleOut: CGFloat = 1.03
+
+    // Curves (cubic béziers, as in CSS).
+    /// Long, soft landing: fast at first, then settles for a while (an exponential ease-out).
+    static let settle = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.16, y: 1), endControlPoint: UnitPoint(x: 0.3, y: 1))
+    static let easeInOut = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.42, y: 0), endControlPoint: UnitPoint(x: 0.2, y: 1))
+    static let easeOut = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.25, y: 0.6), endControlPoint: UnitPoint(x: 0.3, y: 1))
+    static let easeIn = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.5, y: 0), endControlPoint: UnitPoint(x: 0.9, y: 0.6))
+
+    /// Core Animation versions, for layers animated outside SwiftUI (backdrop, frozen chrome).
+    static var caSettle: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1) }
+    static var caEaseOut: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.25, 0.6, 0.3, 1) }
+    static var caEaseInOut: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.42, 0, 0.2, 1) }
+    static var caEaseIn: CAMediaTimingFunction { CAMediaTimingFunction(controlPoints: 0.5, 0, 0.9, 0.6) }
+
+    /// What the face stage draws at one moment.
+    struct Frame: Equatable {
+        /// Opacity of the night base.
+        var base: Double = 1
+        /// Opacity, blur radius and scale of the face.
+        var face: Double = 1
+        var blur: CGFloat = 0
+        var scale: CGFloat = 1
+
+        static let shown = Frame()
+        static let hidden = Frame(base: 0, face: 0, blur: 0, scale: 1)
+    }
+
+    static func enterFrame(at t: Double, reduceMotion: Bool) -> Frame {
+        if reduceMotion {
+            let p = easeInOut.value(at: Segment(start: 0, duration: 0.4).progress(t))
+            return Frame(base: p, face: p)
+        }
+        let settleP = settle.value(at: faceIn.progress(t))
+        return Frame(base: easeInOut.value(at: baseIn.progress(t)),
+                     face: easeOut.value(at: faceFadeIn.progress(t)),
+                     blur: faceBlur * CGFloat(1 - settleP),
+                     scale: 1 + (faceScaleIn - 1) * CGFloat(1 - settleP))
+    }
+
+    static func exitFrame(at t: Double, reduceMotion: Bool) -> Frame {
+        if reduceMotion {
+            let p = easeInOut.value(at: Segment(start: 0, duration: 0.3).progress(t))
+            return Frame(base: 1 - p, face: 1 - p)
+        }
+        let blurP = easeOut.value(at: faceBlurOut.progress(t))
+        return Frame(base: 1 - easeInOut.value(at: baseOut.progress(t)),
+                     face: 1 - easeInOut.value(at: faceFadeOut.progress(t)),
+                     blur: faceBlurExit * CGFloat(blurP),
+                     scale: 1 + (faceScaleOut - 1) * CGFloat(easeIn.value(at: faceFadeOut.progress(t))))
+    }
+}
+
+/// The SwiftUI rendition of the entrance and exit (`OverlayMotion`), for the snapshot harness and
+/// previews: the live overlay animates its window's layers instead (`OverlayPanel.playEntrance`).
+/// Runs a frame timeline only while a transition is in progress (zero idle cost once in).
+struct OverlayFade<Content: View>: View {
     let enterStartedAt: Date?
     let exitStartedAt: Date?
-    @ViewBuilder var content: Content
+    @ViewBuilder var content: (OverlayMotion.Frame) -> Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Report frames to OverlayTiming (off for the prewarm's warm-up draw).
     @Environment(\.overlayRecordsTiming) private var recordsTiming
     @State private var settled: Bool
 
-    init(enterStartedAt: Date?, exitStartedAt: Date?, @ViewBuilder content: () -> Content) {
+    init(enterStartedAt: Date?, exitStartedAt: Date?, @ViewBuilder content: @escaping (OverlayMotion.Frame) -> Content) {
         self.enterStartedAt = enterStartedAt
         self.exitStartedAt = exitStartedAt
-        self.content = content()
+        self.content = content
         _settled = State(initialValue: Self.isSettled(enter: enterStartedAt, exit: exitStartedAt))
     }
 
@@ -38,32 +137,20 @@ struct EnterTransition<Content: View>: View {
         if exit != nil { return false }
         guard let enter else { return true }
         if SnapshotHarness.time != nil { return false }
-        return Date().timeIntervalSince(enter) > OverlayController.enterDuration + 0.1
+        return Date().timeIntervalSince(enter) > OverlayMotion.enterDuration + 0.1
     }
 
     private struct Key: Equatable { var enter: Date?; var exit: Date? }
 
     var body: some View {
-        GeometryReader { geo in
-            TimelineView(.animation(minimumInterval: nil, paused: settled)) { tl in
-                let f = frame(at: tl.date)
-                let _ = recordFrame()
-                content
-                    .scaleEffect(f.scale, anchor: .top)
-                    .blur(radius: f.blur)
-                    .opacity(f.opacity)
-                    // Flatten first so the shader sees one layer (otherwise it can be applied
-                    // per drawing primitive, double-adding the light around text).
-                    .compositingGroup()
-                    .layerEffect(shader(f, size: geo.size),
-                                 maxSampleOffset: CGSize(width: 72, height: 72),
-                                 isEnabled: f.shader != .none)
-            }
+        TimelineView(.animation(minimumInterval: nil, paused: settled)) { tl in
+            let _ = recordFrame()
+            content(frame(at: tl.date))
         }
         .task(id: Key(enter: enterStartedAt, exit: exitStartedAt)) {
             if exitStartedAt != nil { settled = false; return }
             guard let e = enterStartedAt else { settled = true; return }
-            let remain = OverlayController.enterDuration + 0.1 - Date().timeIntervalSince(e)
+            let remain = OverlayMotion.enterDuration + 0.1 - Date().timeIntervalSince(e)
             if remain > 0 {
                 settled = false
                 try? await Task.sleep(for: .seconds(remain))
@@ -79,77 +166,18 @@ struct EnterTransition<Content: View>: View {
         if exitStartedAt != nil { OverlayTiming.frame(.exit) } else if enterStartedAt != nil, !settled { OverlayTiming.frame(.enter) }
     }
 
-    // MARK: Frame
-
-    private enum ShaderMode: Equatable { case none, enter(Double), exit(Double) }
-
-    private struct Frame {
-        var scale: CGFloat = 1
-        var blur: CGFloat = 0
-        var opacity: Double = 1
-        var shader: ShaderMode = .none
-    }
-
-    private func frame(at date: Date) -> Frame {
-        var f = Frame()
+    private func frame(at date: Date) -> OverlayMotion.Frame {
         if let x = exitStartedAt {
-            let p = min(max(OverlayClock.elapsed(since: x, now: date) / OverlayController.exitDuration, 0), 1)
-            if reduceMotion {
-                f.opacity = max(0, 1 - p / 0.45)
-            } else {
-                f.scale = 1 - 0.07 * p * p
-                f.blur = 6 * p * p
-                f.shader = .exit(p)
-            }
-            return f
+            return OverlayMotion.exitFrame(at: OverlayClock.elapsed(since: x, now: date), reduceMotion: reduceMotion)
         }
-        guard let s = enterStartedAt, !settled else { return f }
-        let t = OverlayClock.elapsed(since: s, now: date)
-        if reduceMotion {
-            f.opacity = min(1, max(0, t / 0.4))
-            return f
-        }
-        guard t < OverlayController.enterDuration else { return f }
-        // Spring: the face shoots in from the notch as the wave leaves (~0.24 s, just before the bang).
-        let p = t - 0.24
-        if p <= 0 {
-            f.scale = 0.8
-            f.blur = 18
-        } else {
-            f.scale = 1 - 0.2 * exp(-p * 6.5) * cos(p * 8.5)
-            let b = 18 * exp(-p * 5.5)
-            f.blur = b < 0.3 ? 0 : b
-        }
-        f.shader = .enter(t)
-        return f
-    }
-
-    private func shader(_ f: Frame, size: CGSize) -> Shader {
-        switch f.shader {
-        case .exit(let p): OverlayShaders.implode(size: size, progress: p)
-        case .enter(let t): OverlayShaders.bump(size: size, time: t)
-        case .none: OverlayShaders.bump(size: size, time: 10)
-        }
+        guard let s = enterStartedAt, !settled else { return .shown }
+        return OverlayMotion.enterFrame(at: OverlayClock.elapsed(since: s, now: date), reduceMotion: reduceMotion)
     }
 }
 
 /// The overlay's shaders, looked up once (not on every frame of an animation).
 enum OverlayShaders {
-    static let tintA = Color(hex: "D6C8F7")
-    static let tintB = Color(hex: "F6D6B2")
-    private static let bumpFunction = ShaderLibrary.overlayBumpShockwave
-    private static let implodeFunction = ShaderLibrary.overlayImplode
     private static let glitchFunction = ShaderLibrary.overlayPanicGlitch
-
-    /// The entrance shockwave, `time` seconds in, from the top centre of a `size` layer.
-    static func bump(size: CGSize, time: Double) -> Shader {
-        bumpFunction(.float2(CGPoint(x: size.width / 2, y: 0)), .float2(size), .float(time), .color(tintA), .color(tintB))
-    }
-
-    /// The exit implosion at `progress` (0…1).
-    static func implode(size: CGSize, progress: Double) -> Shader {
-        implodeFunction(.float2(CGPoint(x: size.width / 2, y: 0)), .float2(size), .float(progress), .color(tintA), .color(tintB))
-    }
 
     /// The panic glitch (PanicGlitchEffect), for precompiling.
     static func glitch(size: CGSize, time: Double) -> Shader {
@@ -161,7 +189,7 @@ enum OverlayShaders {
 
 /// First-use work for the overlay's animations, done ahead of time (OverlayController.prewarm):
 /// compiles the layer-effect shaders and draws each effect once, in a tiny window at 1%
-/// opacity that ignores the mouse, so the GPU pipelines behind the shockwave, implosion, blurs and
+/// opacity that ignores the mouse, so the GPU pipelines behind the blur-fades, the panic glitch and
 /// gradients exist before the first entry.
 @MainActor
 enum OverlayWarmup {
@@ -173,8 +201,6 @@ enum OverlayWarmup {
     private static func compileShaders() async {
         let size = CGSize(width: 64, height: 64)
         let shaders: [(String, Shader)] = [
-            ("bump", OverlayShaders.bump(size: size, time: 0.5)),
-            ("implode", OverlayShaders.implode(size: size, progress: 0.5)),
             ("glitch", OverlayShaders.glitch(size: size, time: 0.5)),
         ]
         for (name, shader) in shaders {
@@ -209,9 +235,10 @@ enum OverlayWarmup {
 /// Every effect the countdown and the entrance/exit draw, stacked at a tiny size.
 private struct OverlayWarmupView: View {
     static let side: CGFloat = 8
-    static let blurRadii: [CGFloat] = [0.5, 1, 2, 3, 4, 6, 8, 10, 12, 14, 18, 22]
-    @State private var start = Date()
-    /// The selected face, mid-entrance (its own drawing, inside the shockwave).
+    /// Blur pipelines are specialised by radius: warm the ones the transitions pass through
+    /// (face 30 → 0, exit to 24, the face behind the unlock sheet at 22, the countdown digit).
+    static let blurRadii: [CGFloat] = [0.5, 1, 2, 3, 4, 6, 8, 10, 12, 14, 18, 22, 26, 30]
+    /// The selected face, mid-entrance.
     @State private var faceStage: OverlayStage = {
         let s = OverlayStage()
         s.enterStartedAt = Date().addingTimeInterval(-0.6)
@@ -222,35 +249,18 @@ private struct OverlayWarmupView: View {
         ZStack {
             SiliconModeFaceStage(stage: faceStage, displayID: 0)
                 .environment(AppModel.shared)
-            // Entrance mid-wave (shockwave shader, blur, scale) and the exit mid-implosion.
-            EnterTransition(enterStartedAt: start.addingTimeInterval(-0.5), exitStartedAt: nil) { sample }
-            EnterTransition(enterStartedAt: nil, exitStartedAt: start.addingTimeInterval(-0.3)) { sample }
-            // The countdown's dial and tint: radial/conic/linear gradients, a blurred stroke,
-            // a light blend, a mask and a shadowed numeral.
-            Canvas { ctx, size in
-                let r = CGRect(origin: .zero, size: size)
-                ctx.fill(Path(ellipseIn: r), with: .radialGradient(Gradient(colors: [.white.opacity(0.07), .clear]),
-                                                                   center: CGPoint(x: r.midX, y: r.midY), startRadius: 0, endRadius: r.width))
-                var glow = ctx
-                glow.addFilter(.blur(radius: 8))
-                glow.stroke(Path(ellipseIn: r), with: .conicGradient(Gradient(colors: [Theme.Night.lavender, Theme.Night.peach]),
-                                                                     center: CGPoint(x: r.midX, y: r.midY)), lineWidth: 3)
-            }
+            // The countdown's numeral and shade: a linear gradient, a shadowed numeral, a mask.
             ZStack {
-                RadialGradient(colors: [Theme.Night.lavender.opacity(0.2), .clear], center: .center, startRadius: 0, endRadius: 4)
-                    .blendMode(.plusLighter)
+                LinearGradient(colors: [.black.opacity(0.4), .clear], startPoint: .top, endPoint: .bottom)
                 Text("5")
                     .font(Theme.allo(4, .medium))
-                    .foregroundStyle(LinearGradient(colors: [.white, Theme.Night.lavender], startPoint: .top, endPoint: .bottom))
-                    .shadow(color: Theme.Night.lavender.opacity(0.35), radius: 6)
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.35), radius: 6)
             }
             .mask { LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom) }
             .blur(radius: 2)
-            // Blurs at the radii the animations pass through (the entrance starts at 18, the
-            // exit ends at 6, the face behind the unlock sheet sits at 22): blur pipelines are
-            // specialised by radius.
             ForEach(Self.blurRadii, id: \.self) { r in
-                sample.blur(radius: r)
+                sample.compositingGroup().scaleEffect(1.02).blur(radius: r).opacity(0.5)
             }
             // Liquid Glass (furniture, chrome, the countdown's button).
             Color.clear.overlayGlass(tint: .black.opacity(0.18), in: Capsule())
@@ -278,11 +288,12 @@ extension EnvironmentValues {
     @Entry var overlayRecordsTiming = true
 }
 
-/// Fade / rise / sharpen used for the chrome (HUD, controls) that can't live inside the
-/// layer effect. `shown == false` is the hidden state.
+/// Fade and a short rise for the chrome (furniture, controls) once the face is in. No blur: the
+/// chrome is Liquid Glass, and blurring glass renders it offscreen, away from the face it samples
+/// (it would pop when the blur ends). `shown == false` is the hidden state.
 struct OverlayChromeEntrance: ViewModifier {
     var shown: Bool
-    var rise: CGFloat = 14
+    var rise: CGFloat = 8
     @Environment(\.overlayRecordsTiming) private var recordsTiming
 
     func body(content: Content) -> some View {
@@ -290,6 +301,5 @@ struct OverlayChromeEntrance: ViewModifier {
         content
             .opacity(shown ? 1 : 0)
             .offset(y: shown ? 0 : rise)
-            .blur(radius: shown ? 0 : 8)
     }
 }

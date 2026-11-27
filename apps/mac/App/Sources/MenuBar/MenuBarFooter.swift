@@ -6,7 +6,6 @@ import SiliconModeKit
 struct MenuBarFooter: View {
     @Environment(AppModel.self) private var model
     @Environment(\.menuBarDemo) private var demo
-    @Environment(\.openSettings) private var openSettings
     @State private var pauseFrame: CGRect = .zero
     @State private var accountFrame: CGRect = .zero
 
@@ -70,9 +69,6 @@ struct MenuBarFooter: View {
             Rectangle().fill(MB.hairline).frame(height: 0.5).padding(.horizontal, 16)
         }
         .animation(MB.Motion.chip, value: paused)
-        .onAppear {
-            if demo == nil { MenuBarController.shared.openSettingsAction = openSettings }
-        }
     }
 
     private func showPauseMenu(paused: Date?, autoOn: Bool) {

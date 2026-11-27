@@ -33,11 +33,14 @@ final class OverlayStage {
     /// nobody waits or they put it away.
     var questionsPeek = false
 
-    /// The stage of Silicon Mode windows built ahead of time: "exited", so their views start out
-    /// exactly as at the first frame of an entrance (chrome hidden, base clear, face not revealed).
-    static func prewarmed() -> OverlayStage {
+    /// The window's layers run the entrance and exit (Core Animation, `OverlayPanel`), not the
+    /// SwiftUI views: true for the live overlay, false for snapshots and previews.
+    var layerTransitions = false
+
+    /// The stage of the live Silicon Mode windows (also the ones built ahead of time).
+    static func live() -> OverlayStage {
         let s = OverlayStage()
-        s.exitStartedAt = .distantPast
+        s.layerTransitions = true
         return s
     }
 }
@@ -52,8 +55,8 @@ final class OverlayStage {
 /// reused) and a fresh set is prewarmed a moment later.
 @MainActor
 final class OverlayController {
-    static let enterDuration: Double = 1.25
-    static let exitDuration: Double = 0.72
+    static let enterDuration: Double = OverlayMotion.enterDuration
+    static let exitDuration: Double = OverlayMotion.exitDuration
     /// The exit is torn down at the latest this long after its animation should have ended.
     static let exitGrace: Double = 2
     /// Idle time before (re)building prewarmed windows.
@@ -62,7 +65,7 @@ final class OverlayController {
     /// State of the countdown windows.
     let countdownStage = OverlayStage()
     /// State of the Silicon Mode windows on screen. Each set of mode windows has its own stage,
-    /// made with it (prewarmed windows start from `OverlayStage.prewarmed()`).
+    /// made with it (`OverlayStage.live()`).
     private(set) var stage = OverlayStage()
 
     private var countdownPanel: OverlayPanel?
@@ -224,14 +227,14 @@ final class OverlayController {
         OverlayTiming.begin(.enter, warm ? "prewarmed" : "cold")
         installScreenObserver()
 
-        // The countdown (if any) hands off: its digit dives into the notch while the shockwave
-        // takes over, then its blur fades once the ring has passed.
+        // The countdown (if any) hands off: its number blurs away while Silicon Mode fades in
+        // above it; its own blur goes once the night base covers it.
         if countdownShown {
             OverlayTiming.end(.countdown, "handoff")
             countdownStage.countdownExit = .handoff
             countdownStage.countdownVisible = false
             countdownButtonPanel?.ignoresMouseEvents = true
-            scheduleCountdownTeardown(after: 1.15)
+            scheduleCountdownTeardown(after: 1.1)
         }
 
         // Adopt the prewarmed windows; without them, build the same windows right now (the
@@ -240,7 +243,7 @@ final class OverlayController {
             buildWarmPanels()
             OverlayTiming.point(.enter, "panels-built-cold")
         }
-        stage = warmStage ?? OverlayStage.prewarmed()
+        stage = warmStage ?? OverlayStage.live()
         modePanels = warmPanels
         warmPanels = [:]
         warmStage = nil
@@ -252,6 +255,10 @@ final class OverlayController {
         stage.questionsPeek = false
         stage.focusedDisplay = NSScreen.overlayPrimary?.displayID ?? 0
         rebuildModePanels()
+        // The blur-fade runs on Core Animation (OverlayMotion), so the main thread's work at the
+        // entry (the furniture, the model's change) can't make it skip.
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        for p in modePanels.values { p.playEntrance(reduceMotion: reduceMotion) }
         OverlayTiming.point(.enter, "panels-shown")
         Self.afterCurrentEvent {
             OverlayTiming.point(.enter, "command-handled")
@@ -264,20 +271,21 @@ final class OverlayController {
         focus(display: stage.focusedDisplay)
         startInteractionMonitors()
 
-        // Once the entrance wave has passed, the mode windows are fully covered by the opaque
-        // base: mark them opaque so the window server stops compositing the desktop beneath
-        // every frame (a large, constant saving for a screen that stays up for hours).
+        // Once the entrance is done, the mode windows are fully covered by the opaque base: mark
+        // them opaque (and drop the desktop blur) so the window server stops compositing the
+        // desktop beneath every frame (a large, constant saving for a screen that stays up for
+        // hours).
         opaqueWork?.cancel()
         let opaque = DispatchWorkItem { [weak self] in self?.setModePanelsOpaque(true) }
         opaqueWork = opaque
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.enterDuration + 0.6, execute: opaque)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.enterDuration + 0.4, execute: opaque)
 
         hapticWork?.cancel()
         let haptic = DispatchWorkItem {
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
         }
         hapticWork = haptic
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: haptic)
+        DispatchQueue.main.asyncAfter(deadline: .now() + OverlayMotion.faceIn.start + 0.1, execute: haptic)
         OverlayTiming.point(.enter, "enter-returned")
     }
 
@@ -292,14 +300,18 @@ final class OverlayController {
         setModePanelsOpaque(false)
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         // Furniture, chrome and the unlock sheet fade out as their last frame; SwiftUI stops
-        // updating them, so the model's reset at exit can't stall the implode.
-        for p in modePanels.values { p.freezeTopLayer(fadeDuration: 0.18) }
+        // updating them, so the model's reset at exit can't stall the fade.
+        for p in modePanels.values {
+            p.freezeTopLayer(fadeDuration: OverlayMotion.chromeOut)
+            // The face dissolves, the night base fades to a blurred desktop, which then clears.
+            p.playExit(reduceMotion: reduceMotion)
+        }
         stage.exitStartedAt = Date()
         stage.pointerIdle = false
         stage.questionsPeek = false
         Self.afterCurrentEvent { OverlayTiming.point(.exit, "command-handled") }
 
-        let delay = reduceMotion ? 0.35 : Self.exitDuration + 0.05
+        let delay = reduceMotion ? 0.4 : Self.exitDuration + 0.05
         modeTeardown?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.tearDownMode(reason: "torn-down") }
         modeTeardown = work
@@ -319,6 +331,7 @@ final class OverlayController {
         for p in modePanels.values {
             p.isOpaque = opaque
             p.backgroundColor = opaque ? NSColor(Theme.Night.background) : .clear
+            if opaque { p.entranceSettled() }
         }
     }
 
@@ -333,6 +346,8 @@ final class OverlayController {
         for p in modePanels.values { p.tearDown() }
         modePanels.removeAll()
         stage = OverlayStage()
+        // The face kept the agents it showed while it faded out; it may follow the model again.
+        model.faceExitFinished()
         OverlayTiming.end(.exit, reason)
         schedulePrewarm(after: 1)
     }
@@ -389,6 +404,8 @@ final class OverlayController {
             } else {
                 // A display that appeared while Silicon Mode is up.
                 p = makeModePanel(for: screen, stage: stage)
+                // A display that appears mid-session shows Silicon Mode at once.
+                p.showEntered()
                 if settled, opaqueWork?.isCancelled != true {
                     p.isOpaque = true
                     p.backgroundColor = NSColor(Theme.Night.background)
@@ -536,7 +553,7 @@ final class OverlayController {
     private func warmTopOnce() {
         guard !topWarmed, let screen = NSScreen.overlayPrimary else { return }
         topWarmed = true
-        let s = OverlayStage.prewarmed()
+        let s = OverlayStage.live()
         let p = OverlayPanel(frame: screen.frame, level: Self.modeLevel)
         p.hostLayered(face: Color.clear, top: SiliconModeTopStage(stage: s, displayID: screen.displayID).environment(model))
         p.buildLayers()
@@ -546,10 +563,12 @@ final class OverlayController {
     /// Build a set of Silicon Mode windows for the current screens (ordered out, face laid out).
     private func buildWarmPanels() {
         discardWarmPanels()
-        let s = OverlayStage.prewarmed()
+        let s = OverlayStage.live()
         for screen in NSScreen.screens {
             let p = makeModePanel(for: screen, stage: s)
             p.buildLayers()
+            // The desktop blur's filter, ready before the entry (its layer exists once laid out).
+            p.configureBackdrop()
             warmPanels[screen.displayID] = p
             warmScreens[screen.displayID] = screen.frame
         }

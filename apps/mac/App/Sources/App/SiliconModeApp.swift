@@ -9,11 +9,12 @@ struct SiliconModeApp: App {
 
     var body: some Scene {
         // The menu bar item is an NSStatusItem + custom glass NSPanel (MenuBar/MenuBarController),
-        // so ⌃⌥S and code can open it — MenuBarExtra can't be opened programmatically.
+        // so ⌃⌥S and code can open it — MenuBarExtra can't be opened programmatically. The main
+        // window is AppKit-owned too (MainWindowController); this scene carries the main menu.
         Settings {
-            SettingsView()
-                .environment(model)
+            SettingsSceneRedirect()
         }
+        .commands { SiliconModeCommands(model: model) }
     }
 }
 
@@ -36,6 +37,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DebugCommands.handleLaunchArguments()
         }
+    }
+
+    /// Clicking the Dock icon (shown while a window is open) brings the main window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { MainActor.assumeIsolated { MainWindowController.shared.show() } }
+        return true
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        nonisolated(unsafe) var menu: NSMenu?
+        MainActor.assumeIsolated {
+            let m = NSMenu()
+            let c = MenuBarController.shared
+            let model = AppModel.shared
+            if !model.isActive {
+                m.addItem(c.menuItem("Enter Silicon Mode") { model.enterNow() })
+            }
+            m.addItem(c.menuItem("Show Agents") { MenuBarController.shared.show() })
+            m.addItem(c.menuItem("Statistics") { StatsWindow.present() })
+            menu = m
+        }
+        return menu
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

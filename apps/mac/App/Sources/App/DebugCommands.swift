@@ -81,9 +81,7 @@ enum DebugCommands {
         case "menubar": MenuBarController.shared.toggle()
         case "onboarding": OnboardingPresenter.present()
         case "onboarding-close": OnboardingPresenter.close()
-        case "settings":
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        case "settings": MainWindowController.shared.show(val.isEmpty ? nil : SettingsPane(rawValue: val))
         case "setting":
             // setting=<key>:<json value>, e.g. setting=countdownSeconds:3
             let kv = val.split(separator: ":", maxSplits: 1).map(String.init)

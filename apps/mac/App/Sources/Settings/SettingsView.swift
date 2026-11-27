@@ -52,13 +52,15 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     static let main: [SettingsPane] = [.general, .mode, .faces, .furniture, .panic, .unlock, .agents, .account]
 }
 
-/// The Settings window: a floating glass sidebar and a scrolling detail pane.
+/// The main window's content: a native sidebar of panes, a unified toolbar (pane title, Silicon
+/// Mode's status and its main action) and the scrolling pane. Headless snapshots, which can't
+/// render AppKit-backed lists and toolbars, draw the same thing with a drawn sidebar.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var pane: SettingsPane
     @State private var hovered: SettingsPane?
+    @State private var columns: NavigationSplitViewVisibility = .all
     @Namespace private var ns
-    @Environment(\.openSettings) private var openSettings
 
     static let size = CGSize(width: 860, height: 620)
     private let height: CGFloat
@@ -69,22 +71,18 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: 222)
-                .padding(8)
-            detail
+        Group {
+            if SettingsRender.isSnapshot {
+                snapshotLayout
+            } else {
+                windowLayout
+            }
         }
-        .frame(width: Self.size.width, height: height)
-        .background(SettingsTint.windowBG)
-        .ignoresSafeArea()
-        .background(SettingsWindowReader { SettingsWindowCoordinator.shared.adopt($0) })
         .onReceive(NotificationCenter.default.publisher(for: SettingsNavigator.didRequest)) { _ in
             if let p = SettingsNavigator.shared.pending { select(p) }
         }
         .onAppear {
             SettingsNavigator.shared.pending = nil
-            SettingsNavigator.shared.openAction = openSettings
             SettingsPinStatus.shared.refresh()
         }
     }
@@ -95,7 +93,125 @@ struct SettingsView: View {
         withAnimation(Theme.Motion.moderate) { pane = p }
     }
 
-    // MARK: Sidebar
+    // MARK: Window
+
+    private var windowLayout: some View {
+        NavigationSplitView(columnVisibility: $columns) {
+            List(selection: Binding<SettingsPane?>(get: { pane }, set: { if let p = $0 { select(p) } })) {
+                Section {
+                    ForEach(SettingsPane.main.filter { $0 != .account }) { sidebarRow($0) }
+                }
+                Section("Developer") {
+                    sidebarRow(.debug)
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                accountChip
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+            }
+        } detail: {
+            windowDetail
+                .navigationTitle(pane.title)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                modeStatus
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .primaryAction) {
+                modeAction
+            }
+        }
+        .frame(minWidth: MainWindowController.minSize.width, minHeight: MainWindowController.minSize.height)
+    }
+
+    private func sidebarRow(_ p: SettingsPane) -> some View {
+        HStack(spacing: 0) {
+            Label {
+                Text(p.title).font(Theme.allo(13, .medium))
+            } icon: {
+                Image(systemName: p.icon)
+            }
+            Spacer(minLength: 6)
+            badge(p)
+        }
+        .tag(p)
+    }
+
+    private var windowDetail: some View {
+        SettingsScroll {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(pane.subtitle)
+                    .alloText(13)
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.bottom, 2)
+                paneContent
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 14)
+            .padding(.bottom, 32)
+            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .id(pane)
+        .transition(.opacity.animation(Theme.Motion.fast))
+        .background(SettingsTint.windowBG)
+    }
+
+    /// "● Ready", "● Re-arming 42 s"… next to the toolbar's action.
+    private var modeStatus: some View {
+        let status = SettingsModeStatus(model)
+        return HStack(spacing: 6) {
+            SettingsStatusDot(color: status.color, pulsing: status.live)
+            Text(status.title)
+                .alloText(12, .medium)
+                .foregroundStyle(Theme.textMuted)
+                .contentTransition(.opacity)
+        }
+        .padding(.horizontal, 6)
+        .animation(Theme.Motion.moderate, value: status.title)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Silicon Mode: \(status.title)")
+    }
+
+    @ViewBuilder private var modeAction: some View {
+        switch model.phase {
+        case .idle:
+            Button { model.enterNow() } label: {
+                Label("Enter Silicon Mode", systemImage: "laptopcomputer")
+                    .labelStyle(.titleAndIcon)
+            }
+            .help("Enter Silicon Mode now, even with the lid open (⌃⌥S)")
+        case .countdown:
+            Button { model.cancelCountdown() } label: {
+                Label("Don't Enter", systemImage: "xmark")
+                    .labelStyle(.titleAndIcon)
+            }
+        case .active:
+            Button {} label: {
+                Label("Silicon Mode is on", systemImage: "laptopcomputer")
+                    .labelStyle(.titleAndIcon)
+            }
+            .disabled(true)
+        }
+    }
+
+    // MARK: Snapshot layout
+
+    private var snapshotLayout: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 222)
+                .padding(8)
+            detail
+        }
+        .frame(width: Self.size.width, height: height)
+        .background(SettingsTint.windowBG)
+        .ignoresSafeArea()
+    }
 
     private var sidebar: some View {
         let status = SettingsModeStatus(model)
@@ -161,6 +277,7 @@ struct SettingsView: View {
         switch p {
         case .unlock where !SettingsPinStatus.shared.isSet:
             Circle().fill(Theme.warning).frame(width: 6, height: 6)
+                .help("No PIN yet")
         case .agents where model.counts.needsYou > 0:
             Text("\(model.counts.needsYou)")
                 .alloText(10, .semibold).monospacedDigit()
@@ -187,10 +304,11 @@ struct SettingsView: View {
                 Spacer(minLength: 0)
             }
             .padding(8)
-            .background(Theme.foreground.opacity(pane == .account ? 0.06 : 0.03), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .background(Theme.foreground.opacity(pane == .account ? 0.08 : 0.03), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(signedIn ? "Account" : "Not signed in. Sign in for phone and web.")
     }
 
     // MARK: Detail
@@ -237,62 +355,15 @@ struct SettingsView: View {
 
 // MARK: - Navigation from elsewhere
 
-/// Opens the Settings window (optionally on a pane) from AppKit or SwiftUI code.
+/// Opens the main window (optionally on a pane) from AppKit or SwiftUI code.
 @MainActor
 final class SettingsNavigator {
     static let shared = SettingsNavigator()
     static let didRequest = Notification.Name("ai.tos.mode.settings.navigate")
     var pending: SettingsPane?
-    /// The most recent SwiftUI `openSettings` action seen by one of our views.
-    var openAction: OpenSettingsAction?
 
-    /// Shows the Settings scene and selects `pane`. From SwiftUI, pass `@Environment(\.openSettings)`;
-    /// from AppKit, omit it (we reuse an action captured earlier, else fall back to the responder chain).
-    static func open(_ pane: SettingsPane? = nil, using action: OpenSettingsAction? = nil) {
-        shared.pending = pane
-        SettingsActivation.acquire("settings")
-        if let w = SettingsWindowCoordinator.shared.window, w.isVisible {
-            w.makeKeyAndOrderFront(nil)
-        } else if let a = action ?? shared.openAction {
-            a()
-        } else {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
-        NotificationCenter.default.post(name: didRequest, object: nil)
-    }
-}
-
-/// Styles the Settings window (transparent title bar, full-size content) and ties the app's
-/// activation policy to its lifetime.
-@MainActor
-final class SettingsWindowCoordinator {
-    static let shared = SettingsWindowCoordinator()
-    private(set) weak var window: NSWindow?
-    private var observers: [NSObjectProtocol] = []
-
-    func adopt(_ w: NSWindow) {
-        guard !SettingsRender.isSnapshot else { return }
-        if window !== w {
-            observers.forEach(NotificationCenter.default.removeObserver)
-            window = w
-            let nc = NotificationCenter.default
-            observers = [
-                nc.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
-                    MainActor.assumeIsolated { SettingsActivation.release("settings") }
-                },
-                // SwiftUI may reuse the Settings window across opens.
-                nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { _ in
-                    MainActor.assumeIsolated { SettingsActivation.acquire("settings") }
-                },
-            ]
-        }
-        w.titlebarAppearsTransparent = true
-        w.titleVisibility = .hidden
-        w.title = "Silicon Mode Settings"
-        w.styleMask.insert(.fullSizeContentView)
-        w.isMovableByWindowBackground = true
-        w.backgroundColor = NSColor(SettingsTint.windowBG)
-        SettingsActivation.acquire("settings")
+    static func open(_ pane: SettingsPane? = nil) {
+        MainWindowController.shared.show(pane)
     }
 }
 

@@ -122,7 +122,8 @@ final class CountdownBlurNSView: NSView {
             f.setValue("variableBlur", forKey: "name")
             f.setValue(visible ? maxRadius : 0, forKey: "inputRadius")
             f.setValue(Self.radiusMaskImage, forKey: "inputMaskImage")
-            f.setValue(true, forKey: "inputNormalizeEdges")
+            // Normalized edges wash the whole strip out evenly instead of grading it.
+            f.setValue(false, forKey: "inputNormalizeEdges")
             backdrop.filters = [f]
             // Drop the material's tint/luminosity layers: we paint our own tint in SwiftUI.
             backdrop.superlayer?.sublayers?.filter { $0 !== backdrop }.forEach { $0.isHidden = true }
@@ -178,11 +179,13 @@ final class CountdownBlurNSView: NSView {
         return m
     }
 
-    /// Radius mask: full radius through the top ~30%, easing to zero at the bottom edge.
+    /// Radius mask: full radius through the top ~30% (menu bar and notch included), easing to
+    /// zero at the bottom edge. The filter reads the mask bottom-up (row 0 is the layer's bottom
+    /// edge), so row 0 here is the strip's bottom.
     private static func radiusMask(height h: Int = 256) -> CGImage? {
         var px = [UInt8](repeating: 0, count: h * 4)
         for y in 0..<h {
-            let t = Double(y) / Double(h - 1)
+            let t = 1 - Double(y) / Double(h - 1)
             let k = min(max((t - 0.28) / 0.72, 0), 1)
             let a = 1 - k * k * (3 - 2 * k)
             px[y * 4 + 3] = UInt8((a * 255).rounded())

@@ -46,8 +46,8 @@ struct SiliconModeRootView: View {
 
 // MARK: - Face stage (bottom host)
 
-/// The opaque base and the face inside the enter shockwave; scaled, blurred and dimmed behind the
-/// unlock sheet. Purely visual (never hit-tested).
+/// The opaque base and the face, blur-faded in and out (`OverlayMotion`); scaled, blurred and
+/// dimmed behind the unlock sheet. Purely visual (never hit-tested).
 ///
 /// The face pauses while it can't be seen properly (under the unlock sheet, during panic) and
 /// runs at about 10 frames per second on displays other than the focused or built-in one.
@@ -62,38 +62,49 @@ struct SiliconModeFaceStage: View {
         if let p = preview { return p.unlockPresented }
         return model.unlockPresented && stage.focusedDisplay == displayID
     }
-    private var exiting: Bool { stage.exitStartedAt != nil }
-    /// The opaque base is up once the entrance wave has passed and until the exit starts.
-    private var baseOpaque: Bool { preview != nil || (stage.enterStartedAt != nil && !exiting) }
     private var panicStyleID: String { preview?.panicStyleID ?? model.settings.panicStyleID }
 
     var body: some View {
-        ZStack {
-            // Opaque base: nothing behind Silicon Mode (the user's desktop) may ever show through,
-            // even while the face is scaled/blurred behind the unlock sheet. Fades in with the
-            // entrance and out with the exit so the shockwave still reveals the face.
-            Theme.Night.background
-                .opacity(baseOpaque ? 1 : 0)
-                .animation(baseOpaque ? .easeIn(duration: 0.35).delay(1.0) : .easeOut(duration: 0.2), value: baseOpaque)
-
-            EnterTransition(enterStartedAt: stage.enterStartedAt, exitStartedAt: stage.exitStartedAt) {
-                ZStack {
-                    Theme.Night.background
-                    SiliconModeFaceLayer(preview: preview,
-                                         paused: unlockHere || isPanicking,
-                                         fullRate: preview != nil || stage.focusedDisplay == displayID
-                                            || CGDisplayIsBuiltin(displayID) != 0)
+        Group {
+            if stage.layerTransitions {
+                // Live: the window's own layers hold the night base and run the blur-fade
+                // (OverlayPanel.playEntrance), so this is just the face.
+                face
+            } else {
+                OverlayFade(enterStartedAt: stage.enterStartedAt, exitStartedAt: stage.exitStartedAt) { f in
+                    ZStack {
+                        // Opaque base: once in, nothing behind Silicon Mode may show through.
+                        Theme.Night.background
+                            .opacity(f.base)
+                        face
+                            // One layer from here on, so the fade never shows the face's own
+                            // parts through each other.
+                            .compositingGroup()
+                            .scaleEffect(f.scale)
+                            // Faces paint their own opaque background: clamp at the edges so the
+                            // blur never fades them into a visible frame.
+                            .blur(radius: f.blur, opaque: true)
+                            .opacity(f.face)
+                    }
                 }
-                .modifier(PanicGlitchEffect(active: isPanicking && panicStyleID == "glitch"))
             }
-            .scaleEffect(unlockHere ? 0.965 : 1)
-            .blur(radius: unlockHere ? 22 : 0)
-            .overlay { Color.black.opacity(unlockHere ? 0.42 : 0) }
-            .animation(.spring(duration: 0.5, bounce: 0.1), value: unlockHere)
         }
         .allowsHitTesting(false)
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
+    }
+
+    /// The face; scaled, blurred and dimmed behind the unlock sheet.
+    private var face: some View {
+        SiliconModeFaceLayer(preview: preview,
+                             paused: unlockHere || isPanicking,
+                             fullRate: preview != nil || stage.focusedDisplay == displayID
+                                || CGDisplayIsBuiltin(displayID) != 0)
+            .modifier(PanicGlitchEffect(active: isPanicking && panicStyleID == "glitch"))
+            .scaleEffect(unlockHere ? 0.965 : 1)
+            .blur(radius: unlockHere ? 22 : 0)
+            .overlay { Color.black.opacity(unlockHere ? 0.42 : 0) }
+            .animation(.spring(duration: 0.5, bounce: 0.1), value: unlockHere)
     }
 }
 
@@ -170,8 +181,10 @@ struct SiliconModeTopStage: View {
         self.stage = stage
         self.displayID = displayID
         self.preview = preview
-        let settledAlready = stage.enterStartedAt.map { Date().timeIntervalSince($0) > 0.9 } ?? true
-        _chromeIn = State(initialValue: settledAlready && stage.exitStartedAt == nil)
+        // Live, the window's layers bring the chrome in (OverlayPanel.playEntrance).
+        let settledAlready = stage.layerTransitions
+            || (stage.enterStartedAt.map { Date().timeIntervalSince($0) > OverlayMotion.chromeDelay + 0.3 } ?? true)
+        _chromeIn = State(initialValue: settledAlready && (stage.exitStartedAt == nil || stage.layerTransitions))
     }
 
     private var isPanicking: Bool { preview?.panicking ?? model.isPanicking }
@@ -180,7 +193,7 @@ struct SiliconModeTopStage: View {
         return model.unlockPresented && stage.focusedDisplay == displayID
     }
     private var exiting: Bool { stage.exitStartedAt != nil }
-    private var chromeShown: Bool { chromeIn && !exiting }
+    private var chromeShown: Bool { chromeIn && (!exiting || stage.layerTransitions) }
 
     private struct EntryKey: Equatable { var enter: Date?; var exit: Date? }
 
@@ -189,7 +202,7 @@ struct SiliconModeTopStage: View {
             // Furniture and chrome rise in with the entrance. Under the unlock sheet they only fade
             // (no blur or offset over full-screen glass while the sheet springs in).
             FurnitureLayer(preview: preview?.furnitureSource, stage: preview == nil ? stage : nil)
-                .modifier(OverlayChromeEntrance(shown: chromeShown, rise: 18))
+                .modifier(OverlayChromeEntrance(shown: chromeShown, rise: 10))
                 .opacity(unlockHere ? 0 : 1)
                 .allowsHitTesting(!unlockHere)
 
@@ -218,7 +231,7 @@ struct SiliconModeTopStage: View {
         }
         .animation(.easeOut(duration: 0.22), value: unlockHere)
         .animation(.easeOut(duration: 0.25), value: isPanicking)
-        .animation(.spring(duration: 0.6, bounce: 0.18), value: chromeIn)
+        .animation(.timingCurve(0.16, 1, 0.3, 1, duration: OverlayMotion.chromeDuration), value: chromeIn)
         .animation(.easeIn(duration: 0.18), value: exiting)
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
@@ -231,11 +244,11 @@ struct SiliconModeTopStage: View {
     }
 
     private func runChromeEntrance() async {
-        guard preview == nil else { return }
+        guard preview == nil, !stage.layerTransitions else { return }
         if stage.exitStartedAt != nil { return }
         guard let e = stage.enterStartedAt else { chromeIn = true; return }
-        // Chrome arrives as the shockwave passes the lower half of the screen.
-        let delay = (reduceMotion ? 0.25 : 0.62) - Date().timeIntervalSince(e)
+        // Chrome arrives once the face has mostly resolved.
+        let delay = (reduceMotion ? 0.25 : OverlayMotion.chromeDelay) - Date().timeIntervalSince(e)
         if delay > 0 {
             chromeIn = false
             try? await Task.sleep(for: .seconds(delay))

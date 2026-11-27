@@ -30,7 +30,6 @@ final class MenuBarController: NSObject {
     /// True while one of our NSMenus is tracking (it runs its own event loop).
     private var menuTracking = false
     /// Captured from the card's environment so ⌘, and the gear can open the Settings scene.
-    var openSettingsAction: OpenSettingsAction?
 
     var isShown: Bool { presentation.isPresented }
 
@@ -182,29 +181,10 @@ final class MenuBarController: NSObject {
 
     // MARK: Actions used by the card
 
-    /// Opens the Settings scene in front (we're an accessory app, so bring it forward ourselves).
+    /// Opens the main window in front.
     func openSettings() {
         hide()
-        // Accessory app: cooperative activation is ignored here (docs/research/macos-ui.md §0).
-        NSApp.activate(ignoringOtherApps: true)
-        openSettingsAction?()
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(openSettingsAction == nil ? 0 : 150))
-            // Fallback: the app menu's "Settings…" item that the Settings scene installs.
-            if Self.settingsWindow == nil, let appMenu = NSApp.mainMenu?.items.first?.submenu,
-               let i = appMenu.items.firstIndex(where: { $0.keyEquivalent == "," && $0.keyEquivalentModifierMask.contains(.command) }) {
-                appMenu.performActionForItem(at: i)
-                try? await Task.sleep(for: .milliseconds(150))
-            }
-            if let w = Self.settingsWindow {
-                w.orderFrontRegardless()
-                w.makeKey()
-            }
-        }
-    }
-
-    private static var settingsWindow: NSWindow? {
-        NSApp.windows.first { ($0.identifier?.rawValue ?? "").localizedCaseInsensitiveContains("settings") && $0.isVisible }
+        MainWindowController.shared.show()
     }
 
     /// Pops an NSMenu under a rect given in the card's (top-left origin) coordinates.

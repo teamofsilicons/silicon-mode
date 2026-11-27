@@ -76,6 +76,9 @@ final class AppModel {
     private(set) var modeAgents: [AgentSession] = []
     /// What the face draws: `modeAgents` (stored on its own so the face can observe just this).
     private(set) var faceSessions: [AgentSession] = []
+    /// While Silicon Mode fades out, the face keeps the agents it showed: at exit `modeAgents` goes
+    /// back to every session, and the face would grow new agents on its way out.
+    @ObservationIgnored private var faceSessionsHeld = false
     /// Every log line of each agent since entry (log tabs). Read it after reading `logRevision`,
     /// which is what views observe; the book itself is not observable (it changes every refresh).
     @ObservationIgnored private(set) var logBook = ModeLogBook()
@@ -364,6 +367,7 @@ final class AppModel {
                 overlay.hideCountdown()
                 if settings.uiSoundsEnabled { sounds.play(.dismiss) }
             case .entered:
+                faceSessionsHeld = false
                 enteredAt = Date()
                 // The ledger starts from what runs right now (those count as seen running).
                 ledger = ModeAgentLedger(enteredAt: enteredAt ?? Date())
@@ -381,6 +385,7 @@ final class AppModel {
                 LockMarker.write()
                 LockGuard.start()
             case .exited:
+                faceSessionsHeld = true
                 LockMarker.clear()
                 LockGuard.stop()
                 pinRequiredForSession = false
@@ -504,7 +509,14 @@ final class AppModel {
             shown = snapshot.sessions
         }
         if modeAgents != shown { modeAgents = shown }
-        if faceSessions != shown { faceSessions = shown }
+        if !faceSessionsHeld, faceSessions != shown { faceSessions = shown }
+    }
+
+    /// The overlay finished its exit (its windows are gone): the face may follow the model again.
+    func faceExitFinished() {
+        guard faceSessionsHeld else { return }
+        faceSessionsHeld = false
+        republishAgents()
     }
 
     /// QA only (`--debug-control`, `demo=question|permission|off`): demo agents shown with the real
