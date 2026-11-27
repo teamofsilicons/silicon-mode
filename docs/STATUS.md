@@ -1,4 +1,4 @@
-# Silicon Mode — status (2026-11-27, Mac app 0.1.2)
+# Silicon Mode — status (2026-11-27, Mac app 0.1.3)
 
 ## What exists
 
@@ -23,7 +23,8 @@
 
 ## Verified on this Mac (real screen, not mocks)
 
-- Lid angle read live (IOKit HID, 30 Hz); countdown with real progressive blur; entry shockwave; faces.
+- Lid angle read live (IOKit HID, 30 Hz); countdown with real progressive blur over the menu bar and notch;
+  blur-fade entry and exit; faces.
 - Grace minute (turn off without PIN) → lock; turn-off refused when locked; wrong PIN counted; right PIN
   through the keypad exits; auto-entry disarmed until the lid is back up for a minute.
 - Kiosk: menu bar + Dock hidden, ⌘-Tab blocked; another app stealing focus is reverted within ~0.3 s;
@@ -35,6 +36,27 @@
 - Cloud sync: device, status, sessions, tail events, questions, usage buckets.
 - Adversarial review: 42 confirmed findings across lock, hooks, providers, sync, crash-safety, web and
   mobile — all fixed (see `docs/review/*.md`); 141 Kit unit tests, web 27 tests.
+
+## 0.1.3 (Mac)
+
+- **Entering and leaving** is a plain blur-fade: the desktop blurs, the night base fades in over
+  it, the face resolves out of a soft blur, then the furniture rises in; leaving plays it back. It
+  runs on Core Animation, so work on the main thread at entry can't make it skip (checked with
+  screen recordings: steady 16–25 ms frames). The NameDrop shockwave and implode shaders are gone,
+  and with them the ghosting. Leaving no longer adds every other session to the face as it fades.
+- **Countdown**: just the number, changing once a second with a soft blur crossfade (no ring,
+  ripple or bounce). The overlay windows were at the floating level (3), under the menu bar, because
+  `isFloatingPanel` was set after the level; they are now where they were meant to be (countdown
+  999, Silicon Mode 1000), so the blur covers the menu bar and notch. The strip's variable blur also
+  stays in place now (growing the strip from nothing rebuilt its layers and dropped it).
+- **A real Mac window**: resizable main window with a native sidebar and toolbar (status and
+  "Enter Silicon Mode"), a full menu bar (About, Settings ⌘,, panes on ⌘1…⌘8, a Mode menu with
+  enter/pause/toggles, Window and Help items), Dock menu and reopen.
+- **Trigger angle**: drag the threshold line on the gauge (snaps to whole degrees, light pull to
+  multiples of 5, haptics, arrow keys), or "Set with your lid…": hold the Mac where it should
+  start and it captures the angle once the lid is still. Auto-entry is held off while capturing.
+- **Face furniture editor**: drag pieces in the preview to another corner or position (they snap,
+  with a drop gap); click an empty corner (or the + at a stack's end) to choose what goes there.
 
 ## 0.1.2 (Mac)
 
