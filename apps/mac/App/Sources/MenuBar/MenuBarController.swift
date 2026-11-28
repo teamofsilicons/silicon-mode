@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import os
 import SiliconModeKit
 
 /// Owns the NSStatusItem (icon = `MenuBarIconDriver`, the live `MenuBarIcon` glyph) and the
@@ -29,6 +30,9 @@ final class MenuBarController: NSObject {
     private var clickedStatusFrame: NSRect?
     /// True while one of our NSMenus is tracking (it runs its own event loop).
     private var menuTracking = false
+    /// When a mouse-down outside the card last closed it (system uptime, like `NSEvent.timestamp`).
+    private var outsideClickClosedAt: TimeInterval?
+    private static let log = Logger(subsystem: "ai.tos.mode", category: "menubar")
     /// Captured from the card's environment so ⌘, and the gear can open the Settings scene.
 
     var isShown: Bool { presentation.isPresented }
@@ -65,8 +69,25 @@ final class MenuBarController: NSObject {
     }
 
     @objc private func statusItemPressed(_ sender: NSStatusBarButton) {
+        // On macOS 27 the menu bar draws status items itself, so the event monitors can't tell a
+        // click on the icon from any other click: they close the card on its mouse-down, and
+        // this action then came in and opened it again. A click that has just closed the card
+        // only closes it.
+        if let t = outsideClickClosedAt, ProcessInfo.processInfo.systemUptime - t < 0.35 {
+            outsideClickClosedAt = nil
+            Self.log.debug("status item: the same click already closed the card")
+            return
+        }
+        Self.log.debug("status item: toggle (shown \(self.presentation.isPresented))")
         clickedStatusFrame = sender.window?.frame
         toggle()
+    }
+
+    /// A mouse-down outside the card (another app, another of our windows, the card's margin).
+    private func closeForOutsideClick(_ source: String) {
+        Self.log.debug("closed by an outside click (\(source, privacy: .public))")
+        outsideClickClosedAt = ProcessInfo.processInfo.systemUptime
+        hide()
     }
 
     // MARK: Show / hide
@@ -260,7 +281,7 @@ final class MenuBarController: NSObject {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, !self.menuTracking else { return }
-                self.hide()
+                self.closeForOutsideClick("global")
             }
         }) { eventMonitors.append(m) }
 
@@ -304,14 +325,14 @@ final class MenuBarController: NSObject {
                 let h = hosting?.bounds.height ?? panel.frame.height
                 let p = CGPoint(x: event.locationInWindow.x, y: h - event.locationInWindow.y)
                 if presentation.cardFrame != .zero, !presentation.cardFrame.insetBy(dx: -2, dy: -2).contains(p) {
-                    hide()
+                    closeForOutsideClick("panel margin")
                     return true
                 }
                 return false
             }
             // The status item toggles itself; any other window of ours (Settings…) closes the card.
             if let w = event.window, w === item?.button?.window { return false }
-            hide()
+            closeForOutsideClick("local, window \(event.window.map { String(describing: type(of: $0)) } ?? "none")")
             return false
         case .keyDown:
             return handleKey(event)
