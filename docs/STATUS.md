@@ -1,4 +1,4 @@
-# Silicon Mode — status (2026-11-27, Mac app 0.1.3)
+# Silicon Mode — status (2026-11-28, Mac app 0.1.4)
 
 ## What exists
 
@@ -36,6 +36,14 @@
 - Cloud sync: device, status, sessions, tail events, questions, usage buckets.
 - Adversarial review: 42 confirmed findings across lock, hooks, providers, sync, crash-safety, web and
   mobile — all fixed (see `docs/review/*.md`); 141 Kit unit tests, web 27 tests.
+
+## 0.1.4 (Mac)
+
+- **Touch ID unlock starts on its own.** With "Open the lock screen on Touch ID" on, the card opened
+  on "Touch ID paused" and needed a click on the ring first: an embedded Touch ID evaluation started
+  while the card is still fading in is cancelled by the system within ~30 ms (-4). Each attempt now
+  waits for the card (or the PIN → Touch ID switch) to settle, and one the system cancels right away
+  is re-armed automatically. Verified with a real finger.
 
 ## 0.1.3 (Mac)
 
@@ -90,7 +98,6 @@
 
 ## Not verified / known gaps
 
-- **Touch ID with a real finger** (needs a person; code path follows Apple's embedded `LAAuthenticationView`).
 - **⌃⌥S** physically pressed (registered via Carbon; no Accessibility permission needed).
 - **Real browser sign-in** on Mac/web/phones (needs a person at Silicon Accounts); every hop after the
   browser was tested with a real si:tos session.
@@ -99,7 +106,7 @@
   the face) is on branch `r3-face` but not merged: it needs another review pass.
 - **Phase 2 polish** not done on purpose: faces moving around the furniture (on `r3-face`), finer
   visual details. Getting everything working reliably came first.
-- The countdown digits and Touch ID were not seen live with a real lid tilt / finger in this round.
+- The countdown digits were not seen live with a real lid tilt in this round.
 - **Push notifications** to phones (needs APNs/FCM + a cell trigger) — not built.
 - **Marketplace faces / local silicon** — out of scope for tonight (spec says later).
 - Android release signing and iOS App Store upload are not configured.
