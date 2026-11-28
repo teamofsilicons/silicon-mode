@@ -24,7 +24,7 @@ when silicon mode is active for more than 1min, then it does not turn off by its
 there should also be a way to enter with fingerprint, but that is for if the person does not remember the 6 digit code. this is also setup during the intitial setup of the app.
 
 i am doing this because i think as an app, asking for fingerprint seems more sketchy as a mac pop up shows up. but if it can be done without the pop up, happy to have fingerprint as the default way.
-
+«
 ## Silicon Mode Faces
 It can know which all agents are running & how many. Then it can use that to make cool faces. Say a pacman style eating, or a 3d animation, or claude code mascot using computer, or anything really...
 
