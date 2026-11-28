@@ -416,6 +416,7 @@ struct UnlockView: View {
 ```
 
 - **Start evaluation only while the view is on screen.** Re-arm on `didChangeScreenParameters` and after a wake.
+- **…and fully visible.** If evaluation starts while the view or one of its ancestors is still fading in (for example a SwiftUI opacity/blur/scale entrance), the system cancels it within about 30 ms with `-4` `systemCancel`. The same attempt started after the entrance has settled waits for a finger. (Probed 2026-11-28 with a 0.6 s spring fade-in: started at once, cancelled after 0.03 s; started at 0.6 s, still waiting after 3 s.) The unlock card waits for its entrance to settle and re-arms an attempt the system cancels right away.
 - **Lockout.** After 5 bad fingers the error is `biometryLockout`; Touch ID then needs the account password, which we don't want, so switch to the PIN.
 - **Enrollment changes.** Persist `la.domainState.biometry.stateHash` (macOS 15+; it replaces the deprecated `evaluatedPolicyDomainState`) at setup, and disable Touch ID unlock if the hash changes, because someone may have added a finger.
 - **Fallback.** Keep the PIN path always visible. A PIN-free "fingerprint only" mode should require `canEvaluatePolicy` to be true.

@@ -8,7 +8,13 @@ import LocalAuthenticationEmbeddedUI
 /// `LAAuthenticationView` pairs with one `LAContext`; while it is in a window, evaluating that
 /// context shows the fingerprint prompt *inside the view* instead of the system sheet. So each
 /// attempt gets a fresh context + a fresh view, and evaluation starts only once the view is
-/// actually attached to a window. Any error other than a bad finger falls back to the PIN.
+/// attached to a window *and fully visible*. Any error other than a bad finger falls back to the PIN.
+///
+/// Visibility matters: an evaluation started while the view (or any ancestor) is still fading in
+/// is cancelled by the system within ~30 ms (-4, probed 2026-11-28), which left the card on
+/// "Touch ID paused" until the user clicked the ring. So `arm(settle:)` takes how long the well's
+/// surroundings are still animating in, and an attempt the system cancels right after it started
+/// is re-armed on its own a few times before it is shown as paused.
 @MainActor @Observable
 final class UnlockBiometrics {
     enum Outcome: Equatable {
@@ -30,7 +36,17 @@ final class UnlockBiometrics {
     private(set) var isEvaluating = false
     var onOutcome: ((Outcome) -> Void)?
 
+    /// A cancel this soon after the attempt started means the view wasn't fully on screen yet.
+    private static let quickCancel: TimeInterval = 1.5
+    /// Quick cancels re-armed automatically (per user-started attempt) before showing "paused".
+    private static let maxAutoRearms = 3
+
     private var evaluatedGeneration = -1
+    private var attachedGeneration = -1
+    /// The current attempt doesn't evaluate before this (its well is still animating in).
+    private var notBefore = Date.distantPast
+    private var startedAt: Date?
+    private var autoRearms = 0
 
     /// Cheap: call `refresh()` once the unlock UI is on screen.
     init(assumeAvailable: Bool = false) {
@@ -42,18 +58,42 @@ final class UnlockBiometrics {
         isAvailable = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
     }
 
-    /// Prepare a new attempt (new context → new embedded view).
-    func arm() {
+    /// Prepare a new attempt (new context → new embedded view). `settle`: how long the well is
+    /// still animating in (card entrance, mode switch, fade back from paused); evaluation waits
+    /// that long after the view is attached.
+    func arm(settle: TimeInterval = 0) {
+        autoRearms = 0
+        prepare(settle: settle)
+    }
+
+    private func prepare(settle: TimeInterval) {
         cancel()
         context = LAContext()
         generation += 1
+        notBefore = Date().addingTimeInterval(settle)
     }
 
     /// Called by the well once its `LAAuthenticationView` is in a window.
     func viewAttached(generation g: Int) {
-        guard g == generation, evaluatedGeneration != g, isAvailable else { return }
+        guard g == generation else { return }
+        attachedGeneration = g
+        startWhenSettled()
+    }
+
+    private func startWhenSettled() {
+        let g = generation
+        guard attachedGeneration == g, evaluatedGeneration != g, isAvailable else { return }
+        let wait = notBefore.timeIntervalSinceNow
+        if wait > 0 {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(wait))
+                self?.startWhenSettled()
+            }
+            return
+        }
         evaluatedGeneration = g
         isEvaluating = true
+        startedAt = Date()
         let ctx = context
         ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
                            localizedReason: "unlock Silicon Mode") { [weak self] ok, error in
@@ -63,10 +103,12 @@ final class UnlockBiometrics {
         }
     }
 
-    /// Stop the current attempt (mode switch, unlock dismissed).
+    /// Stop the current attempt (mode switch, unlock dismissed). An attempt still waiting to
+    /// settle never starts.
     func cancel() {
         if isEvaluating { context.invalidate() }
         isEvaluating = false
+        evaluatedGeneration = generation
     }
 
     private func finish(generation g: Int, ok: Bool, code: LAError.Code?, raw: Int?) {
@@ -76,9 +118,21 @@ final class UnlockBiometrics {
         if ok { onOutcome?(.success); return }
         switch code {
         case .authenticationFailed?:
-            arm()
+            // The new well swaps in under the error's animation: let it land before evaluating.
+            arm(settle: 0.3)
             onOutcome?(.retry)
         case .systemCancel?, .appCancel?, .userCancel?:
+            let ranFor = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+            if ranFor < Self.quickCancel, autoRearms < Self.maxAutoRearms {
+                // Cancelled at once: the view wasn't fully visible yet. Do what a click on the
+                // ring would: a fresh attempt, a moment later.
+                autoRearms += 1
+                NSLog("SiliconMode: Touch ID cancelled after %.2f s (code %ld); re-arming (%ld)",
+                      ranFor, raw ?? 0, autoRearms)
+                prepare(settle: 0.3)
+                return
+            }
+            NSLog("SiliconMode: Touch ID paused (code %ld after %.2f s)", raw ?? 0, ranFor)
             onOutcome?(.paused)
         case .biometryLockout?:
             isAvailable = false

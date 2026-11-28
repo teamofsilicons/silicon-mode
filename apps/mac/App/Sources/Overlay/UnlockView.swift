@@ -65,6 +65,8 @@ struct UnlockView: View {
     }
 
     private static let length = PinVault.pinLength
+    /// A paused well is dimmed; leaving pause fades it back over `Theme.Motion.moderate`.
+    private static let pausedFadeSettle: TimeInterval = 0.25
     private static let cardShape = RoundedRectangle(cornerRadius: 36, style: .continuous)
 
     var body: some View {
@@ -266,7 +268,7 @@ struct UnlockView: View {
                     .frame(width: UnlockTouchIDWell.side, height: UnlockTouchIDWell.side)
                 }
             } onTap: {
-                if status == .touchIDPaused { bio.arm(); status = .idle }
+                if status == .touchIDPaused { bio.arm(settle: Self.pausedFadeSettle); status = .idle }
             }
             .keyframeAnimator(initialValue: 0.0, trigger: shake) { v, x in
                 v.offset(x: x)
@@ -408,7 +410,8 @@ struct UnlockView: View {
         bio.onOutcome = { outcome in handleBiometrics(outcome) }
         if model.settings.touchIDFirst, bio.isAvailable {
             mode = .touchID
-            bio.arm()
+            // Touch ID starts once the card has popped in (see `UnlockBiometrics`).
+            bio.arm(settle: reduceMotion ? 0.25 : 0.65)
         }
         withAnimation(reduceMotion ? .easeOut(duration: 0.18) : Theme.Motion.expressive) { appeared = true }
     }
@@ -417,7 +420,8 @@ struct UnlockView: View {
         guard m != mode, status != .success else { return }
         if m == .touchID {
             guard bio.isAvailable else { return }
-            bio.arm()
+            // The Touch ID body fades + scales in over `Theme.Motion.slow`.
+            bio.arm(settle: 0.4)
         } else {
             bio.cancel()
         }
@@ -565,7 +569,7 @@ struct UnlockView: View {
             self.press(.delete, fromKeyboard: true); return .handled
         }
         if press.key == .return {
-            if mode == .touchID, status == .touchIDPaused { bio.arm(); status = .idle }
+            if mode == .touchID, status == .touchIDPaused { bio.arm(settle: Self.pausedFadeSettle); status = .idle }
             return .handled
         }
         if let ch = press.characters.first, let d = ch.wholeNumberValue, ch.isASCII {
