@@ -1,4 +1,4 @@
-# Silicon Mode — status (2026-11-28, Mac app 0.1.4)
+# Silicon Mode — status (2026-11-28, Mac app 0.1.5)
 
 ## What exists
 
@@ -36,6 +36,13 @@
 - Cloud sync: device, status, sessions, tail events, questions, usage buckets.
 - Adversarial review: 42 confirmed findings across lock, hooks, providers, sync, crash-safety, web and
   mobile — all fixed (see `docs/review/*.md`); 141 Kit unit tests, web 27 tests.
+
+## 0.1.5 (Mac)
+
+- **Menu bar icon toggles again.** A second click on the icon left the card open: on macOS 27 the
+  menu bar draws status items itself, so the outside-click monitors closed the card on the icon's
+  mouse-down and the icon's action then reopened it. That action now counts as the same click.
+  Verified by clicking the icon on this Mac.
 
 ## 0.1.4 (Mac)
 

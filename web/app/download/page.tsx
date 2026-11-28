@@ -8,9 +8,9 @@ import { LogoMark } from "@/components/Logo";
 import styles from "./download.module.css";
 
 // Filled in by the release (scripts/release-mac.sh → web/public/downloads/).
-const VERSION = "0.1.4";
+const VERSION = "0.1.5";
 const FILE = `/downloads/SiliconMode-${VERSION}.dmg`;
-const SHA256 = "e594c01b803905039035b50cc1c6b0af298511e9405f045c45a0ae983cce1c1d";
+const SHA256 = "63194f1a74f1333be364c29a77ace6565de29b46a96a0bc80b252126e2748ee7";
 const SIZE = "14 MB";
 
 export const metadata: Metadata = {
